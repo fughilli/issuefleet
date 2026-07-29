@@ -139,8 +139,13 @@ def cmd_status(cfg: Config) -> int:
         mb = Mailbox(agent_dir / "mailbox")
         alive = "alive" if runner.alive(rec) else "DEAD"
         pr = f"PR #{rec.pr_number}" if rec.pr_number else "no PR"
+        # Turn-log mtime distinguishes "mid-turn, streaming" from "wedged".
+        newest = max(
+            (f.stat().st_mtime for f in (agent_dir / "logs").glob("turn-*")), default=None
+        )
+        activity = f"last activity {int(time.time() - newest)}s ago" if newest else "no turns yet"
         print(f"{rec.issue_key} [{rec.project}] {rec.phase}/{alive} — {rec.issue_title}")
-        print(f"    agent: {turn_info}; {pr}; restarts {rec.restarts}")
+        print(f"    agent: {turn_info}; {pr}; restarts {rec.restarts}; {activity}")
         print(
             f"    branch {rec.branch}; outbox pending {len(mb.pending_outbox())}, "
             f"inbox pending {len(mb.pending_inbox())}"

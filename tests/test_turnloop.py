@@ -1,0 +1,124 @@
+"""Turn-loop plumbing: live stream-json summarization and run_claude wiring,
+exercised against a stub `claude` on PATH."""
+
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+
+from issuefleet.agent_runtime import turnloop, turns
+
+
+class SummarizeEventTest(unittest.TestCase):
+    def s(self, obj):
+        return turnloop.summarize_event(json.dumps(obj))
+
+    def test_init_event(self):
+        out = self.s({"type": "system", "subtype": "init", "session_id": "abcd1234ef", "model": "m"})
+        self.assertIn("abcd1234", out)
+        self.assertIn("model=m", out)
+
+    def test_assistant_text_and_tool_use(self):
+        out = self.s(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "I will read  the\nconfig first."},
+                        {"type": "tool_use", "name": "Bash", "input": {"command": "ls -la"}},
+                    ]
+                },
+            }
+        )
+        self.assertIn("I will read the config first.", out)
+        self.assertIn("→ Bash ls -la", out)
+
+    def test_long_text_truncated(self):
+        out = self.s(
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "x" * 500}]}}
+        )
+        self.assertLess(len(out), 250)
+
+    def test_result_event_ok_and_error(self):
+        ok = self.s({"type": "result", "duration_ms": 12000, "total_cost_usd": 0.5})
+        self.assertIn("✓ turn complete", ok)
+        self.assertIn("12s", ok)
+        self.assertIn("$0.50", ok)
+        err = self.s({"type": "result", "is_error": True})
+        self.assertIn("✗ turn errored", err)
+
+    def test_tool_results_are_silenced(self):
+        self.assertIsNone(self.s({"type": "user", "message": {"content": []}}))
+
+    def test_non_json_passes_through_for_diagnosis(self):
+        self.assertEqual(
+            turnloop.summarize_event("Error: cannot connect to Anthropic API\n"),
+            "Error: cannot connect to Anthropic API",
+        )
+        self.assertIsNone(turnloop.summarize_event("   \n"))
+
+
+class RunClaudeTest(unittest.TestCase):
+    """run_claude with a stub `claude` script: argv recording, prompt via
+    stdin, per-line log capture, exit-code passthrough."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.workspace = root / "ws"
+        self.agent_dir = self.workspace / ".agent"
+        self.agent_dir.mkdir(parents=True)
+        self.bin = root / "bin"
+        self.bin.mkdir()
+        self._old_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{self.bin}:{self._old_path}"
+
+    def tearDown(self):
+        os.environ["PATH"] = self._old_path
+        self.tmp.cleanup()
+
+    def stub_claude(self, exit_code=0):
+        stub = self.bin / "claude"
+        stub.write_text(
+            "#!/bin/sh\n"
+            f'printf \'%s\\n\' "$@" > "{self.agent_dir}/argv.txt"\n'
+            f'cat > "{self.agent_dir}/prompt.txt"\n'
+            'echo \'{"type":"system","subtype":"init","session_id":"s1","model":"m"}\'\n'
+            'echo \'{"type":"result","duration_ms":1000}\'\n'
+            f"exit {exit_code}\n"
+        )
+        stub.chmod(0o755)
+
+    def state(self, turns_taken=0):
+        return turns.TurnState(session_uuid="u-1", turns_taken=turns_taken)
+
+    def test_first_turn_streams_to_jsonl_log(self):
+        self.stub_claude()
+        rc = turnloop.run_claude("do the thing", self.state(), self.agent_dir)
+        self.assertEqual(rc, 0)
+        argv = (self.agent_dir / "argv.txt").read_text().split("\n")
+        self.assertIn("--session-id", argv)
+        self.assertIn("stream-json", argv)
+        self.assertNotIn("--resume", argv)
+        self.assertEqual((self.agent_dir / "prompt.txt").read_text(), "do the thing")
+        log = (self.agent_dir / "logs" / "turn-0001.jsonl").read_text().strip().split("\n")
+        self.assertEqual(len(log), 2)
+        self.assertIn('"init"', log[0])
+
+    def test_later_turns_resume_the_session(self):
+        self.stub_claude()
+        rc = turnloop.run_claude("continue", self.state(turns_taken=3), self.agent_dir)
+        self.assertEqual(rc, 0)
+        argv = (self.agent_dir / "argv.txt").read_text().split("\n")
+        self.assertIn("--resume", argv)
+        self.assertNotIn("--session-id", argv)
+        self.assertTrue((self.agent_dir / "logs" / "turn-0004.jsonl").is_file())
+
+    def test_claude_failure_code_passes_through(self):
+        self.stub_claude(exit_code=3)
+        self.assertEqual(turnloop.run_claude("x", self.state(), self.agent_dir), 3)
+
+
+if __name__ == "__main__":
+    unittest.main()

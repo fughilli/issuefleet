@@ -156,6 +156,17 @@ bin/issuefleet once              # single reconcile tick (cron-friendly)
 bin/issuefleet once --dry-run    # print every action a tick would take; mutate nothing
 ```
 
+Two log layers per worker:
+
+- **Live activity** (`attach` / `logs -f`): the turn loop streams each turn
+  as `claude -p --output-format stream-json` and prints one compact line per
+  event to its pane — assistant text, `→ ToolName args`, `✓ turn complete
+  42s $0.31`. This is the "is it stuck?" view; `status` also shows a
+  last-activity age from the turn-log mtimes.
+- **Raw transcripts**: the full stream-json of turn N is kept at
+  `<worktree>/.agent/logs/turn-NNNN.jsonl` and archived host-side at
+  teardown.
+
 Steering happens in Linear: comment on a claimed issue and the comment is
 injected into the agent's next turn. Remove the label (or close the issue)
 to un-claim. Stopping the daemon never stops the agents — they live in

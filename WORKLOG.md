@@ -40,7 +40,15 @@ end-to-end flow — `docs/SMOKE_TEST.md` is the step-by-step procedure.
 ## Next up
 
 1. Resume the smoke test on the operator's Mac. Dispatch works live
-   (claiming, provisioning, tmux runner). The skill-approval wedge was
+   (claiming, provisioning, tmux runner, container launch). Observability
+   fix 2026-07-29: turns now stream (`stream-json` summarized live into the
+   tmux pane; raw per-turn `.jsonl` kept) — the earlier buffered-`json`
+   design showed nothing until a turn finished and read as a hang. The
+   in-flight worker predates this: recycle it (`issuefleet stop <KEY>` then
+   `once`) and watch `issuefleet logs <KEY> -f`. NOTE: `claude -p
+   --output-format stream-json --verbose` is assumed per the brief §5.2;
+   if the container's claude CLI rejects that combo, check
+   `.agent/logs/turn-0001.jsonl` + pane for the CLI's error text. The skill-approval wedge was
    root-caused: the launcher keyed skill choices per workspace *path* in
    its user config dir, so every worktree re-prompted — the operator fixed
    claude-container itself (choices now keyed on the resolved main working

@@ -16,6 +16,7 @@ import argparse
 import json
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -26,10 +27,52 @@ from issuefleet.mailbox import Mailbox
 MAX_CLAUDE_RETRIES = 3
 
 
+def summarize_event(line: str) -> str | None:
+    """One compact human line per interesting stream-json event, printed to
+    our stdout — which is the tmux pane, i.e. what `issuefleet attach` and
+    `issuefleet logs -f` show. Non-JSON lines (stderr, crash output) pass
+    through verbatim so failures are diagnosable from the pane alone."""
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        ev = json.loads(line)
+    except json.JSONDecodeError:
+        return line
+    kind = ev.get("type")
+    if kind == "system" and ev.get("subtype") == "init":
+        return f"· session {str(ev.get('session_id', ''))[:8]} model={ev.get('model', '?')}"
+    if kind == "assistant":
+        parts = []
+        for block in ev.get("message", {}).get("content", []):
+            if block.get("type") == "text" and block.get("text", "").strip():
+                text = " ".join(block["text"].split())
+                parts.append(text[:200] + ("…" if len(text) > 200 else ""))
+            elif block.get("type") == "tool_use":
+                inp = block.get("input", {})
+                detail = str(
+                    inp.get("description") or inp.get("command") or inp.get("file_path") or ""
+                )
+                parts.append(f"→ {block.get('name', '?')} {detail[:120]}".rstrip())
+        return "\n".join(parts) or None
+    if kind == "result":
+        head = "✗ turn errored" if ev.get("is_error") else "✓ turn complete"
+        pieces = [head]
+        if ev.get("duration_ms"):
+            pieces.append(f"{ev['duration_ms'] / 1000:.0f}s")
+        if ev.get("total_cost_usd") is not None:
+            pieces.append(f"${ev['total_cost_usd']:.2f}")
+        return " ".join(pieces)
+    return None  # user/tool_result events are noise at pane granularity
+
+
 def run_claude(prompt: str, state: turns.TurnState, agent_dir: Path) -> int:
     workspace = agent_dir.parent
-    cmd = ["claude", "-p", "--output-format", "json"]
-    if state.phase == turns.PHASE_FRESH or state.turns_taken == 0:
+    # stream-json so events arrive live (plain json buffers the whole turn,
+    # which reads as a hung worker from outside); --verbose is required by
+    # the CLI for stream-json in print mode.
+    cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose"]
+    if state.turns_taken == 0:
         cmd += ["--session-id", state.session_uuid]
     else:
         cmd += ["--resume", state.session_uuid]
@@ -37,12 +80,36 @@ def run_claude(prompt: str, state: turns.TurnState, agent_dir: Path) -> int:
 
     logs = agent_dir / "logs"
     logs.mkdir(exist_ok=True)
-    log_path = logs / f"turn-{state.turns_taken + 1:04d}.json"
+    log_path = logs / f"turn-{state.turns_taken + 1:04d}.jsonl"
+    print(f"turnloop: turn {state.turns_taken + 1} starting", flush=True)
     with open(log_path, "w") as log:
-        proc = subprocess.run(
-            cmd, input=prompt, stdout=log, stderr=subprocess.STDOUT, text=True, cwd=workspace
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=workspace,
         )
-    return proc.returncode
+
+        def _feed():
+            # Fed from a thread: a large prompt plus an early-chatty child
+            # could otherwise deadlock on full pipes.
+            try:
+                proc.stdin.write(prompt)
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+
+        threading.Thread(target=_feed, daemon=True).start()
+        for line in proc.stdout:
+            log.write(line)
+            log.flush()
+            summary = summarize_event(line)
+            if summary:
+                print(summary, flush=True)
+        rc = proc.wait()
+    return rc
 
 
 def step(agent_dir: Path) -> int:
@@ -60,7 +127,7 @@ def step(agent_dir: Path) -> int:
     state.turns_taken += 1
     state.save(agent_dir)
     if rc != 0:
-        print(f"turnloop: claude exited {rc} (see logs/turn-{state.turns_taken:04d}.json)")
+        print(f"turnloop: claude exited {rc} (see logs/turn-{state.turns_taken:04d}.jsonl)")
         return turns.EXIT_ERROR
     return turns.EXIT_CONTINUE
 
