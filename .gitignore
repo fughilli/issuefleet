@@ -1,0 +1,14 @@
+# Bazel
+bazel-*
+.bazelisk/
+.bazel-disk-cache/
+.bazel-repo-cache/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Nix
+result
+result-*

@@ -1,0 +1,26 @@
+module(
+    name = "issuefleet",
+    version = "0.1.0",
+    compatibility_level = 1,
+)
+
+bazel_dep(name = "rules_python", version = "2.2.0")
+
+# rules_nixpkgs lets Bazel import Nix-built packages as Bazel targets. Kept
+# registration-only: no nix_repo/nixpkgs_package tags here, so `bazel build
+# //...` never evaluates Nix and stays green on machines without `nix`.
+# The devshell lives in flake.nix instead.
+bazel_dep(name = "rules_nixpkgs_core", version = "0.13.0")
+
+PYTHON_VERSION = "3.11"
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(
+    is_default = True,
+    python_version = PYTHON_VERSION,
+)
+
+# The runtime core is stdlib-only by design (a zero-install daemon is a
+# feature — see AGENT_BUILD_PROMPT.md §2), so there is no pip graph at all.
+# If dev-only deps ever become necessary, add rules_uv + a requirements pair
+# per the bazel-polyglot-nix pattern.
