@@ -1,0 +1,172 @@
+"""Integration tests against real git (temp repos + a local bare 'origin')
+and real tmux — the two host tools this container does have."""
+
+import shutil
+import subprocess
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+from issuefleet.config import Config, ProjectConfig, ClaimRule
+from issuefleet.gitops import GitError, Gitops
+from issuefleet.model import WorkerRecord
+from issuefleet.runner import TmuxRunner
+
+
+def run(args, cwd=None):
+    subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True)
+
+
+class GitopsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.origin = root / "origin.git"
+        self.repo = root / "repo"
+        self.worktrees = root / "worktrees"
+        run(["git", "init", "--bare", "-b", "main", str(self.origin)])
+        run(["git", "clone", str(self.origin), str(self.repo)])
+        run(["git", "config", "user.email", "t@t"], cwd=self.repo)
+        run(["git", "config", "user.name", "t"], cwd=self.repo)
+        (self.repo / "README.md").write_text("hello\n")
+        run(["git", "add", "."], cwd=self.repo)
+        run(["git", "commit", "-m", "init"], cwd=self.repo)
+        run(["git", "push", "origin", "main"], cwd=self.repo)
+        self.git = Gitops()
+        self.wt = self.worktrees / "FUG-1"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def commit_in_worktree(self, msg="work"):
+        (self.wt / "change.txt").write_text(msg)
+        run(["git", "add", "."], cwd=self.wt)
+        run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", msg], cwd=self.wt)
+
+    def test_create_worktree_and_adopt(self):
+        self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
+        self.assertTrue((self.wt / "README.md").is_file())
+        # Idempotent adoption.
+        self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
+        # Wrong branch is an error, not a clobber.
+        with self.assertRaisesRegex(GitError, "expected"):
+            self.git.create_worktree(self.repo, "agent/other", "main", self.wt)
+
+    def test_create_worktree_recovers_from_deleted_dir(self):
+        self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
+        shutil.rmtree(self.wt)
+        self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
+        self.assertTrue((self.wt / "README.md").is_file())
+
+    def test_exclude_is_per_worktree_not_repo(self):
+        self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
+        self.git.add_worktree_exclude(self.repo, self.wt, ".agent/")
+        self.git.add_worktree_exclude(self.repo, self.wt, ".agent/")  # no dup
+        (self.wt / ".agent").mkdir()
+        (self.wt / ".agent" / "junk.txt").write_text("x")
+        out = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=self.wt, capture_output=True, text=True
+        ).stdout
+        self.assertNotIn(".agent", out)  # invisible to the repo
+        self.assertFalse((self.repo / ".gitignore").exists())  # repo untouched
+        # Git only reads $GIT_COMMON_DIR/info/exclude (the per-worktree one
+        # the brief suggested is ignored — verified on git 2.43), so that is
+        # where the pattern must land, exactly once.
+        exclude = self.repo / ".git" / "info" / "exclude"
+        self.assertEqual(exclude.read_text().count(".agent/"), 1)
+
+    def test_nested_worktree_exclude_resolves(self):
+        # The operator's checkout may itself be a linked worktree (§5.1).
+        linked_main = Path(self.tmp.name) / "linked_main"
+        run(["git", "worktree", "add", "-b", "side", str(linked_main), "main"], cwd=self.repo)
+        nested = Path(self.tmp.name) / "nested"
+        self.git.create_worktree(linked_main, "agent/fug-9-y", "side", nested)
+        self.git.add_worktree_exclude(linked_main, nested, ".agent/")
+        (nested / ".agent").mkdir()
+        (nested / ".agent" / "x").write_text("x")
+        out = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=nested, capture_output=True, text=True
+        ).stdout
+        self.assertNotIn(".agent", out)
+
+    def test_has_commits_ahead(self):
+        self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
+        self.assertFalse(self.git.has_commits_ahead(self.wt, "main"))
+        self.commit_in_worktree()
+        self.assertTrue(self.git.has_commits_ahead(self.wt, "main"))
+
+    def test_push_and_delete_remote_branch(self):
+        self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
+        self.commit_in_worktree()
+        self.git.push(self.wt, "agent/fug-1-x")
+        refs = subprocess.run(
+            ["git", "ls-remote", "--heads", str(self.origin)], capture_output=True, text=True
+        ).stdout
+        self.assertIn("agent/fug-1-x", refs)
+        # Rebase + force-with-lease re-push (the re-submission path).
+        run(["git", "commit", "--amend", "-m", "amended"], cwd=self.wt)
+        self.git.push(self.wt, "agent/fug-1-x")
+        self.git.remove_worktree(self.repo, self.wt, "agent/fug-1-x")
+        self.assertFalse(self.wt.exists())
+        self.git.delete_remote_branch(self.repo, "agent/fug-1-x")
+        refs = subprocess.run(
+            ["git", "ls-remote", "--heads", str(self.origin)], capture_output=True, text=True
+        ).stdout
+        self.assertNotIn("agent/fug-1-x", refs)
+
+    def test_remote_url(self):
+        self.assertEqual(self.git.remote_url(self.repo), str(self.origin))
+
+
+@unittest.skipIf(shutil.which("tmux") is None, "tmux not available")
+class TmuxRunnerTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        # A stub "claude-container" that just sleeps, so start/alive/stop are
+        # exercised through real tmux without docker.
+        self.stub = root / "cc-stub"
+        self.stub.write_text("#!/bin/sh\nsleep 300\n")
+        self.stub.chmod(0o755)
+        self.cfg = Config(
+            projects=[
+                ProjectConfig(
+                    name="p", linear_project="P", repo=root, claim=ClaimRule("label", "agent")
+                )
+            ],
+            claude_container=str(self.stub),
+        )
+        self.rec = WorkerRecord(
+            issue_id="i1", issue_key="FUG-1", issue_title="t", issue_url="u",
+            project="p", repo=str(root), branch="b", worktree=str(root),
+            base_ref="main", session_uuid="s",
+            tmux_session=f"issuefleet-test-{id(self) % 100000}",
+        )
+        self.runner = TmuxRunner(log_dir=root / "logs")
+
+    def tearDown(self):
+        self.runner.stop(self.rec)
+        self.tmp.cleanup()
+
+    def test_command_shape(self):
+        cmd = self.runner.command(self.rec, self.cfg)
+        self.assertEqual(cmd[:3], [str(self.stub), "-w", self.rec.worktree])
+        self.assertEqual(cmd[-2:], ["/workspace/.agent/bin/turnloop", "run"])
+        for word in cmd:  # launcher word-splits: no spaces allowed anywhere
+            self.assertNotIn(" ", word)
+
+    def test_start_alive_stop_idempotent(self):
+        self.assertFalse(self.runner.alive(self.rec))
+        self.runner.start(self.rec, self.cfg)
+        time.sleep(0.2)
+        self.assertTrue(self.runner.alive(self.rec))
+        self.runner.start(self.rec, self.cfg)  # adopt, not error
+        self.runner.stop(self.rec)
+        time.sleep(0.2)
+        self.assertFalse(self.runner.alive(self.rec))
+        self.runner.stop(self.rec)  # double-stop is fine
+
+
+if __name__ == "__main__":
+    unittest.main()
