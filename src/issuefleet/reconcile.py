@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import threading
 from pathlib import Path
 
 from issuefleet import marker, MARKER_PREFIX
@@ -59,10 +60,101 @@ class Reconciler:
         self.forges = forges
         self.git = git
         self.runner = runner
+        # Linear agent sessions: fed by the webhook thread, drained at tick.
+        self._session_lock = threading.Lock()
+        self._session_events: list = []
+        self.pending_session_claims: dict[str, object] = {}  # issue_id -> SessionEvent
 
     # ------------------------------------------------------------------ tick
 
+    # -------------------------------------------------- agent sessions
+
+    def enqueue_session(self, evt) -> None:
+        """Thread-safe intake for webhooks.SessionEvent; processed next tick."""
+        with self._session_lock:
+            self._session_events.append(evt)
+
+    def _drain_session_events(self) -> None:
+        with self._session_lock:
+            events, self._session_events = self._session_events, []
+        for evt in events:
+            rec = self.registry.get(evt.issue_id) if evt.issue_id else None
+            if rec is None and evt.session_id:
+                rec = next(
+                    (w for w in self.registry.all() if w.agent_session_id == evt.session_id),
+                    None,
+                )
+            if evt.action == "prompted":
+                if rec is None:
+                    log.warning("session prompt for unclaimed issue %s; dropped "
+                                "(sender sees the ack/queue state in the session)", evt.issue_key)
+                    continue
+                Mailbox(Path(rec.worktree) / ".agent" / "mailbox").ensure().put_inbox(
+                    "reply",
+                    {"author": "agent-session", "text": evt.body or "", "source": "linear"},
+                )
+            elif evt.action == "created":
+                if rec is not None:
+                    rec.agent_session_id = evt.session_id
+                    rec.touch()
+                    self.registry.save()
+                elif evt.issue_id:
+                    self.pending_session_claims[evt.issue_id] = evt
+
+    def _project_for_issue(self, issue: Issue) -> ProjectConfig | None:
+        if issue.project_id is None:
+            return None
+        for project in self.cfg.projects:
+            try:
+                if self.tracker.resolve_project_id(project) == issue.project_id:
+                    return project
+            except Exception:
+                log.exception("resolving project id for %s failed", project.name)
+        return None
+
+    def _claim_sessions(self) -> None:
+        """Delegation/mention claims. These are explicit human acts, so they
+        claim regardless of the project's poll-side claim rule."""
+        for issue_id, evt in list(self.pending_session_claims.items()):
+            if self.registry.get(issue_id) is not None:
+                self.pending_session_claims.pop(issue_id)
+                continue
+            active = [w for w in self.registry.all() if w.phase == PHASE_ACTIVE]
+            if len(active) >= self.cfg.max_workers:
+                log.info("session claim for %s waiting: fleet full", evt.issue_key)
+                continue  # stays pending until capacity frees
+            try:
+                issue = self.tracker.get_issue(issue_id)
+                if issue is None or not issue.open:
+                    self.pending_session_claims.pop(issue_id)
+                    continue
+                project = self._project_for_issue(issue)
+                if project is None:
+                    log.error("agent session for %s: issue's Linear project is not in the "
+                              "config; ignoring", issue.key)
+                    self._emit_activity_quietly(
+                        evt.session_id,
+                        {"type": "error",
+                         "body": "This issue's project is not configured in issuefleet; "
+                                 "add it to the fleet config to delegate here."},
+                    )
+                    self.pending_session_claims.pop(issue_id)
+                    continue
+                self._claim_one(issue, project, session=evt)
+                self.pending_session_claims.pop(issue_id)
+            except Exception:
+                log.exception("session claim of %s failed; will retry next tick", evt.issue_key)
+
+    def _emit_activity_quietly(self, session_id: str | None, content: dict) -> None:
+        if not session_id:
+            return
+        try:
+            self.tracker.emit_activity(session_id, content)
+        except Exception:
+            log.exception("agent activity emit failed (session %s)", session_id)
+
     def tick(self) -> None:
+        self._drain_session_events()
         for rec in self.registry.all():
             try:
                 self._service(rec)
@@ -81,6 +173,7 @@ class Reconciler:
                 eligible[project.name] = []
 
         try:
+            self._claim_sessions()
             self._claim(eligible)
         except Exception:
             log.exception("claim pass failed; will retry next tick")
@@ -120,7 +213,7 @@ class Reconciler:
         lines = []
         project = self.cfg.project(rec.project)
         issue = self.tracker.get_issue(rec.issue_id)
-        reason = self._unclaim_reason(project, issue)
+        reason = self._unclaim_reason(project, issue, rec)
         if reason:
             return [f"{rec.issue_key}: would un-claim and tear down ({reason})"]
         if rec.phase == PHASE_CRASHED:
@@ -164,7 +257,7 @@ class Reconciler:
         mailbox = Mailbox(Path(rec.worktree) / ".agent" / "mailbox")
 
         issue = self.tracker.get_issue(rec.issue_id)
-        reason = self._unclaim_reason(project, issue)
+        reason = self._unclaim_reason(project, issue, rec)
         if reason:
             log.info("worker %s: un-claiming (%s)", rec.issue_key, reason)
             self._wind_down(rec, project, mailbox, reason=reason, done=False)
@@ -178,6 +271,11 @@ class Reconciler:
                 rec.phase = PHASE_CRASHED
                 rec.touch()
                 self.registry.save()
+                self._emit_activity_quietly(
+                    rec.agent_session_id,
+                    {"type": "error", "body": "Worker session died repeatedly; giving up. "
+                     "Worktree kept for inspection on the orchestrator host."},
+                )
                 self._post_once(
                     rec.issue_id,
                     f"crash-{rec.issue_id}-{rec.restarts}",
@@ -200,11 +298,17 @@ class Reconciler:
         self._ingest_comments(rec, mailbox)
         self._check_pr(rec, project, mailbox)
 
-    def _unclaim_reason(self, project: ProjectConfig, issue: Issue | None) -> str | None:
+    def _unclaim_reason(
+        self, project: ProjectConfig, issue: Issue | None, rec: WorkerRecord | None = None
+    ) -> str | None:
         if issue is None:
             return "issue disappeared from the tracker"
         if not issue.open:
             return f"issue was closed ({issue.state_name})"
+        # Session-originated claims (delegation/@-mention) aren't governed by
+        # the poll-side claim rule; only closure winds them down.
+        if rec is not None and rec.claim_origin == "session":
+            return None
         claim = project.claim
         # For the `state` strategy, claiming itself moves the issue out of the
         # claim state, so only closure un-claims (checked above).
@@ -224,18 +328,34 @@ class Reconciler:
                     mailbox.archive_outbox(msg, receipt={"deduped": True})
                     continue
                 if msg.kind == "status":
-                    self.tracker.post_comment(
-                        rec.issue_id, f"🤖 {msg.payload['text']}\n\n{marker(msg.id)}"
-                    )
-                    mailbox.archive_outbox(msg, receipt={"relayed": "linear"})
+                    if rec.agent_session_id:
+                        # Session relays have no marker probe; a crash between
+                        # emit and archive re-emits (a duplicate thought is
+                        # cosmetic, unlike a duplicate comment).
+                        self.tracker.emit_activity(
+                            rec.agent_session_id, {"type": "thought", "body": msg.payload["text"]}
+                        )
+                        mailbox.archive_outbox(msg, receipt={"relayed": "agent-session"})
+                    else:
+                        self.tracker.post_comment(
+                            rec.issue_id, f"🤖 {msg.payload['text']}\n\n{marker(msg.id)}"
+                        )
+                        mailbox.archive_outbox(msg, receipt={"relayed": "linear"})
                 elif msg.kind == "question":
-                    self.tracker.post_comment(
-                        rec.issue_id,
-                        "🤖❓ **The agent is blocked on a question** — it will idle "
-                        f"until someone replies on this issue:\n\n{msg.payload['text']}"
-                        f"\n\n{marker(msg.id)}",
-                    )
-                    mailbox.archive_outbox(msg, receipt={"relayed": "linear"})
+                    if rec.agent_session_id:
+                        self.tracker.emit_activity(
+                            rec.agent_session_id,
+                            {"type": "elicitation", "body": msg.payload["text"]},
+                        )
+                        mailbox.archive_outbox(msg, receipt={"relayed": "agent-session"})
+                    else:
+                        self.tracker.post_comment(
+                            rec.issue_id,
+                            "🤖❓ **The agent is blocked on a question** — it will idle "
+                            f"until someone replies on this issue:\n\n{msg.payload['text']}"
+                            f"\n\n{marker(msg.id)}",
+                        )
+                        mailbox.archive_outbox(msg, receipt={"relayed": "linear"})
                 elif msg.kind == "ready":
                     self._handle_ready(rec, project, mailbox, msg)
                 else:
@@ -285,11 +405,17 @@ class Reconciler:
         rec.pr_number, rec.pr_url = pr.number, pr.url
         rec.touch()
         self.registry.save()
-        self._post_once(
-            rec.issue_id,
-            f"prlink-{rec.issue_id}-{pr.number}",
-            f"🤖 Pull request ready: {pr.url}",
-        )
+        if rec.agent_session_id:
+            self._emit_activity_quietly(
+                rec.agent_session_id,
+                {"type": "response", "body": f"Pull request ready: {pr.url}\n\n{title}"},
+            )
+        else:
+            self._post_once(
+                rec.issue_id,
+                f"prlink-{rec.issue_id}-{pr.number}",
+                f"🤖 Pull request ready: {pr.url}",
+            )
         mailbox.put_inbox("info", {"text": f"Your PR is open at {pr.url}. Review feedback will be forwarded to you."})
         mailbox.archive_outbox(msg, receipt={"pr": pr.number, "url": pr.url})
 
@@ -441,11 +567,12 @@ class Reconciler:
             except Exception:
                 log.exception("claiming %s failed; will retry next tick", issue.key)
 
-    def _claim_one(self, issue: Issue, project: ProjectConfig) -> None:
+    def _claim_one(self, issue: Issue, project: ProjectConfig, session=None) -> None:
         branch = project.branch_template.format(key=issue.key.lower(), slug=slugify(issue.title))
         worktree = self.cfg.worktree_root / project.name / issue.key
         tmux_session = f"issuefleet-{project.name}-{issue.key}"
-        log.info("claiming %s -> %s (%s)", issue.key, branch, worktree)
+        log.info("claiming %s -> %s (%s)%s", issue.key, branch, worktree,
+                 " [agent session]" if session else "")
 
         self.git.create_worktree(project.repo, branch, project.base_ref, worktree)
         self.git.add_worktree_exclude(project.repo, worktree, ".agent/")
@@ -465,6 +592,8 @@ class Reconciler:
             base_ref=project.base_ref,
             session_uuid=session_uuid,
             tmux_session=tmux_session,
+            claim_origin="session" if session else "poll",
+            agent_session_id=getattr(session, "session_id", None),
         )
         # Register before the runner/tracker side effects: if we crash here,
         # the next tick's liveness check starts the session; if we crashed
@@ -472,10 +601,18 @@ class Reconciler:
         self.registry.add(rec)
         self.runner.start(rec, self.cfg)
         self.tracker.set_state(issue.id, project.state_in_progress)
-        self._post_once(
-            issue.id,
-            f"claim-{issue.id}",
-            f"🤖 Claimed by issuefleet. Branch `{branch}`, worktree `{worktree}`.\n"
-            f"Watch live: `tmux attach -t {tmux_session}` on the orchestrator host "
-            f"(or `issuefleet logs {issue.key}`).",
-        )
+        if session:
+            self._emit_activity_quietly(
+                rec.agent_session_id,
+                {"type": "thought",
+                 "body": f"Worker claimed: branch `{branch}` in an isolated worktree. "
+                 "Plan and progress will stream here."},
+            )
+        else:
+            self._post_once(
+                issue.id,
+                f"claim-{issue.id}",
+                f"🤖 Claimed by issuefleet. Branch `{branch}`, worktree `{worktree}`.\n"
+                f"Watch live: `tmux attach -t {tmux_session}` on the orchestrator host "
+                f"(or `issuefleet logs {issue.key}`).",
+            )

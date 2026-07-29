@@ -13,6 +13,19 @@ linear_api_key_env = "LINEAR_API_KEY"
 linear_api_key_file = "~/.config/issuefleet/linear.key"
 github_token_env = ["GITHUB_TOKEN", "GH_TOKEN"]
 github_token_file = "~/.config/issuefleet/github.key"
+linear_auth = "auto"                # personal key (raw) vs agent token (Bearer)
+# For the Linear agent install (issuefleet linear-oauth):
+linear_oauth_client_id = ""
+linear_oauth_client_secret_file = "~/.config/issuefleet/linear_oauth_client.secret"
+
+# Push wake-ups (and required for the Linear agents platform). Put a tunnel
+# (Cloudflare Tunnel / Tailscale Funnel) in front of 127.0.0.1:8787.
+[webhooks]
+enabled = false
+bind = "127.0.0.1"
+port = 8787
+github_secret_file = "~/.config/issuefleet/github_webhook.secret"
+linear_secret_file = "~/.config/issuefleet/linear_webhook.secret"
 
 [agent]
 max_auto_turns = 40

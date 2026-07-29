@@ -30,6 +30,7 @@ _ISSUE_FIELDS = """
     labels { nodes { name } }
     assignee { id }
     team { id }
+    project { id }
 """
 
 
@@ -50,21 +51,30 @@ def _to_issue(node: dict) -> Issue:
         labels=[l["name"] for l in node.get("labels", {}).get("nodes", [])],
         assignee_id=(node.get("assignee") or {}).get("id"),
         created_at=node.get("createdAt", ""),
+        project_id=(node.get("project") or {}).get("id"),
     )
 
 
 class LinearClient:
-    def __init__(self, api_key: str, transport=urllib_transport):
+    def __init__(self, api_key: str, transport=urllib_transport, auth: str = "auto"):
+        """auth: 'api_key' (raw Authorization header, personal keys),
+        'oauth' (Bearer, OAuth/agent tokens), or 'auto' (infer from the
+        token prefix: lin_oauth_* is Bearer, everything else raw)."""
         self.api_key = api_key
         self.transport = transport
+        if auth == "auto":
+            auth = "oauth" if api_key.startswith("lin_oauth_") else "api_key"
+        self.auth = auth
+
+    def auth_header(self) -> str:
+        return f"Bearer {self.api_key}" if self.auth == "oauth" else self.api_key
 
     def graphql(self, query: str, variables: dict | None = None) -> dict:
         resp = self.transport(
             "POST",
             API_URL,
             {
-                # Raw key, no Bearer prefix — Linear personal API keys.
-                "Authorization": self.api_key,
+                "Authorization": self.auth_header(),
                 "Content-Type": "application/json",
             },
             {"query": query, "variables": variables or {}},
@@ -207,6 +217,24 @@ class LinearTracker:
     def has_comment_marker(self, issue_id: str, msg_id: str) -> bool:
         needle = MARKER_PREFIX + msg_id
         return any(needle in c.body for c in self._recent_comments(issue_id))
+
+    # -- agent sessions (Linear agents platform) ---------------------------
+
+    def emit_activity(self, session_id: str, content: dict) -> None:
+        """Emit an agent activity into a session. content is the typed
+        payload, e.g. {"type": "thought", "body": "..."} — types: thought,
+        action, elicitation, response, error."""
+        data = self.client.graphql(
+            """mutation($input: AgentActivityCreateInput!) {
+                 agentActivityCreate(input: $input) { success }
+               }""",
+            {"input": {"agentSessionId": session_id, "content": content}},
+        )
+        if not data["agentActivityCreate"]["success"]:
+            raise LinearError(f"agentActivityCreate on session {session_id} reported failure")
+
+    def resolve_project_id(self, project: ProjectConfig) -> str:
+        return self._project_id(project.linear_project)
 
     # -- workflow states ---------------------------------------------------
 

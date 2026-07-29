@@ -27,6 +27,7 @@ class Issue:
     labels: list[str] = field(default_factory=list)
     assignee_id: str | None = None
     created_at: str = ""
+    project_id: str | None = None  # Linear project UUID (session-claim routing)
 
     @property
     def open(self) -> bool:
@@ -90,6 +91,8 @@ class WorkerRecord:
     session_uuid: str  # Claude Code session id, pinned at creation
     tmux_session: str
     phase: str = PHASE_ACTIVE
+    claim_origin: str = "poll"  # "poll" (label/assignee/state rule) | "session"
+    agent_session_id: str | None = None  # Linear agent session, if any
     pr_number: int | None = None
     pr_url: str | None = None
     restarts: int = 0

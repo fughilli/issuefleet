@@ -74,6 +74,59 @@ The CLI is stdlib-only Python 3.11+: run `bin/issuefleet` directly, or
 hermetically via `bazel run //:issuefleet --`. A Nix devshell (`nix develop`)
 provides bazelisk/python/tmux on hosts that want it.
 
+## Bot identities (optional, recommended)
+
+**GitHub machine user.** Create a normal account (e.g. `yourname-fleet`),
+add it as a collaborator on the target repos, issue its fine-grained PAT
+(Contents: RW, Pull requests: RW), and put that token in
+`github_token_file`. Pure config — PRs are then opened by the bot, and it's
+@-mentionable. No issuefleet code involved.
+
+**Linear agent (agents platform).** Instead of a personal API key, install
+issuefleet as a first-class Linear agent: it appears as an app user
+(consumes **no seat**), can be **@-mentioned and delegated issues** — both
+of which claim the issue regardless of the poll-side claim rule — and its
+status/question/PR updates render as native agent-session activities
+(thought / elicitation / response) instead of comments. Setup:
+
+1. Create an OAuth app at <https://linear.app/settings/api/applications/new>.
+   Enable webhooks on it, tick **Agent session events** (plus Comments if
+   you want comment-driven wake-ups), set the webhook URL to your tunnel
+   (below), and note the client id/secret and the webhook signing secret.
+2. Configure `[credentials] linear_oauth_client_id`, put the client secret
+   in `linear_oauth_client_secret_file`, the signing secret in
+   `[webhooks] linear_secret_file`, and set `[webhooks] enabled = true`.
+3. Run `bin/issuefleet linear-oauth` as a workspace admin — it walks the
+   `actor=app` OAuth flow on localhost and writes the agent token to
+   `linear_api_key_file`. The daemon then authenticates as the agent
+   (Bearer; auto-detected from the `lin_oauth_` prefix).
+
+Webhooks are **mandatory** for the agent platform (Linear requires an
+activity within 10 seconds of a delegation; issuefleet acks immediately
+from the webhook thread, then the claim proceeds on the woken tick). A
+session prompt ("reply to the agent") is routed straight into the worker's
+inbox.
+
+## Webhooks (push instead of polling)
+
+With `[webhooks] enabled = true`, the daemon runs a listener
+(default `127.0.0.1:8787`) and any verified event **wakes the reconcile
+loop immediately** instead of waiting out the poll interval. Webhooks are
+an accelerator only — polling remains the source of truth, so lost or
+replayed deliveries cost nothing.
+
+- `POST /webhook/github` — add a repo webhook (Settings → Webhooks) for
+  *Issue comments, Pull request reviews, Pull request review comments,
+  Pull requests*, content type JSON, with a secret; verified via
+  `X-Hub-Signature-256` (HMAC-SHA256).
+- `POST /webhook/linear` — the OAuth app's webhook (or a workspace webhook);
+  verified via `Linear-Signature` plus a 60-second timestamp replay guard.
+
+**Expose it through a tunnel, never directly**: point a Cloudflare Tunnel /
+Tailscale Funnel (or ngrok for experiments) at `localhost:8787` and give
+that HTTPS URL to GitHub/Linear. The listener binds loopback by default and
+answers GET with a health probe for tunnel checks.
+
 ## Configuration
 
 ```toml
@@ -88,6 +141,17 @@ linear_api_key_env = "LINEAR_API_KEY"
 linear_api_key_file = "~/.config/issuefleet/linear.key"
 github_token_env = ["GITHUB_TOKEN", "GH_TOKEN"]   # checked in order
 github_token_file = "~/.config/issuefleet/github.key"
+linear_auth = "auto"                       # auto | api_key (raw) | oauth (Bearer)
+linear_oauth_client_id = ""                # Linear agent install (see Bot identities)
+linear_oauth_client_secret_file = "~/.config/issuefleet/linear_oauth_client.secret"
+linear_oauth_redirect_port = 9779
+
+[webhooks]
+enabled = false                            # true = push wake-ups + agent sessions
+bind = "127.0.0.1"                         # keep loopback; tunnel in front
+port = 8787
+github_secret_file = "~/.config/issuefleet/github_webhook.secret"
+linear_secret_file = "~/.config/issuefleet/linear_webhook.secret"
 
 [agent]
 max_auto_turns = 40          # self-driven turns without human contact (the runaway brake)
@@ -125,6 +189,7 @@ Claim strategies (`claim.strategy` / `claim.value`):
 | `label` | issue carries the label `value` | label removed, or issue closed |
 | `assignee` | issue assigned to Linear user id `value` | assignee changed, or issue closed |
 | `state` | issue is in workflow state `value` | issue closed (claiming itself moves the state, so state changes can't un-claim) |
+| *(agent session)* | issue delegated to / @-mentions the Linear agent (any strategy) | issue closed |
 
 Queue order is Linear priority (Urgent → Low, "no priority" last), then age.
 When the fleet is full, eligible issues wait; `doctor` shows the order.
@@ -226,7 +291,18 @@ restart-safe and idempotent.
   the parent checkout. A worker stuck at any prompt is visible (and
   answerable) via `issuefleet attach <KEY>`.
 - **`state` claim strategy can't detect "operator changed their mind"** —
-  only closure un-claims (see the strategy table).
+  only closure un-claims (see the strategy table); same for session claims.
+- **Agent-session relays have no dedupe probe** (activities can't be
+  searched like comments): a crash between emit and ack can duplicate a
+  thought/elicitation. Cosmetic, unlike a duplicated comment.
+- **Session prompts before a worker exists are dropped** (logged): if you
+  reply to the agent in the seconds between delegation and the claim
+  completing, re-send after the worker's first activity appears. The
+  initial delegation itself is never lost — it stays queued until claimed.
+- **The Linear agents API surface is new** and was implemented from
+  Linear's docs without a live workspace to test against; the OAuth flow,
+  activity mutations, and webhook payload parsing are unit-tested but
+  unproven live (see WORKLOG).
 
 ## Development
 

@@ -32,6 +32,15 @@ def file_permissions_ok(path: Path) -> bool:
     return not (mode & (stat.S_IRGRP | stat.S_IWGRP | stat.S_IROTH | stat.S_IWOTH))
 
 
+def resolve_optional(env_name: str, file_path: Path) -> str | None:
+    """Env-then-file secret lookup that returns None instead of raising —
+    for optional secrets like webhook signing keys."""
+    v = os.environ.get(env_name)
+    if v:
+        return v.strip()
+    return _read_key_file(Path(file_path))
+
+
 def resolve_linear_key(cfg: Config) -> tuple[str, str]:
     """Returns (key, source-description). Raises CredentialError if absent."""
     v = os.environ.get(cfg.linear_api_key_env)

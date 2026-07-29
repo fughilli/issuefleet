@@ -56,6 +56,18 @@ class ProjectConfig:
 
 
 @dataclass
+class WebhookConfig:
+    enabled: bool = False
+    bind: str = "127.0.0.1"  # put a tunnel in front; never expose directly
+    port: int = 8787
+    # Secrets resolved env-then-file, same rules as API credentials.
+    github_secret_env: str = "ISSUEFLEET_GITHUB_WEBHOOK_SECRET"
+    github_secret_file: Path = Path("~/.config/issuefleet/github_webhook.secret").expanduser()
+    linear_secret_env: str = "ISSUEFLEET_LINEAR_WEBHOOK_SECRET"
+    linear_secret_file: Path = Path("~/.config/issuefleet/linear_webhook.secret").expanduser()
+
+
+@dataclass
 class Config:
     projects: list[ProjectConfig]
     poll_interval_s: int = 60
@@ -87,6 +99,18 @@ class Config:
     linear_api_key_file: Path = Path("~/.config/issuefleet/linear.key").expanduser()
     github_token_env: list[str] = field(default_factory=lambda: ["GITHUB_TOKEN", "GH_TOKEN"])
     github_token_file: Path = Path("~/.config/issuefleet/github.key").expanduser()
+    # Linear auth mode: "auto" infers from the token prefix (lin_api_ = raw
+    # personal key, lin_oauth_ = Bearer OAuth/agent token); or force one.
+    linear_auth: str = "auto"
+    # Linear OAuth app (for the agents platform). Client id is not a secret;
+    # the client secret follows the usual env-then-file rules.
+    linear_oauth_client_id: str = ""
+    linear_oauth_client_secret_env: str = "LINEAR_OAUTH_CLIENT_SECRET"
+    linear_oauth_client_secret_file: Path = Path(
+        "~/.config/issuefleet/linear_oauth_client.secret"
+    ).expanduser()
+    linear_oauth_redirect_port: int = 9779
+    webhooks: WebhookConfig = field(default_factory=WebhookConfig)
 
     def project(self, name: str) -> ProjectConfig:
         for p in self.projects:
@@ -125,7 +149,13 @@ def parse(data: dict, source: str = "<config>") -> Config:
     daemon = data.get("daemon", {})
     creds = data.get("credentials", {})
     agent = data.get("agent", {})
-    for name, table in (("daemon", daemon), ("credentials", creds), ("agent", agent)):
+    hooks = data.get("webhooks", {})
+    for name, table in (
+        ("daemon", daemon),
+        ("credentials", creds),
+        ("agent", agent),
+        ("webhooks", hooks),
+    ):
         if not isinstance(table, dict):
             raise ConfigError(f"{source}: [{name}] must be a table")
         _reject_secrets(table, f"{source} [{name}]")
@@ -195,6 +225,31 @@ def parse(data: dict, source: str = "<config>") -> Config:
         cfg.github_token_env = [v] if isinstance(v, str) else list(v)
     if "github_token_file" in creds:
         cfg.github_token_file = _path(creds["github_token_file"])
+    if "linear_auth" in creds:
+        if creds["linear_auth"] not in ("auto", "api_key", "oauth"):
+            raise ConfigError(f"{source}: linear_auth must be auto, api_key, or oauth")
+        cfg.linear_auth = creds["linear_auth"]
+    cfg.linear_oauth_client_id = creds.get("linear_oauth_client_id", "")
+    if "linear_oauth_client_secret_env" in creds:
+        cfg.linear_oauth_client_secret_env = creds["linear_oauth_client_secret_env"]
+    if "linear_oauth_client_secret_file" in creds:
+        cfg.linear_oauth_client_secret_file = _path(creds["linear_oauth_client_secret_file"])
+    if "linear_oauth_redirect_port" in creds:
+        cfg.linear_oauth_redirect_port = int(creds["linear_oauth_redirect_port"])
+
+    cfg.webhooks = WebhookConfig(
+        enabled=bool(hooks.get("enabled", False)),
+        bind=hooks.get("bind", "127.0.0.1"),
+        port=int(hooks.get("port", 8787)),
+    )
+    if "github_secret_env" in hooks:
+        cfg.webhooks.github_secret_env = hooks["github_secret_env"]
+    if "github_secret_file" in hooks:
+        cfg.webhooks.github_secret_file = _path(hooks["github_secret_file"])
+    if "linear_secret_env" in hooks:
+        cfg.webhooks.linear_secret_env = hooks["linear_secret_env"]
+    if "linear_secret_file" in hooks:
+        cfg.webhooks.linear_secret_file = _path(hooks["linear_secret_file"])
 
     if cfg.poll_interval_s < 5:
         raise ConfigError(f"{source}: poll_interval_s must be >= 5")

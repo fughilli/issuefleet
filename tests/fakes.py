@@ -37,6 +37,7 @@ class FakeTracker:
         self.state_changes: list[tuple[str, str]] = []  # (issue_id, state_name)
         self.fail_next_post = 0  # countdown of post_comment calls to fail
         self.fail_get_issue: set[str] = set()  # issue_ids whose get_issue raises
+        self.activities: list[tuple[str, dict]] = []  # (session_id, content)
         self._comment_seq = 0
 
     def add_issue(self, issue: Issue) -> Issue:
@@ -106,6 +107,12 @@ class FakeTracker:
             self.issues[issue_id].state_name = state_name
             if state_name == "Done":
                 self.issues[issue_id].state_type = "completed"
+
+    def emit_activity(self, session_id: str, content: dict) -> None:
+        self.activities.append((session_id, content))
+
+    def resolve_project_id(self, project) -> str:
+        return project.linear_project
 
 
 class FakeForge:

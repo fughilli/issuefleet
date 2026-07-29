@@ -10,6 +10,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -33,7 +34,7 @@ log = logging.getLogger("issuefleet")
 
 def build_stack(cfg: Config) -> Reconciler:
     linear_key, _ = creds.resolve_linear_key(cfg)
-    tracker = LinearTracker(LinearClient(linear_key))
+    tracker = LinearTracker(LinearClient(linear_key, auth=cfg.linear_auth))
     github_token, _ = creds.resolve_github_token(cfg)
     git = Gitops()
     forges = {}
@@ -92,29 +93,115 @@ def cmd_once(cfg: Config, dry_run: bool) -> int:
     return 0
 
 
+def _start_webhooks(cfg: Config, reconciler: Reconciler, wake: threading.Event):
+    from issuefleet import webhooks as webhooks_mod
+
+    wcfg = cfg.webhooks
+    github_secret = creds.resolve_optional(wcfg.github_secret_env, wcfg.github_secret_file)
+    linear_secret = creds.resolve_optional(wcfg.linear_secret_env, wcfg.linear_secret_file)
+    if not github_secret and not linear_secret:
+        log.warning("[webhooks] enabled but no signing secrets resolve; not starting listener")
+        return None
+
+    def on_session(evt):
+        reconciler.enqueue_session(evt)
+        if evt.action == "created":
+            # Linear marks the session unresponsive without an activity
+            # within 10s; ack from a thread so the webhook 200 isn't held.
+            threading.Thread(
+                target=reconciler._emit_activity_quietly,
+                args=(evt.session_id,
+                      {"type": "thought",
+                       "body": "On it — spinning up an isolated worker (worktree + "
+                               "container). Progress will stream here."}),
+                daemon=True,
+            ).start()
+
+    server = webhooks_mod.WebhookServer(
+        bind=wcfg.bind,
+        port=wcfg.port,
+        wake=wake.set,
+        on_session=on_session,
+        github_secret=github_secret,
+        linear_secret=linear_secret,
+    ).start()
+    log.info(
+        "webhook listener on %s:%d (/webhook/github%s, /webhook/linear%s) — put a tunnel in front",
+        wcfg.bind, server.port,
+        "" if github_secret else " [no secret: disabled]",
+        "" if linear_secret else " [no secret: disabled]",
+    )
+    return server
+
+
 def cmd_run(cfg: Config) -> int:
     stop = {"flag": False}
+    wake = threading.Event()
 
     def _sig(signum, frame):
         log.info("signal %d: finishing this tick, then exiting (agents keep running)", signum)
         stop["flag"] = True
+        wake.set()
 
     signal.signal(signal.SIGTERM, _sig)
     signal.signal(signal.SIGINT, _sig)
 
     with DaemonLock(cfg.state_dir):
         reconciler = build_stack(cfg)
-        log.info("daemon up: %d project(s), poll every %ds", len(cfg.projects), cfg.poll_interval_s)
-        while not stop["flag"]:
-            started = time.monotonic()
-            try:
-                reconciler.tick()
-            except Exception:
-                log.exception("tick failed; retrying next interval")
-            remaining = cfg.poll_interval_s - (time.monotonic() - started)
-            while remaining > 0 and not stop["flag"]:
-                time.sleep(min(1, remaining))
-                remaining -= 1
+        server = _start_webhooks(cfg, reconciler, wake) if cfg.webhooks.enabled else None
+        log.info("daemon up: %d project(s), poll every %ds%s",
+                 len(cfg.projects), cfg.poll_interval_s,
+                 " + webhook wake-ups" if server else "")
+        try:
+            while not stop["flag"]:
+                wake.clear()
+                try:
+                    reconciler.tick()
+                except Exception:
+                    log.exception("tick failed; retrying next interval")
+                # Sleep until the poll interval elapses OR a webhook wakes us.
+                if wake.wait(timeout=cfg.poll_interval_s):
+                    log.debug("woken early by webhook")
+        finally:
+            if server:
+                server.stop()
+    return 0
+
+
+def cmd_linear_oauth(cfg: Config) -> int:
+    from issuefleet import oauth
+
+    if not cfg.linear_oauth_client_id:
+        raise SystemExit(
+            "set [credentials] linear_oauth_client_id first (create the OAuth app at "
+            "https://linear.app/settings/api/applications/new, enable webhooks with "
+            "'Agent session events', and point its webhook URL at your tunnel)"
+        )
+    client_secret = creds.resolve_optional(
+        cfg.linear_oauth_client_secret_env, cfg.linear_oauth_client_secret_file
+    )
+    if not client_secret:
+        raise SystemExit(
+            f"no OAuth client secret: set ${cfg.linear_oauth_client_secret_env} or write it "
+            f"to {cfg.linear_oauth_client_secret_file} (chmod 600)"
+        )
+    redirect_uri = f"http://localhost:{cfg.linear_oauth_redirect_port}/callback"
+    url = oauth.build_authorize_url(cfg.linear_oauth_client_id, redirect_uri)
+    print("Open this URL as a workspace ADMIN (actor=app install):\n\n  " + url + "\n")
+    print(f"Waiting for the redirect on {redirect_uri} …")
+    code = oauth.wait_for_code(cfg.linear_oauth_redirect_port)
+    token = oauth.exchange_code(
+        cfg.linear_oauth_client_id, client_secret, code, redirect_uri
+    )
+    cfg.linear_api_key_file.parent.mkdir(parents=True, exist_ok=True)
+    cfg.linear_api_key_file.write_text(token)
+    cfg.linear_api_key_file.chmod(0o600)
+    tracker = LinearTracker(LinearClient(token))
+    viewer = tracker.viewer()
+    print(f"\nInstalled. Agent app user: {viewer.get('name')} (id {viewer.get('id')})")
+    print(f"Token written to {cfg.linear_api_key_file} (chmod 600).")
+    print("The daemon will now authenticate as the agent; @-mention or delegate "
+          "issues to it in Linear to claim them.")
     return 0
 
 
@@ -189,6 +276,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("doctor", help="verify tooling, credentials, config; show what would be claimed")
+    sub.add_parser("linear-oauth", help="one-time Linear agent (actor=app) install; writes the token")
     p = sub.add_parser("once", help="a single reconcile tick (cron-friendly)")
     p.add_argument("--dry-run", action="store_true", help="log would-be actions; mutate nothing")
     sub.add_parser("run", help="the daemon")
@@ -218,6 +306,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"config error: {e} (run `issuefleet doctor`)")
 
     try:
+        if args.cmd == "linear-oauth":
+            return cmd_linear_oauth(cfg)
         if args.cmd == "once":
             return cmd_once(cfg, args.dry_run)
         if args.cmd == "run":

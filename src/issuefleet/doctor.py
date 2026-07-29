@@ -127,18 +127,49 @@ def _check_dirs(cfg: Config) -> list[Check]:
     return out
 
 
+def _check_webhooks(cfg: Config) -> list[Check]:
+    w = cfg.webhooks
+    if not w.enabled:
+        return [Check(OK, "webhooks", "disabled — poll-only (fine, just slower)")]
+    out = []
+    have_any = False
+    for provider, env, path in (
+        ("github", w.github_secret_env, w.github_secret_file),
+        ("linear", w.linear_secret_env, w.linear_secret_file),
+    ):
+        secret = creds.resolve_optional(env, path)
+        if secret:
+            have_any = True
+            out.append(Check(OK, f"webhook secret ({provider})", f"resolves (${env} or {path})"))
+            if not creds.file_permissions_ok(Path(path)):
+                out.append(Check(WARN, f"{path}", "readable by group/other — chmod 600 it"))
+        else:
+            out.append(Check(WARN, f"webhook secret ({provider})",
+                             f"missing — {provider} endpoint will be disabled "
+                             f"(set ${env} or write {path})"))
+    if not have_any:
+        out.append(Check(FAIL, "webhooks", "enabled but no signing secrets resolve; the "
+                         "listener will not start"))
+    else:
+        out.append(Check(OK, "webhook listener", f"will bind {w.bind}:{w.port} — put a "
+                         "tunnel in front; never expose the port directly"))
+    return out
+
+
 def _check_linear(cfg: Config, tracker) -> list[Check]:
     out = []
     try:
         key, source = creds.resolve_linear_key(cfg)
     except creds.CredentialError as e:
         return [Check(FAIL, "Linear API key", str(e))]
-    out.append(Check(OK, "Linear API key", f"from {source}"))
+    mode = LinearClient(key, auth=cfg.linear_auth).auth
+    out.append(Check(OK, "Linear API key",
+                     f"from {source} ({'agent/OAuth token, Bearer' if mode == 'oauth' else 'personal key, raw header'})"))
     if not creds.file_permissions_ok(cfg.linear_api_key_file):
         out.append(Check(WARN, f"{cfg.linear_api_key_file}",
                          "readable by group/other — chmod 600 it"))
     if tracker is None:
-        tracker = LinearTracker(LinearClient(key))
+        tracker = LinearTracker(LinearClient(key, auth=cfg.linear_auth))
     try:
         viewer = tracker.viewer()
         out.append(Check(OK, "Linear API", f"authenticated as {viewer.get('name')} "
@@ -232,6 +263,7 @@ def run_doctor(
     checks += _check_launcher_flags(cfg)
     checks += _check_container_settings(cfg)
     checks += _check_dirs(cfg)
+    checks += _check_webhooks(cfg)
     linear_checks = _check_linear(cfg, tracker)
     checks += linear_checks
     checks += _check_github(cfg, git, forges)
@@ -245,7 +277,7 @@ def run_doctor(
             registry = Registry(cfg.state_dir)
             if tracker is None:
                 key, _ = creds.resolve_linear_key(cfg)
-                tracker = LinearTracker(LinearClient(key))
+                tracker = LinearTracker(LinearClient(key, auth=cfg.linear_auth))
             rec = Reconciler(cfg, registry, tracker, forges or {}, git, runner or _NullRunner())
             eligible = {p.name: tracker.eligible_issues(p) for p in cfg.projects}
             claim_now, waiting = rec.claim_queue(eligible)

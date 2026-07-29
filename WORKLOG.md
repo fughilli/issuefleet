@@ -58,8 +58,24 @@ end-to-end flow — `docs/SMOKE_TEST.md` is the step-by-step procedure.
    installed launcher knows each flag. Requires launcher > 1.6.12.
    (`copy_from_repo` stays, but only for untracked workspace state like
    .claude/settings.local.json — it never held skill approval.)
-2. `nix flake lock` on the Mac (no nix in this container); commit flake.lock.
-3. Finish `docs/SMOKE_TEST.md`; record results here. Then Splanc.
+2. NEW 2026-07-29: webhooks + bot identities shipped (offline-tested only):
+   - `[webhooks]` listener (loopback + tunnel) wakes the reconcile loop on
+     verified GitHub/Linear events — no more waiting out the poll interval.
+     Operator setup: tunnel (Cloudflare/Tailscale), repo webhook w/ secret,
+     Linear webhook w/ signing secret; see README "Webhooks".
+   - GitHub bot = machine-user PAT swap (docs only).
+   - Linear agents platform: `issuefleet linear-oauth` (actor=app install,
+     no seat), Bearer auth auto-detected via lin_oauth_ prefix,
+     delegation/@-mention claims via AgentSessionEvent webhooks (10s ack
+     from the webhook thread), status/question/ready → thought/elicitation/
+     response activities, prompted → worker inbox. **Everything
+     agent-platform is unproven live** — implemented from Linear docs
+     (linear.app/developers/agents + /agent-interaction); verify the
+     payload shapes on first real install, especially AgentSessionEvent
+     field names and agentActivityCreate input.
+3. `nix flake lock` on the Mac (no nix in this container); commit flake.lock.
+4. Finish `docs/SMOKE_TEST.md` (review-forward, merge teardown, robustness
+   checks, `run` daemon); then the webhook/agent live test; then Splanc.
 
 ## Open questions / blockers
 

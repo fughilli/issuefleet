@@ -34,6 +34,16 @@ class Tracker(Protocol):
 
     def set_state(self, issue_id: str, state_name: str) -> None: ...
 
+    def emit_activity(self, session_id: str, content: dict) -> None:
+        """Linear agents platform: emit a typed activity (thought / action /
+        elicitation / response / error) into an agent session."""
+        ...
+
+    def resolve_project_id(self, project) -> str:
+        """Tracker-native project id for a configured project (used to route
+        agent-session claims to the right [[projects]] entry)."""
+        ...
+
 
 class Forge(Protocol):
     def find_pr(self, head_branch: str) -> PullRequest | None: ...
