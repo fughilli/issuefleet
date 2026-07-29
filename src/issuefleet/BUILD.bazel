@@ -1,8 +1,16 @@
-load("@rules_python//python:defs.bzl", "py_library")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library")
 
 py_library(
     name = "issuefleet",
     srcs = glob(["**/*.py"]),
     imports = [".."],
     visibility = ["//visibility:public"],
+)
+
+py_binary(
+    name = "cli",
+    srcs = ["cli.py"],
+    main = "cli.py",
+    visibility = ["//visibility:public"],
+    deps = [":issuefleet"],
 )

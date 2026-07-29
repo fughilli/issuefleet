@@ -1,0 +1,237 @@
+"""`issuefleet doctor` — tell the operator precisely what is missing.
+
+Safe and side-effect-free: every check is a read (filesystem stats, tool
+lookups, API queries). Dependencies are injectable so the checks are
+testable offline; when not injected, real clients are built from config.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+from issuefleet import config as config_mod
+from issuefleet import creds
+from issuefleet.config import Config, ConfigError
+from issuefleet.github import GithubForge, parse_repo_slug
+from issuefleet.gitops import Gitops
+from issuefleet.linear import LinearClient, LinearTracker
+from issuefleet.reconcile import Reconciler
+from issuefleet.registry import Registry
+
+OK, WARN, FAIL = "ok", "warn", "fail"
+_ICON = {OK: "✓", WARN: "⚠", FAIL: "✗"}
+
+
+@dataclass
+class Check:
+    status: str
+    label: str
+    detail: str = ""
+
+    def render(self) -> str:
+        return f" {_ICON[self.status]} {self.label}" + (f" — {self.detail}" if self.detail else "")
+
+
+def _writable_ancestor(path: Path) -> bool:
+    p = Path(path)
+    while not p.exists():
+        if p == p.parent:
+            return False
+        p = p.parent
+    return os.access(p, os.W_OK)
+
+
+def _check_tools(cfg: Config) -> list[Check]:
+    out = []
+    v = sys.version_info
+    out.append(
+        Check(OK if v >= (3, 11) else FAIL, f"python {v.major}.{v.minor}.{v.micro}",
+              "" if v >= (3, 11) else "3.11+ required (tomllib)")
+    )
+    for tool, why, severity in (
+        ("tmux", "workers run in detached tmux sessions", FAIL),
+        ("docker", "claude-container needs it", FAIL),
+        (cfg.claude_container, "the agent runner", FAIL),
+        ("git", "worktrees and pushes", FAIL),
+        ("claude", "only needed inside containers; harmless if absent on the host", WARN),
+    ):
+        path = shutil.which(tool)
+        out.append(Check(OK if path else severity, tool, path or f"not on PATH — {why}"))
+    return out
+
+
+def _check_container_settings(cfg: Config) -> list[Check]:
+    config_dir = cfg.container_config_dir or Path("~/.config/claude-container/config").expanduser()
+    settings = config_dir / "settings.json"
+    label = f"container settings {settings}"
+    try:
+        mode = json.loads(settings.read_text()).get("permissions", {}).get("defaultMode")
+    except FileNotFoundError:
+        return [Check(WARN, label, "not found — the launcher normally writes it on first run; "
+                      "without defaultMode=bypassPermissions headless turns hang forever")]
+    except (OSError, json.JSONDecodeError) as e:
+        return [Check(FAIL, label, f"unreadable: {e}")]
+    if mode == "bypassPermissions":
+        return [Check(OK, label, "permissions.defaultMode=bypassPermissions")]
+    return [Check(FAIL, label,
+                  f"permissions.defaultMode={mode!r} — headless turns will hang on the first "
+                  "permission prompt; expected 'bypassPermissions'")]
+
+
+def _check_dirs(cfg: Config) -> list[Check]:
+    out = []
+    for name, path in (("state_dir", cfg.state_dir), ("worktree_root", cfg.worktree_root)):
+        ok = _writable_ancestor(path)
+        out.append(Check(OK if ok else FAIL, f"{name} {path}",
+                         "writable" if ok else "no writable ancestor"))
+    return out
+
+
+def _check_linear(cfg: Config, tracker) -> list[Check]:
+    out = []
+    try:
+        key, source = creds.resolve_linear_key(cfg)
+    except creds.CredentialError as e:
+        return [Check(FAIL, "Linear API key", str(e))]
+    out.append(Check(OK, "Linear API key", f"from {source}"))
+    if not creds.file_permissions_ok(cfg.linear_api_key_file):
+        out.append(Check(WARN, f"{cfg.linear_api_key_file}",
+                         "readable by group/other — chmod 600 it"))
+    if tracker is None:
+        tracker = LinearTracker(LinearClient(key))
+    try:
+        viewer = tracker.viewer()
+        out.append(Check(OK, "Linear API", f"authenticated as {viewer.get('name')} "
+                         f"({viewer.get('email', 'no email')})"))
+    except Exception as e:
+        out.append(Check(FAIL, "Linear API", str(e)))
+        return out
+
+    for project in cfg.projects:
+        try:
+            issues = tracker.open_issues(project)
+            eligible = [i for i in issues if project.claim.matches(i)]
+            out.append(Check(OK, f"[{project.name}] Linear project {project.linear_project!r}",
+                             f"{len(issues)} open issue(s), {len(eligible)} eligible "
+                             f"({project.claim.strategy}={project.claim.value!r})"))
+            if issues:
+                states = tracker._states_for_issue(issues[0].id)
+                for state in (project.state_in_progress, project.state_done):
+                    if state.lower() not in states:
+                        out.append(Check(FAIL, f"[{project.name}] workflow state {state!r}",
+                                         f"not found on the team; available: {sorted(states)}"))
+                    else:
+                        out.append(Check(OK, f"[{project.name}] workflow state {state!r}"))
+            else:
+                out.append(Check(WARN, f"[{project.name}] workflow states",
+                                 "no open issues, cannot verify state names yet"))
+        except Exception as e:
+            out.append(Check(FAIL, f"[{project.name}] Linear project", str(e)))
+    return out
+
+
+def _check_github(cfg: Config, git: Gitops, forges: dict | None) -> list[Check]:
+    out = []
+    try:
+        token, source = creds.resolve_github_token(cfg)
+    except creds.CredentialError as e:
+        return [Check(FAIL, "GitHub token", str(e))]
+    out.append(Check(OK, "GitHub token", f"from {source}"))
+    if not creds.file_permissions_ok(cfg.github_token_file):
+        out.append(Check(WARN, f"{cfg.github_token_file}",
+                         "readable by group/other — chmod 600 it"))
+
+    for project in cfg.projects:
+        name = project.name
+        if not git.is_repo(project.repo):
+            out.append(Check(FAIL, f"[{name}] repo {project.repo}", "not a git repository"))
+            continue
+        try:
+            remote = git.remote_url(project.repo)
+            slug = parse_repo_slug(remote)
+            out.append(Check(OK, f"[{name}] origin", f"{remote} -> {slug}"))
+        except Exception as e:
+            out.append(Check(FAIL, f"[{name}] origin remote", str(e)))
+            continue
+        forge = (forges or {}).get(name) or GithubForge(token, slug)
+        try:
+            forge.repo_accessible()
+            out.append(Check(OK, f"[{name}] GitHub API", f"can read {slug}"))
+        except Exception as e:
+            out.append(Check(FAIL, f"[{name}] GitHub API", str(e)))
+        try:
+            git.has_commits_ahead(project.repo, project.base_ref)  # resolves the base ref
+            out.append(Check(OK, f"[{name}] base ref {project.base_ref!r}"))
+        except Exception as e:
+            out.append(Check(FAIL, f"[{name}] base ref {project.base_ref!r}", str(e)))
+    return out
+
+
+def run_doctor(
+    config_path: Path,
+    tracker=None,
+    forges: dict | None = None,
+    git: Gitops | None = None,
+    runner=None,
+    stream=sys.stdout,
+) -> int:
+    """Returns the process exit code (0 = healthy or warnings only)."""
+    print(f"issuefleet doctor — config {config_path}", file=stream)
+    try:
+        cfg = config_mod.load(config_path)
+        checks = [Check(OK, "config", f"{len(cfg.projects)} project(s)")]
+    except ConfigError as e:
+        checks = [Check(FAIL, "config", str(e))]
+        for c in checks:
+            print(c.render(), file=stream)
+        print("\n1 problem must be fixed before anything else can be checked.", file=stream)
+        return 1
+
+    git = git or Gitops()
+    checks += _check_tools(cfg)
+    checks += _check_container_settings(cfg)
+    checks += _check_dirs(cfg)
+    linear_checks = _check_linear(cfg, tracker)
+    checks += linear_checks
+    checks += _check_github(cfg, git, forges)
+
+    for c in checks:
+        print(c.render(), file=stream)
+
+    # The would-claim report: exactly what `run` would pick up, claim-order.
+    if tracker is not None or not any(c.status == FAIL for c in linear_checks):
+        try:
+            registry = Registry(cfg.state_dir)
+            if tracker is None:
+                key, _ = creds.resolve_linear_key(cfg)
+                tracker = LinearTracker(LinearClient(key))
+            rec = Reconciler(cfg, registry, tracker, forges or {}, git, runner or _NullRunner())
+            eligible = {p.name: tracker.eligible_issues(p) for p in cfg.projects}
+            claim_now, waiting = rec.claim_queue(eligible)
+            print("\nWould claim now:", file=stream)
+            if not claim_now:
+                print("  (nothing)", file=stream)
+            for issue, project in claim_now:
+                print(f"  {issue.key} [{project.name}] p{issue.priority} — {issue.title}", file=stream)
+            for issue, project in waiting:
+                print(f"  (waiting, fleet full) {issue.key} — {issue.title}", file=stream)
+            if registry.all():
+                print(f"\nRegistered workers: {len(registry.all())} "
+                      f"(see `issuefleet status`)", file=stream)
+        except Exception as e:
+            print(f"\nwould-claim report unavailable: {e}", file=stream)
+
+    fails = [c for c in checks if c.status == FAIL]
+    warns = [c for c in checks if c.status == WARN]
+    print(f"\n{len(fails)} problem(s), {len(warns)} warning(s).", file=stream)
+    return 1 if fails else 0
+
+
+class _NullRunner:
+    def alive(self, rec) -> bool:
+        return False

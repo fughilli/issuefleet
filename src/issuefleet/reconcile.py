@@ -85,6 +85,79 @@ class Reconciler:
         except Exception:
             log.exception("claim pass failed; will retry next tick")
 
+    # -------------------------------------------------------------- dry run
+
+    def plan(self) -> list[str]:
+        """What the next tick WOULD do — API reads only, zero writes to
+        Linear, GitHub, or the filesystem. Used by `once --dry-run` and
+        `doctor`'s would-claim report."""
+        lines: list[str] = []
+        for rec in self.registry.all():
+            try:
+                lines.extend(self._plan_worker(rec))
+            except Exception as e:
+                lines.append(f"{rec.issue_key}: cannot inspect ({e})")
+
+        eligible: dict[str, list[Issue]] = {}
+        for project in self.cfg.projects:
+            try:
+                eligible[project.name] = self.tracker.eligible_issues(project)
+            except Exception as e:
+                lines.append(f"{project.name}: cannot poll Linear ({e})")
+                eligible[project.name] = []
+        claim_now, waiting = self.claim_queue(eligible)
+        for issue, project in claim_now:
+            branch = project.branch_template.format(key=issue.key.lower(), slug=slugify(issue.title))
+            lines.append(
+                f"{issue.key}: would claim ({project.name}, priority {issue.priority}) "
+                f"-> branch {branch}, worktree {self.cfg.worktree_root / project.name / issue.key}"
+            )
+        for issue, project in waiting:
+            lines.append(f"{issue.key}: eligible but waiting (fleet full)")
+        return lines or ["nothing to do"]
+
+    def _plan_worker(self, rec: WorkerRecord) -> list[str]:
+        lines = []
+        project = self.cfg.project(rec.project)
+        issue = self.tracker.get_issue(rec.issue_id)
+        reason = self._unclaim_reason(project, issue)
+        if reason:
+            return [f"{rec.issue_key}: would un-claim and tear down ({reason})"]
+        if rec.phase == PHASE_CRASHED:
+            return [f"{rec.issue_key}: crashed (kept for inspection); no action"]
+        if not self.runner.alive(rec):
+            if rec.restarts >= self.cfg.max_restarts:
+                lines.append(f"{rec.issue_key}: session dead; would give up and report crash")
+            else:
+                lines.append(
+                    f"{rec.issue_key}: session dead; would restart (attempt {rec.restarts + 1})"
+                )
+        mailbox = Mailbox(Path(rec.worktree) / ".agent" / "mailbox")
+        for msg in mailbox.pending_outbox():
+            if msg.kind == "ready":
+                lines.append(f"{rec.issue_key}: would push {rec.branch} and open/update PR")
+            else:
+                lines.append(f"{rec.issue_key}: would relay {msg.kind} to Linear")
+        viewer = self.tracker.get_viewer_id()
+        inbound = [
+            c
+            for c in self.tracker.comments_since(rec.issue_id, rec.comment_cursor)
+            if c.author_id != viewer and MARKER_PREFIX not in c.body
+        ]
+        if inbound:
+            lines.append(f"{rec.issue_key}: would ingest {len(inbound)} new Linear comment(s)")
+        if rec.pr_number is not None:
+            forge = self.forges[project.name]
+            new_fb = [f for f in forge.pr_feedback(rec.pr_number) if f.id not in rec.seen_feedback_ids]
+            if new_fb:
+                lines.append(f"{rec.issue_key}: would forward {len(new_fb)} PR feedback item(s)")
+            pr = forge.get_pr(rec.pr_number)
+            if pr.merged:
+                lines.append(f"{rec.issue_key}: PR #{pr.number} merged; would tear down")
+            elif pr.state == "closed" and f"closed-{pr.number}" not in rec.seen_feedback_ids:
+                lines.append(f"{rec.issue_key}: PR #{pr.number} closed unmerged; would notify agent")
+        return lines or [f"{rec.issue_key}: up to date; no action"]
+
     # ------------------------------------------------------------- servicing
 
     def _service(self, rec: WorkerRecord) -> None:
@@ -334,11 +407,13 @@ class Reconciler:
 
     # ---------------------------------------------------------------- claims
 
-    def _claim(self, eligible: dict[str, list[Issue]]) -> None:
+    def claim_queue(
+        self, eligible: dict[str, list[Issue]]
+    ) -> tuple[list[tuple[Issue, ProjectConfig]], list[tuple[Issue, ProjectConfig]]]:
+        """Split eligible unclaimed issues into (claim now, waiting), honoring
+        the global cap, per-project caps, and priority-then-age order."""
         active = [w for w in self.registry.all() if w.phase == PHASE_ACTIVE]
-        capacity = self.cfg.max_workers - len(active)
-        if capacity <= 0:
-            return
+        capacity = max(0, self.cfg.max_workers - len(active))
 
         queue: list[tuple[Issue, ProjectConfig]] = []
         for project in self.cfg.projects:
@@ -353,7 +428,11 @@ class Reconciler:
             queue.extend((i, project) for i in candidates)
 
         queue.sort(key=lambda pair: pair[0].sort_key())
-        for issue, project in queue[:capacity]:
+        return queue[:capacity], queue[capacity:]
+
+    def _claim(self, eligible: dict[str, list[Issue]]) -> None:
+        claim_now, _waiting = self.claim_queue(eligible)
+        for issue, project in claim_now:
             try:
                 self._claim_one(issue, project)
             except Exception:

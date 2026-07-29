@@ -6,30 +6,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from fakes import FakeForge, FakeGit, FakeRunner, FakeTracker
+from fakes import FakeForge, FakeGit, FakeRunner, FakeTracker, make_issue
 
 from issuefleet import MARKER_PREFIX, config
 from issuefleet.mailbox import Mailbox
-from issuefleet.model import Issue
 from issuefleet.reconcile import Reconciler, slugify
 from issuefleet.registry import Registry
-
-
-def make_issue(n=1, **kw):
-    base = dict(
-        id=f"issue-{n}",
-        key=f"FUG-{n}",
-        title=f"Fix thing {n}",
-        description="Please fix it.",
-        url=f"https://linear.app/x/issue/FUG-{n}",
-        priority=0,
-        state_name="Todo",
-        state_type="unstarted",
-        labels=["agent"],
-        created_at=f"2026-07-{n:02d}T00:00:00+00:00",
-    )
-    base.update(kw)
-    return Issue(**base)
 
 
 class ReconcileTest(unittest.TestCase):

@@ -9,6 +9,23 @@ from issuefleet import MARKER_PREFIX
 from issuefleet.model import Comment, Issue, PrFeedback, PullRequest
 
 
+def make_issue(n=1, **kw):
+    base = dict(
+        id=f"issue-{n}",
+        key=f"FUG-{n}",
+        title=f"Fix thing {n}",
+        description="Please fix it.",
+        url=f"https://linear.app/x/issue/FUG-{n}",
+        priority=0,
+        state_name="Todo",
+        state_type="unstarted",
+        labels=["agent"],
+        created_at=f"2026-07-{n:02d}T00:00:00+00:00",
+    )
+    base.update(kw)
+    return Issue(**base)
+
+
 class FakeTracker:
     """Linear stand-in. Test code mutates .issues / .comments directly."""
 
@@ -148,6 +165,9 @@ class FakeForge:
 
     def pr_feedback(self, number: int) -> list[PrFeedback]:
         return list(self.feedback.get(number, []))
+
+    def repo_accessible(self) -> bool:
+        return True
 
 
 class FakeGit:

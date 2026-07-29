@@ -4,3 +4,10 @@ exports_files([
     "flake.nix",
     "AGENT_BUILD_PROMPT.md",
 ])
+
+# `bazel run //:issuefleet -- doctor` etc. The bin/issuefleet shell wrapper
+# is the zero-install equivalent for hosts without Bazel.
+alias(
+    name = "issuefleet",
+    actual = "//src/issuefleet:cli",
+)

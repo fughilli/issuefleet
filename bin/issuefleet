@@ -1,0 +1,4 @@
+#!/bin/sh
+# Zero-install entrypoint: stdlib-only, needs just Python 3.11+.
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PYTHONPATH="$ROOT/src" exec python3 -m issuefleet.cli "$@"
