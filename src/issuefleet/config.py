@@ -1,0 +1,185 @@
+"""TOML config loading and validation.
+
+Secrets never live in the config file: credentials are resolved from the
+environment or a chmod-600 file whose *path* is configured here. Putting a
+literal key in the config is rejected outright.
+"""
+
+from __future__ import annotations
+
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+
+CLAIM_STRATEGIES = ("label", "assignee", "state")
+
+_FORBIDDEN_SECRET_KEYS = (
+    "linear_api_key",
+    "github_token",
+    "gh_token",
+    "token",
+    "api_key",
+)
+
+
+class ConfigError(Exception):
+    pass
+
+
+@dataclass
+class ClaimRule:
+    strategy: str  # label | assignee | state
+    value: str  # label name | Linear user id/email | workflow state name
+
+    def matches(self, issue) -> bool:
+        if self.strategy == "label":
+            return self.value in issue.labels
+        if self.strategy == "assignee":
+            return issue.assignee_id == self.value
+        if self.strategy == "state":
+            return issue.state_name == self.value
+        raise ConfigError(f"unknown claim strategy {self.strategy!r}")
+
+
+@dataclass
+class ProjectConfig:
+    name: str  # short handle, used in paths and logs
+    linear_project: str  # Linear project name or UUID
+    repo: Path  # local main checkout (push remote = origin)
+    claim: ClaimRule
+    base_ref: str = "main"
+    branch_template: str = "agent/{key}-{slug}"
+    state_in_progress: str = "In Progress"
+    state_done: str = "Done"
+    delete_remote_branch: bool = True
+    max_workers: int | None = None  # per-project cap; None = only global cap
+
+
+@dataclass
+class Config:
+    projects: list[ProjectConfig]
+    poll_interval_s: int = 60
+    max_workers: int = 4
+    state_dir: Path = Path("~/.local/state/issuefleet").expanduser()
+    worktree_root: Path = Path("~/worktrees").expanduser()
+    # agent behavior
+    max_auto_turns: int = 40
+    max_restarts: int = 3
+    claude_args: list[str] = field(default_factory=list)
+    container_config_dir: Path | None = None  # None = launcher's shared default
+    claude_container: str = "claude-container"
+    # credential lookup (values are env var names / file paths, never secrets)
+    linear_api_key_env: str = "LINEAR_API_KEY"
+    linear_api_key_file: Path = Path("~/.config/issuefleet/linear.key").expanduser()
+    github_token_env: list[str] = field(default_factory=lambda: ["GITHUB_TOKEN", "GH_TOKEN"])
+    github_token_file: Path = Path("~/.config/issuefleet/github.key").expanduser()
+
+    def project(self, name: str) -> ProjectConfig:
+        for p in self.projects:
+            if p.name == name:
+                return p
+        raise ConfigError(f"no [[projects]] entry named {name!r}")
+
+
+def _reject_secrets(table: dict, where: str) -> None:
+    for k in table:
+        if k.lower() in _FORBIDDEN_SECRET_KEYS:
+            raise ConfigError(
+                f"{where}: refusing to read {k!r} from the config file — "
+                "secrets go in the environment or a chmod-600 file "
+                "(see linear_api_key_file / github_token_file)"
+            )
+
+
+def _path(v: str) -> Path:
+    return Path(v).expanduser()
+
+
+def load(path: str | Path) -> Config:
+    path = Path(path).expanduser()
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except FileNotFoundError:
+        raise ConfigError(f"config file not found: {path}")
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"{path}: invalid TOML: {e}")
+    return parse(data, source=str(path))
+
+
+def parse(data: dict, source: str = "<config>") -> Config:
+    daemon = data.get("daemon", {})
+    creds = data.get("credentials", {})
+    agent = data.get("agent", {})
+    for name, table in (("daemon", daemon), ("credentials", creds), ("agent", agent)):
+        if not isinstance(table, dict):
+            raise ConfigError(f"{source}: [{name}] must be a table")
+        _reject_secrets(table, f"{source} [{name}]")
+
+    raw_projects = data.get("projects", [])
+    if not raw_projects:
+        raise ConfigError(f"{source}: at least one [[projects]] entry is required")
+
+    projects = []
+    for i, p in enumerate(raw_projects):
+        where = f"{source} [[projects]] #{i + 1}"
+        _reject_secrets(p, where)
+        for req in ("name", "linear_project", "repo"):
+            if not p.get(req):
+                raise ConfigError(f"{where}: missing required key {req!r}")
+        claim_raw = p.get("claim", {"strategy": "label", "value": "agent"})
+        strategy = claim_raw.get("strategy", "label")
+        if strategy not in CLAIM_STRATEGIES:
+            raise ConfigError(
+                f"{where}: claim.strategy must be one of {CLAIM_STRATEGIES}, got {strategy!r}"
+            )
+        if not claim_raw.get("value"):
+            raise ConfigError(f"{where}: claim.value is required (e.g. the label name)")
+        projects.append(
+            ProjectConfig(
+                name=p["name"],
+                linear_project=p["linear_project"],
+                repo=_path(p["repo"]),
+                claim=ClaimRule(strategy=strategy, value=claim_raw["value"]),
+                base_ref=p.get("base_ref", "main"),
+                branch_template=p.get("branch_template", "agent/{key}-{slug}"),
+                state_in_progress=p.get("state_in_progress", "In Progress"),
+                state_done=p.get("state_done", "Done"),
+                delete_remote_branch=p.get("delete_remote_branch", True),
+                max_workers=p.get("max_workers"),
+            )
+        )
+    names = [p.name for p in projects]
+    if len(set(names)) != len(names):
+        raise ConfigError(f"{source}: duplicate [[projects]] name")
+
+    cfg = Config(
+        projects=projects,
+        poll_interval_s=int(daemon.get("poll_interval_s", 60)),
+        max_workers=int(daemon.get("max_workers", 4)),
+        max_auto_turns=int(agent.get("max_auto_turns", 40)),
+        max_restarts=int(agent.get("max_restarts", 3)),
+        claude_args=list(agent.get("claude_args", [])),
+        claude_container=agent.get("claude_container", "claude-container"),
+    )
+    if "state_dir" in daemon:
+        cfg.state_dir = _path(daemon["state_dir"])
+    if "worktree_root" in daemon:
+        cfg.worktree_root = _path(daemon["worktree_root"])
+    if "container_config_dir" in agent:
+        cfg.container_config_dir = _path(agent["container_config_dir"])
+    if "linear_api_key_env" in creds:
+        cfg.linear_api_key_env = creds["linear_api_key_env"]
+    if "linear_api_key_file" in creds:
+        cfg.linear_api_key_file = _path(creds["linear_api_key_file"])
+    if "github_token_env" in creds:
+        v = creds["github_token_env"]
+        cfg.github_token_env = [v] if isinstance(v, str) else list(v)
+    if "github_token_file" in creds:
+        cfg.github_token_file = _path(creds["github_token_file"])
+
+    if cfg.poll_interval_s < 5:
+        raise ConfigError(f"{source}: poll_interval_s must be >= 5")
+    if cfg.max_workers < 1:
+        raise ConfigError(f"{source}: max_workers must be >= 1")
+    return cfg

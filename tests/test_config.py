@@ -1,0 +1,107 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from issuefleet import config
+from issuefleet.config import ConfigError
+from issuefleet.model import Issue
+
+
+def make_issue(**kw):
+    base = dict(
+        id="i1",
+        key="FUG-1",
+        title="t",
+        description="",
+        url="",
+        priority=0,
+        state_name="Todo",
+        state_type="unstarted",
+    )
+    base.update(kw)
+    return Issue(**base)
+
+
+MINIMAL = {
+    "projects": [
+        {
+            "name": "splanc",
+            "linear_project": "Splanc",
+            "repo": "~/Projects/splanc",
+            "claim": {"strategy": "label", "value": "agent"},
+        }
+    ]
+}
+
+
+class ConfigTest(unittest.TestCase):
+    def test_minimal_parses_with_defaults(self):
+        cfg = config.parse(MINIMAL)
+        self.assertEqual(cfg.poll_interval_s, 60)
+        self.assertEqual(cfg.max_workers, 4)
+        self.assertEqual(cfg.max_auto_turns, 40)
+        p = cfg.project("splanc")
+        self.assertEqual(p.base_ref, "main")
+        self.assertEqual(p.claim.strategy, "label")
+        self.assertNotIn("~", str(p.repo))  # expanded
+
+    def test_load_from_toml_file(self):
+        toml = (
+            '[daemon]\npoll_interval_s = 30\n'
+            '[[projects]]\nname = "x"\nlinear_project = "X"\nrepo = "/tmp/x"\n'
+            'claim = { strategy = "state", value = "Ready for agent" }\n'
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+            f.write(toml)
+        cfg = config.load(f.name)
+        self.assertEqual(cfg.poll_interval_s, 30)
+        self.assertEqual(cfg.projects[0].claim.strategy, "state")
+        Path(f.name).unlink()
+
+    def test_missing_projects_rejected(self):
+        with self.assertRaisesRegex(ConfigError, "projects"):
+            config.parse({})
+
+    def test_missing_required_project_key(self):
+        with self.assertRaisesRegex(ConfigError, "repo"):
+            config.parse({"projects": [{"name": "a", "linear_project": "A"}]})
+
+    def test_bad_claim_strategy(self):
+        bad = {
+            "projects": [
+                {
+                    "name": "a",
+                    "linear_project": "A",
+                    "repo": "/tmp/a",
+                    "claim": {"strategy": "vibes", "value": "x"},
+                }
+            ]
+        }
+        with self.assertRaisesRegex(ConfigError, "strategy"):
+            config.parse(bad)
+
+    def test_secret_in_config_rejected(self):
+        data = dict(MINIMAL)
+        data["credentials"] = {"linear_api_key": "lin_api_123"}
+        with self.assertRaisesRegex(ConfigError, "chmod-600"):
+            config.parse(data)
+
+    def test_duplicate_project_names_rejected(self):
+        data = {"projects": [MINIMAL["projects"][0], dict(MINIMAL["projects"][0])]}
+        with self.assertRaisesRegex(ConfigError, "duplicate"):
+            config.parse(data)
+
+    def test_claim_rules(self):
+        label = config.ClaimRule("label", "agent")
+        self.assertTrue(label.matches(make_issue(labels=["agent", "bug"])))
+        self.assertFalse(label.matches(make_issue(labels=["bug"])))
+        assignee = config.ClaimRule("assignee", "user-bot")
+        self.assertTrue(assignee.matches(make_issue(assignee_id="user-bot")))
+        self.assertFalse(assignee.matches(make_issue(assignee_id=None)))
+        state = config.ClaimRule("state", "Ready for agent")
+        self.assertTrue(state.matches(make_issue(state_name="Ready for agent")))
+        self.assertFalse(state.matches(make_issue(state_name="Todo")))
+
+
+if __name__ == "__main__":
+    unittest.main()

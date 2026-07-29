@@ -1,0 +1,19 @@
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
+
+py_library(
+    name = "fakes",
+    srcs = ["fakes.py"],
+    deps = ["//src/issuefleet"],
+)
+
+[
+    py_test(
+        name = f[:-len(".py")],
+        srcs = [f],
+        deps = [
+            ":fakes",
+            "//src/issuefleet",
+        ],
+    )
+    for f in glob(["test_*.py"])
+]
