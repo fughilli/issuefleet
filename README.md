@@ -92,11 +92,15 @@ max_auto_turns = 40          # self-driven turns without human contact (the runa
 max_restarts = 3             # crash restarts before giving up
 claude_args = []             # extra flags for every `claude -p` turn
 claude_container = "claude-container"      # launcher binary
-# Launcher-local workspace state copied (copy-if-missing) from the parent
-# checkout into each fresh worktree, so interactive launcher prompts already
-# answered there — notably claude-container's workspace-skill approval —
-# don't wedge a headless worker. Git-excluded in the worktree.
+# Untracked workspace-local state copied (copy-if-missing) from the parent
+# checkout into each fresh worktree — e.g. .claude/settings.local.json,
+# which a fresh worktree otherwise lacks. Git-excluded in the worktree.
 copy_from_repo = [".claude", ".claude-container-overlay"]
+# Host-side flags passed to claude-container before the in-container
+# command. --skills-ignore-new (launcher > 1.6.12) launches with only
+# already-accepted skills instead of prompting for undecided ones; set to
+# [] for older launchers (doctor verifies the launcher knows each flag).
+launcher_args = ["--skills-ignore-new"]
 # container_config_dir = "~/.config/claude-container/config"  # default: launcher's shared dir
 
 [[projects]]                 # one block per (Linear project -> GitHub repo) pair
@@ -198,11 +202,13 @@ restart-safe and idempotent.
   re-claimed into the same failure). Free the issue by removing/re-adding
   the label after inspecting the kept worktree.
 - **One Linear workspace per config.** All projects share the one API key.
-- **Launcher prompts.** claude-container's interactive confirmations (e.g.
-  workspace-skill approval) block a headless worker. `copy_from_repo`
-  inherits the parent checkout's answers into each worktree; if a launcher
-  update moves that state, add its path to `copy_from_repo` — a worker stuck
-  at a prompt is visible via `issuefleet attach <KEY>`.
+- **Launcher prompts.** claude-container's interactive confirmations block a
+  headless worker. Skill approval needs launcher > 1.6.12, where worktrees
+  share the parent repo's skill choices (keyed on the resolved main working
+  tree) and `--skills-ignore-new` (passed by default via `launcher_args`)
+  skips prompting for skills added after approval — accept those once from
+  the parent checkout. A worker stuck at any prompt is visible (and
+  answerable) via `issuefleet attach <KEY>`.
 - **`state` claim strategy can't detect "operator changed their mind"** —
   only closure un-claims (see the strategy table).
 

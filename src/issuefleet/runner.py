@@ -49,6 +49,9 @@ class TmuxRunner:
         cmd = [config.claude_container, "-w", rec.worktree]
         if config.container_config_dir is not None:
             cmd += ["-c", str(config.container_config_dir)]
+        # Launcher flags must precede the command: the launcher treats the
+        # first non-option argument as the start of the in-container command.
+        cmd += list(config.launcher_args)
         cmd += ["/workspace/.agent/bin/turnloop", "run"]
         return cmd
 

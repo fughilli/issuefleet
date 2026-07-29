@@ -153,8 +153,16 @@ class TmuxRunnerTest(unittest.TestCase):
         cmd = self.runner.command(self.rec, self.cfg)
         self.assertEqual(cmd[:3], [str(self.stub), "-w", self.rec.worktree])
         self.assertEqual(cmd[-2:], ["/workspace/.agent/bin/turnloop", "run"])
+        # Launcher flags must precede the in-container command (the first
+        # non-option argument starts the command).
+        self.assertLess(cmd.index("--skills-ignore-new"), cmd.index("/workspace/.agent/bin/turnloop"))
         for word in cmd:  # launcher word-splits: no spaces allowed anywhere
             self.assertNotIn(" ", word)
+
+    def test_launcher_args_configurable(self):
+        self.cfg.launcher_args = []
+        cmd = self.runner.command(self.rec, self.cfg)
+        self.assertNotIn("--skills-ignore-new", cmd)
 
     def test_start_alive_stop_idempotent(self):
         self.assertFalse(self.runner.alive(self.rec))

@@ -66,13 +66,20 @@ class Config:
     max_auto_turns: int = 40
     max_restarts: int = 3
     claude_args: list[str] = field(default_factory=list)
-    # Launcher-local workspace state copied from the parent checkout into
-    # each fresh worktree (copy-if-missing), so interactive launcher prompts
-    # already answered there — notably claude-container's workspace-skill
-    # approval — don't wedge a headless worker. Git-excluded in the worktree.
+    # Workspace-local state copied from the parent checkout into each fresh
+    # worktree (copy-if-missing), e.g. .claude/settings.local.json, which is
+    # untracked and would otherwise be absent there. Git-excluded in the
+    # worktree. (Skill approval is NOT here — claude-container keys it on
+    # the main working tree in its user config dir, shared by worktrees.)
     copy_from_repo: list[str] = field(
         default_factory=lambda: [".claude", ".claude-container-overlay"]
     )
+    # Host-side flags passed to the launcher before the in-container command.
+    # --skills-ignore-new (claude-container > 1.6.12) starts the container
+    # with only already-accepted skills instead of prompting for undecided
+    # ones — a headless worker must never sit at a prompt. Set to [] for
+    # older launchers (doctor checks the installed launcher knows each flag).
+    launcher_args: list[str] = field(default_factory=lambda: ["--skills-ignore-new"])
     container_config_dir: Path | None = None  # None = launcher's shared default
     claude_container: str = "claude-container"
     # credential lookup (values are env var names / file paths, never secrets)
@@ -170,6 +177,7 @@ def parse(data: dict, source: str = "<config>") -> Config:
         copy_from_repo=list(
             agent.get("copy_from_repo", [".claude", ".claude-container-overlay"])
         ),
+        launcher_args=list(agent.get("launcher_args", ["--skills-ignore-new"])),
         claude_container=agent.get("claude_container", "claude-container"),
     )
     if "state_dir" in daemon:

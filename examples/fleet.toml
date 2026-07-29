@@ -20,6 +20,7 @@ max_restarts = 3
 claude_args = []
 claude_container = "claude-container"
 copy_from_repo = [".claude", ".claude-container-overlay"]
+launcher_args = ["--skills-ignore-new"]   # needs claude-container > 1.6.12
 
 # The motivating case: Linear project "Splanc" feeding fughilli/splanc.
 [[projects]]

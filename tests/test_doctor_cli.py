@@ -91,6 +91,62 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(self.rec.plan(), ["nothing to do"])
 
 
+class LauncherFlagCheckTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.cfg = config.parse(
+            {
+                "projects": [
+                    {
+                        "name": "x",
+                        "linear_project": "X",
+                        "repo": str(self.root),
+                        "claim": {"strategy": "label", "value": "agent"},
+                    }
+                ]
+            }
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def stub_launcher(self, help_text: str) -> str:
+        stub = self.root / "cc-stub"
+        stub.write_text(f"#!/bin/sh\necho '{help_text}'\n")
+        stub.chmod(0o755)
+        return str(stub)
+
+    def test_supported_flag_ok(self):
+        from issuefleet.doctor import _check_launcher_flags
+
+        self.cfg.claude_container = self.stub_launcher(
+            "usage: claude-container [--skills-ignore-new] ..."
+        )
+        [check] = _check_launcher_flags(self.cfg)
+        self.assertEqual(check.status, "ok")
+
+    def test_unknown_flag_fails_with_upgrade_hint(self):
+        from issuefleet.doctor import _check_launcher_flags
+
+        self.cfg.claude_container = self.stub_launcher("usage: claude-container [-w DIR] ...")
+        [check] = _check_launcher_flags(self.cfg)
+        self.assertEqual(check.status, "fail")
+        self.assertIn("launcher_args", check.detail)
+
+    def test_no_flags_configured_is_silent(self):
+        from issuefleet.doctor import _check_launcher_flags
+
+        self.cfg.launcher_args = []
+        self.assertEqual(_check_launcher_flags(self.cfg), [])
+
+    def test_missing_launcher_defers_to_tools_check(self):
+        from issuefleet.doctor import _check_launcher_flags
+
+        self.cfg.claude_container = "definitely-not-on-path-xyz"
+        self.assertEqual(_check_launcher_flags(self.cfg), [])
+
+
 class DoctorTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

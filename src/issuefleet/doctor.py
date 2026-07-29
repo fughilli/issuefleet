@@ -65,6 +65,41 @@ def _check_tools(cfg: Config) -> list[Check]:
     return out
 
 
+def _check_launcher_flags(cfg: Config) -> list[Check]:
+    """Every configured launcher flag must be one the installed launcher
+    understands — an unknown flag aborts every worker launch. Probed via
+    `--help`, which is side-effect-free."""
+    if not cfg.launcher_args:
+        return []
+    launcher = shutil.which(cfg.claude_container)
+    if launcher is None:
+        return []  # the tools check already failed this
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            [cfg.claude_container, "--help"], capture_output=True, text=True, timeout=15
+        )
+        help_text = proc.stdout + proc.stderr
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return [Check(WARN, "launcher flags", f"could not run {cfg.claude_container} --help: {e}")]
+    out = []
+    for flag in cfg.launcher_args:
+        name = flag.split("=")[0]
+        if name in help_text:
+            out.append(Check(OK, f"launcher flag {name}"))
+        else:
+            out.append(
+                Check(
+                    FAIL,
+                    f"launcher flag {name}",
+                    f"not in {cfg.claude_container} --help — launcher too old? "
+                    "Upgrade it or remove the flag from [agent] launcher_args",
+                )
+            )
+    return out
+
+
 def _check_container_settings(cfg: Config) -> list[Check]:
     config_dir = cfg.container_config_dir or Path("~/.config/claude-container/config").expanduser()
     settings = config_dir / "settings.json"
@@ -194,6 +229,7 @@ def run_doctor(
 
     git = git or Gitops()
     checks += _check_tools(cfg)
+    checks += _check_launcher_flags(cfg)
     checks += _check_container_settings(cfg)
     checks += _check_dirs(cfg)
     linear_checks = _check_linear(cfg, tracker)

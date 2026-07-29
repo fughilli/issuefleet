@@ -91,6 +91,12 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "duplicate"):
             config.parse(data)
 
+    def test_launcher_args_default_and_override(self):
+        self.assertEqual(config.parse(MINIMAL).launcher_args, ["--skills-ignore-new"])
+        data = dict(MINIMAL)
+        data["agent"] = {"launcher_args": []}
+        self.assertEqual(config.parse(data).launcher_args, [])
+
     def test_claim_rules(self):
         label = config.ClaimRule("label", "agent")
         self.assertTrue(label.matches(make_issue(labels=["agent", "bug"])))
