@@ -48,6 +48,40 @@ def stage_runtime(bin_dir: Path) -> None:
         entry.chmod(entry.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def inherit_repo_files(repo: Path, worktree: Path, rel_paths: list[str]) -> list[str]:
+    """Copy launcher-local workspace state (e.g. claude-container's skill
+    approval) from the parent checkout into a fresh worktree, so headless
+    launches don't stop at interactive confirmation prompts the operator
+    already answered once in the main checkout.
+
+    Copy-if-missing per file: whatever the checkout already provides
+    (tracked files) always wins, only absent files are filled in. Returns
+    the relative paths that exist in the parent repo, with a trailing slash
+    for directories, so the caller can git-exclude them in the worktree —
+    an agent's `git add .` must never sweep this state into a commit.
+    """
+    inherited: list[str] = []
+    for rel in rel_paths:
+        src = Path(repo) / rel
+        dst = Path(worktree) / rel
+        if src.is_dir():
+            for f in sorted(src.rglob("*")):
+                if not f.is_file():
+                    continue
+                target = dst / f.relative_to(src)
+                if target.exists():
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(f, target)
+            inherited.append(rel.rstrip("/") + "/")
+        elif src.is_file():
+            if not dst.exists():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+            inherited.append(rel)
+    return inherited
+
+
 def provision(worktree: Path, issue, branch: str, base_ref: str, config) -> str:
     """Create/refresh the .agent dir. Idempotent: an existing state.json is
     preserved (re-adoption after an orchestrator restart must not reset the

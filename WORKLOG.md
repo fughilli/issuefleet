@@ -39,11 +39,18 @@ end-to-end flow — `docs/SMOKE_TEST.md` is the step-by-step procedure.
 
 ## Next up
 
-1. On the operator's Mac: `nix flake lock` (no nix in this container) and
-   commit `flake.lock`.
-2. Run `docs/SMOKE_TEST.md` against a throwaway repo + scratch Linear
-   project; fix what it surfaces; record results here.
-3. Then point it at Splanc per `examples/fleet.toml`.
+1. Resume the smoke test on the operator's Mac. It reached dispatch (first
+   tmux session launched — claiming, provisioning, and the runner all work
+   live) and stuck at claude-container's workspace-skill approval prompt.
+   Fix shipped 2026-07-29: `[agent] copy_from_repo` inherits the parent
+   checkout's launcher state (`.claude/`, `.claude-container-overlay/`,
+   copy-if-missing, git-excluded) into each worktree. **Verify on the Mac
+   that the skill-approval file actually lives under one of those two
+   paths** — if the launcher keeps it elsewhere (or keys it by workspace
+   path in its config dir, where copying can't help), adjust
+   `copy_from_repo` or teach the runner a launcher flag instead.
+2. `nix flake lock` on the Mac (no nix in this container); commit flake.lock.
+3. Finish `docs/SMOKE_TEST.md`; record results here. Then Splanc.
 
 ## Open questions / blockers
 

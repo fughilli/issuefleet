@@ -446,6 +446,8 @@ class Reconciler:
 
         self.git.create_worktree(project.repo, branch, project.base_ref, worktree)
         self.git.add_worktree_exclude(project.repo, worktree, ".agent/")
+        for rel in worker_mod.inherit_repo_files(project.repo, worktree, self.cfg.copy_from_repo):
+            self.git.add_worktree_exclude(project.repo, worktree, rel)
         session_uuid = worker_mod.provision(worktree, issue, branch, project.base_ref, self.cfg)
 
         rec = WorkerRecord(

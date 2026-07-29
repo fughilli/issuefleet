@@ -79,6 +79,19 @@ class ReconcileTest(unittest.TestCase):
         self.assertIn("tmux attach", body)
         self.assertIn(MARKER_PREFIX + "claim-issue-1", body)
 
+    def test_claim_inherits_launcher_state_from_parent_repo(self):
+        # The claude-container skill-approval prompt wedges headless
+        # launches; the approval state from the main checkout must land in
+        # the worktree and be git-excluded there.
+        repo = self.cfg.projects[0].repo
+        (repo / ".claude").mkdir(parents=True)
+        (repo / ".claude" / "skills-approval.json").write_text('{"ok": 1}')
+        w = self.claim_one()
+        self.assertEqual(
+            (Path(w.worktree) / ".claude" / "skills-approval.json").read_text(), '{"ok": 1}'
+        )
+        self.assertIn((w.worktree, ".claude/"), self.git.excludes)
+
     def test_claim_is_idempotent_across_ticks(self):
         self.claim_one()
         self.rec.tick()

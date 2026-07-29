@@ -92,6 +92,11 @@ max_auto_turns = 40          # self-driven turns without human contact (the runa
 max_restarts = 3             # crash restarts before giving up
 claude_args = []             # extra flags for every `claude -p` turn
 claude_container = "claude-container"      # launcher binary
+# Launcher-local workspace state copied (copy-if-missing) from the parent
+# checkout into each fresh worktree, so interactive launcher prompts already
+# answered there — notably claude-container's workspace-skill approval —
+# don't wedge a headless worker. Git-excluded in the worktree.
+copy_from_repo = [".claude", ".claude-container-overlay"]
 # container_config_dir = "~/.config/claude-container/config"  # default: launcher's shared dir
 
 [[projects]]                 # one block per (Linear project -> GitHub repo) pair
@@ -193,6 +198,11 @@ restart-safe and idempotent.
   re-claimed into the same failure). Free the issue by removing/re-adding
   the label after inspecting the kept worktree.
 - **One Linear workspace per config.** All projects share the one API key.
+- **Launcher prompts.** claude-container's interactive confirmations (e.g.
+  workspace-skill approval) block a headless worker. `copy_from_repo`
+  inherits the parent checkout's answers into each worktree; if a launcher
+  update moves that state, add its path to `copy_from_repo` — a worker stuck
+  at a prompt is visible via `issuefleet attach <KEY>`.
 - **`state` claim strategy can't detect "operator changed their mind"** —
   only closure un-claims (see the strategy table).
 

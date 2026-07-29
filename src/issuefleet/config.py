@@ -66,6 +66,13 @@ class Config:
     max_auto_turns: int = 40
     max_restarts: int = 3
     claude_args: list[str] = field(default_factory=list)
+    # Launcher-local workspace state copied from the parent checkout into
+    # each fresh worktree (copy-if-missing), so interactive launcher prompts
+    # already answered there — notably claude-container's workspace-skill
+    # approval — don't wedge a headless worker. Git-excluded in the worktree.
+    copy_from_repo: list[str] = field(
+        default_factory=lambda: [".claude", ".claude-container-overlay"]
+    )
     container_config_dir: Path | None = None  # None = launcher's shared default
     claude_container: str = "claude-container"
     # credential lookup (values are env var names / file paths, never secrets)
@@ -160,6 +167,9 @@ def parse(data: dict, source: str = "<config>") -> Config:
         max_auto_turns=int(agent.get("max_auto_turns", 40)),
         max_restarts=int(agent.get("max_restarts", 3)),
         claude_args=list(agent.get("claude_args", [])),
+        copy_from_repo=list(
+            agent.get("copy_from_repo", [".claude", ".claude-container-overlay"])
+        ),
         claude_container=agent.get("claude_container", "claude-container"),
     )
     if "state_dir" in daemon:
