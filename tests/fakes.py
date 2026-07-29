@@ -19,6 +19,7 @@ class FakeTracker:
         self.posted: list[tuple[str, str]] = []  # (issue_id, body)
         self.state_changes: list[tuple[str, str]] = []  # (issue_id, state_name)
         self.fail_next_post = 0  # countdown of post_comment calls to fail
+        self.fail_get_issue: set[str] = set()  # issue_ids whose get_issue raises
         self._comment_seq = 0
 
     def add_issue(self, issue: Issue) -> Issue:
@@ -51,6 +52,8 @@ class FakeTracker:
         ]
 
     def get_issue(self, issue_id: str) -> Issue | None:
+        if issue_id in self.fail_get_issue:
+            raise ConnectionError("fake Linear outage on get_issue")
         return self.issues.get(issue_id)
 
     def comments_since(self, issue_id: str, cursor: str | None) -> list[Comment]:
@@ -156,11 +159,15 @@ class FakeGit:
         self.pushed: list[str] = []
         self.removed: list[str] = []
         self.deleted_remote: list[str] = []
-        self.commits_ahead: dict[str, int] = {}  # branch -> count
+        self.ahead = True  # what has_commits_ahead reports
+        self.excludes: list[tuple[str, str]] = []  # (worktree, pattern)
         self.fail_next_push = 0
 
     def create_worktree(self, repo: Path, branch: str, base_ref: str, path: Path) -> None:
         Path(path).mkdir(parents=True, exist_ok=True)
+
+    def add_worktree_exclude(self, repo: Path, path: Path, pattern: str) -> None:
+        self.excludes.append((str(path), pattern))
 
     def remove_worktree(self, repo: Path, path: Path, branch: str) -> None:
         self.removed.append(str(path))
@@ -169,7 +176,7 @@ class FakeGit:
         self.deleted_remote.append(branch)
 
     def has_commits_ahead(self, worktree: Path, base_ref: str) -> bool:
-        return True
+        return self.ahead
 
     def push(self, worktree: Path, branch: str) -> None:
         if self.fail_next_push > 0:
