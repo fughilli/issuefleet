@@ -4,67 +4,55 @@ _Last updated: 2026-07-29 by an agent session. Read together with `git log`._
 
 ## Goal
 
-Build **issuefleet** per `AGENT_BUILD_PROMPT.md`: a generic, restart-safe daemon
-that drains Linear issues into GitHub PRs using a fleet of containerized coding
-agents, one worktree+branch+container per issue, with all credentials held
-host-side and a filesystem mailbox as the agents' only channel out.
-
-Name note: the brief asks to confirm the name with the operator; this session
-ran unattended and picked `issuefleet` from the brief's suggestion list — a
-trivial rename if the operator objects.
-
-## Plan of record
-
-1. Scaffold: Bazel 8 bzlmod (hermetic Python 3.11, stdlib-only runtime, no pip
-   graph), Nix devshell flake (registration-only `rules_nixpkgs_core`), this
-   worklog.
-2. Offline core, tests-first, no network/docker: `config`, `model`, `mailbox`,
-   `registry`, then `turns` (pure decision logic), then `reconcile` against
-   fake Tracker/Forge/Runner interfaces.
-3. Real clients: `linear` (GraphQL, raw auth header), `github` (REST, PAT).
-4. `gitops` (idempotent worktree/branch), `runner` (detached host tmux +
-   claude-container; chosen over hand-rolled `docker run` because the launcher
-   handles linked-worktree `.git` mounts first-class and duplicating its mount
-   logic is a drift risk), agent runtime staged into `<worktree>/.agent/bin/`
-   with per-worktree `info/exclude` (§5.4 option 1).
-5. `doctor`, `cli` (doctor/run/once/status/attach/stop/logs, `--dry-run`).
-6. README (credential boundary first), launchd + systemd units, smoke-test doc.
-
-Key contracts (decided; argue in a commit if changing):
-- Mailbox: `<worktree>/.agent/mailbox/{inbox,outbox,archive}/`, one JSON file
-  per message, monotonic sequence in filename, atomic write via tmp+rename.
-  Outbox kinds: `status`, `question`, `ready`. Inbox kinds: `reply`,
-  `pr_review`, `pr_closed`, `shutdown`, `unclaimed`.
-- Relay dedupe: every relayed message id embedded as `<!-- issuefleet:msg:<id> -->`
-  in the posted body; relay checks recent comments for the marker before
-  posting (at-least-once + explicit dedupe). Inbound filtered on viewer id AND
-  marker.
-- Turn loop exit codes (shell loop is a dumb consumer): 0=take another turn,
-  10=idle (question pending / waiting for input), 20=idle (ready submitted),
-  30=shutdown, 40=auto-turn budget exhausted.
+**issuefleet** (this repo): a generic daemon draining Linear issues into
+GitHub PRs via containerized agent workers, per `AGENT_BUILD_PROMPT.md`.
+Credentials host-side only; filesystem mailbox as the agents' sole channel.
 
 ## State of play
 
-- Container caveat: this build environment has **no docker, no nix binary**,
-  and the operator-host prior-art scratchpad is not mounted. Everything
-  Docker/live-API-touching can only be unit-tested here; e2e smoke is a
-  documented manual procedure for the operator's Mac.
-- Scaffold in progress (this commit).
+The full system is built and committed — core, agent runtime, real
+Linear/GitHub clients, gitops, tmux runner, doctor/CLI, docs, deploy units.
+`bazelisk test //tests:all` = 8 targets / ~80 tests green. See `git log`
+for the per-layer details; README.md documents the architecture.
+
+**Verified by running here (Linux container, no docker/nix/credentials):**
+- everything offline: mailbox, turn decisions, reconcile lifecycle (claim →
+  relay → ready → PR → review → merge → teardown, un-claim, crash-restart,
+  retry-after-outage, dedupe, capacity), client request construction;
+- real-git integration (worktrees, exclude, force-with-lease push against a
+  local bare origin) and real-tmux start/alive/stop with a stub container;
+- `bin/issuefleet doctor` / `status` / `--help` live (doctor correctly
+  flags this container's missing docker/claude-container/credentials).
+
+**Unproven (needs the operator's Mac):** anything touching the real
+claude-container launcher, live Linear/GitHub APIs, and the full
+end-to-end flow — `docs/SMOKE_TEST.md` is the step-by-step procedure.
+
+**Deviations from the brief, deliberate:**
+- §5.4 exclusion path: git does not read `.git/worktrees/<name>/info/exclude`
+  (verified on git 2.43) — using `$GIT_COMMON_DIR/info/exclude` instead.
+  Flagged in README "Known edges".
+- Name `issuefleet` self-selected from the brief's suggestion list (session
+  ran unattended); trivial rename if the operator objects.
+- Dry-run is implemented as `Reconciler.plan()` (API reads, zero writes)
+  rather than no-op client wrappers — simpler and honestly side-effect-free.
 
 ## Next up
 
-1. Task #2: config/model/mailbox/registry with `bazel test` green.
-2. Then turns, then reconcile (see Plan of record).
+1. On the operator's Mac: `nix flake lock` (no nix in this container) and
+   commit `flake.lock`.
+2. Run `docs/SMOKE_TEST.md` against a throwaway repo + scratch Linear
+   project; fix what it surfaces; record results here.
+3. Then point it at Splanc per `examples/fleet.toml`.
 
 ## Open questions / blockers
 
-- Name `issuefleet` unconfirmed by operator (see Goal note).
-- `flake.lock` cannot be generated here (no nix); run `nix flake lock` on the
-  host and commit it.
+- Tool name confirmation (see deviations).
+- `deploy/*.plist|.service` contain operator-specific paths to edit.
 
 ## Don't retry (dead ends)
 
-- Bazel 7.x pin with rules_python 2.x — py_binary bootstrap breaks
-  (`%interpreter_args%` left literal). Pin stays 8.x + `bootstrap_impl=script`.
-- Committing the worker entrypoint into target repos — explicitly ruled out by
-  the brief (§2, §5.4).
+- Bazel 7.x with rules_python 2.x — py_binary bootstrap breaks; stay on
+  8.x + `bootstrap_impl=script`.
+- Per-worktree `info/exclude` — git ignores it entirely; common-dir only.
+- Committing worker entrypoints into target repos — ruled out by the brief.

@@ -1,0 +1,43 @@
+# Worked multi-project example. Copy to ~/.config/issuefleet/config.toml
+# and adjust. Secrets NEVER go here (the parser rejects them) — see
+# [credentials] for where they live.
+
+[daemon]
+poll_interval_s = 60
+max_workers = 4
+state_dir = "~/.local/state/issuefleet"
+worktree_root = "~/worktrees"
+
+[credentials]
+linear_api_key_env = "LINEAR_API_KEY"
+linear_api_key_file = "~/.config/issuefleet/linear.key"
+github_token_env = ["GITHUB_TOKEN", "GH_TOKEN"]
+github_token_file = "~/.config/issuefleet/github.key"
+
+[agent]
+max_auto_turns = 40
+max_restarts = 3
+claude_args = []
+claude_container = "claude-container"
+
+# The motivating case: Linear project "Splanc" feeding fughilli/splanc.
+[[projects]]
+name = "splanc"
+linear_project = "Splanc"
+repo = "~/Projects/splanc"
+base_ref = "main"
+claim = { strategy = "label", value = "agent" }
+state_in_progress = "In Progress"
+state_done = "Done"
+delete_remote_branch = true
+
+# A second pair, capped at 2 concurrent workers, claimed by workflow state.
+[[projects]]
+name = "led-mapper"
+linear_project = "LED Mapper"
+repo = "~/Projects/led_mapper"
+base_ref = "main"
+claim = { strategy = "state", value = "Ready for agent" }
+state_in_progress = "In Progress"
+state_done = "Done"
+max_workers = 2

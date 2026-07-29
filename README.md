@@ -1,0 +1,212 @@
+# issuefleet
+
+A generic, restart-safe daemon that drains a **Linear** work queue into
+**GitHub pull requests** using a fleet of autonomous coding agents — one
+issue ⇒ one branch ⇒ one git worktree ⇒ one container. Label an issue,
+watch an agent claim it, discuss its plan in the issue thread, review its
+PR, merge; the worker is torn down and the next issue in the queue gets its
+slot. Works for any (Linear project → GitHub repo) pair, several at once,
+configured declaratively.
+
+## The load-bearing idea: credentials never enter the agents
+
+Agent containers run with permission prompts disabled. Handing such a
+sandbox your Linear key and a GitHub token would be a bad trade, so **all
+credentials live host-side, in the orchestrator process; agent containers
+get none.**
+
+```
+                 HOST (credentialed)                          CONTAINERS (no credentials)
+┌───────────────────────────────────────────────┐      ┌──────────────────────────────────┐
+│  issuefleet daemon (reconcile loop, poll 60s) │      │ tmux: issuefleet-<proj>-<KEY>    │
+│                                               │      │  └─ claude-container             │
+│   Linear GraphQL ◄──── relay ────┐            │      │      └─ turnloop → claude -p     │
+│   GitHub REST    ◄── (dedup'd) ──┤            │      │           │                      │
+│   git push (SSH) ◄───────────────┤            │      │           ▼ agentctl             │
+│                                  │            │      │   <worktree>/.agent/mailbox/     │
+│   registry.json (durable fleet state)         │◄─────┼── outbox/ status|question|ready  │
+│   inbox writes ──────────────────────────────►│──────┼─► inbox/  reply|pr_feedback|...  │
+└───────────────────────────────────────────────┘      └──────────────────────────────────┘
+```
+
+A worker's **only** channel to the world is a filesystem mailbox inside its
+worktree: it writes `status` / `question` / `ready` JSON messages to an
+outbox; the orchestrator polls those and performs the credentialed act
+(post a Linear comment, push the branch, open the PR). Inbound Linear
+comments and PR review feedback are written to the worker's inbox and
+injected into its next turn. Agents commit freely — a linked worktree's
+objects land in the shared `.git` on the host — but nothing leaves the
+machine until the orchestrator pushes it.
+
+Relaying is at-least-once with explicit dedupe: every posted comment embeds
+an HTML-comment marker (`<!-- issuefleet:msg:<id> -->`); before posting, the
+relay checks for the marker, so a crash between "posted" and "acked" cannot
+double-post. The same marker (plus the API user's identity) keeps the
+orchestrator from re-ingesting its own comments.
+
+## Setup
+
+1. **Linear API key** — create a personal API key at
+   <https://linear.app/settings/api> (consider a dedicated bot account so
+   claims are attributable). Then either `export LINEAR_API_KEY=...` or:
+   ```sh
+   mkdir -p ~/.config/issuefleet
+   printf '%s' 'lin_api_...' > ~/.config/issuefleet/linear.key
+   chmod 600 ~/.config/issuefleet/linear.key
+   ```
+2. **GitHub token** — a fine-grained PAT with **Contents: RW** and
+   **Pull requests: RW** on the target repo(s). `export GITHUB_TOKEN=...` or
+   write it to `~/.config/issuefleet/github.key` (chmod 600). Pushes use
+   your existing SSH remote, not the token; the token only manages PRs.
+   Secrets never go in the config file — the config parser rejects them.
+3. **The claim label** — create a label (default suggestion: `agent`) in the
+   Linear team, or pick another claim strategy (below).
+4. **Config** — write `~/.config/issuefleet/config.toml` (schema below,
+   worked example in `examples/fleet.toml`).
+5. **Verify** — `bin/issuefleet doctor`. It is safe and side-effect-free,
+   tells you exactly what is missing, and prints exactly which issues would
+   be claimed. Run it until it is clean; then try `bin/issuefleet once
+   --dry-run`, then `run`.
+
+The CLI is stdlib-only Python 3.11+: run `bin/issuefleet` directly, or
+hermetically via `bazel run //:issuefleet --`. A Nix devshell (`nix develop`)
+provides bazelisk/python/tmux on hosts that want it.
+
+## Configuration
+
+```toml
+[daemon]
+poll_interval_s = 60                       # reconcile tick interval
+max_workers = 4                            # global concurrency cap
+state_dir = "~/.local/state/issuefleet"    # registry, worker archives, logs
+worktree_root = "~/worktrees"              # worktrees live OUTSIDE the repos
+
+[credentials]                              # lookup locations, never secrets
+linear_api_key_env = "LINEAR_API_KEY"
+linear_api_key_file = "~/.config/issuefleet/linear.key"
+github_token_env = ["GITHUB_TOKEN", "GH_TOKEN"]   # checked in order
+github_token_file = "~/.config/issuefleet/github.key"
+
+[agent]
+max_auto_turns = 40          # self-driven turns without human contact (the runaway brake)
+max_restarts = 3             # crash restarts before giving up
+claude_args = []             # extra flags for every `claude -p` turn
+claude_container = "claude-container"      # launcher binary
+# container_config_dir = "~/.config/claude-container/config"  # default: launcher's shared dir
+
+[[projects]]                 # one block per (Linear project -> GitHub repo) pair
+name = "splanc"              # short handle used in paths, sessions, logs
+linear_project = "Splanc"    # Linear project name (or UUID if names collide)
+repo = "~/Projects/splanc"   # local main checkout; `origin` must point at GitHub
+base_ref = "main"            # branch agents fork from and PRs target
+claim = { strategy = "label", value = "agent" }
+branch_template = "agent/{key}-{slug}"     # {key}=fug-12, {slug} from the title
+state_in_progress = "In Progress"          # workflow state set on claim
+state_done = "Done"                        # set when the PR merges
+delete_remote_branch = true                # after merge
+# max_workers = 2            # optional per-project cap within the global cap
+```
+
+Claim strategies (`claim.strategy` / `claim.value`):
+
+| strategy | claims when | un-claims when |
+| --- | --- | --- |
+| `label` | issue carries the label `value` | label removed, or issue closed |
+| `assignee` | issue assigned to Linear user id `value` | assignee changed, or issue closed |
+| `state` | issue is in workflow state `value` | issue closed (claiming itself moves the state, so state changes can't un-claim) |
+
+Queue order is Linear priority (Urgent → Low, "no priority" last), then age.
+When the fleet is full, eligible issues wait; `doctor` shows the order.
+
+## Worker lifecycle
+
+| phase (agent-side) | meaning | leaves when |
+| --- | --- | --- |
+| fresh | claimed; worktree + `.agent/` provisioned, no turn yet | first turn starts (full issue brief as prompt) |
+| running | taking self-driven turns, committing, posting `status` | asks a question / declares `ready` / budget trips |
+| waiting | asked a question via `agentctl ask`; session idles | a human replies on the Linear issue |
+| ready | declared `ready`; orchestrator pushed branch, opened PR | PR feedback arrives (back to running) or PR merges |
+| budget-idle | `max_auto_turns` without human contact; posted a status and idling | any human reply (resets the budget clock) |
+| crashed (host-side) | session died `max_restarts`+1 times; reported on the issue | operator intervention (worktree kept for inspection) |
+
+Teardown (merge, un-claim, or `stop`): signal the agent via a `shutdown`
+mailbox message → archive the mailbox + turn transcripts to
+`<state_dir>/archive/<project>-<KEY>-<timestamp>/` (the transcript outlives
+the branch) → kill the tmux session (the `--rm` container exits with it) →
+remove the worktree → on merge only: set the issue's done state and delete
+the branch.
+
+## Watching, steering, stopping
+
+```sh
+bin/issuefleet status            # fleet: phase, turns, PR, liveness, pending messages
+bin/issuefleet attach FUG-12     # the worker's live tmux session (take over freely)
+bin/issuefleet logs FUG-12 -f    # tail its captured output
+bin/issuefleet stop FUG-12       # wind one worker down by hand
+bin/issuefleet once              # single reconcile tick (cron-friendly)
+bin/issuefleet once --dry-run    # print every action a tick would take; mutate nothing
+```
+
+Steering happens in Linear: comment on a claimed issue and the comment is
+injected into the agent's next turn. Remove the label (or close the issue)
+to un-claim. Stopping the daemon never stops the agents — they live in
+detached tmux sessions; a restarted daemon re-adopts the fleet from the
+registry.
+
+## Running persistently
+
+**macOS (launchd)** — edit paths in `deploy/com.issuefleet.daemon.plist`, then:
+
+```sh
+cp deploy/com.issuefleet.daemon.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.issuefleet.daemon.plist
+```
+
+**Linux (systemd user unit)** — edit paths in `deploy/issuefleet.service`, then:
+
+```sh
+cp deploy/issuefleet.service ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now issuefleet
+```
+
+Both ship with the daemon's stdout going to `<state_dir>/daemon.log`.
+Alternatively, run `issuefleet once` from cron — every command is
+restart-safe and idempotent.
+
+## Known edges (honestly)
+
+- **No auto-rebase.** Agents branch off the base ref at claim time.
+  Overlapping issues produce conflicting PRs; a human resolves them.
+- **Merge detection lags** by up to `poll_interval_s`, as does everything
+  else the loop observes.
+- **Cost.** N agents running continuously is real money; `max_auto_turns`
+  is the only brake. There is no wall-clock or token budget yet.
+- **Mid-turn stop.** Teardown signals the agent, but a worker cut off
+  mid-turn loses that turn's uncommitted work (its commits and mailbox are
+  archived first).
+- **`.agent/` exclusion is per-repo, not per-worktree.** The brief suggested
+  `.git/worktrees/<name>/info/exclude`, but git (verified on 2.43) never
+  reads that file; only `$GIT_COMMON_DIR/info/exclude` works. issuefleet
+  appends `.agent/` there — uncommitted local state, invisible to
+  collaborators, but shared by all worktrees of that repo.
+- **Crashed workers hold their claim** (deliberately, so the issue isn't
+  re-claimed into the same failure). Free the issue by removing/re-adding
+  the label after inspecting the kept worktree.
+- **One Linear workspace per config.** All projects share the one API key.
+- **`state` claim strategy can't detect "operator changed their mind"** —
+  only closure un-claims (see the strategy table).
+
+## Development
+
+```sh
+bazelisk test //tests:all     # hermetic Python 3.11 toolchain, no system deps
+bazelisk run //:issuefleet -- doctor
+nix develop                   # optional devshell: bazelisk, python, tmux
+```
+
+Layout: `src/issuefleet/` (core: mailbox, turns, reconcile, clients, ports),
+`src/issuefleet/agent_runtime/` (the code staged into each worktree's
+`.agent/bin/` — stdlib-only, version-matched to the orchestrator by
+construction), `tests/` (everything runs offline; gitops/tmux tests use real
+git and tmux with local fixtures). The manual end-to-end procedure is
+`docs/SMOKE_TEST.md`. `WORKLOG.md` carries session-to-session state.

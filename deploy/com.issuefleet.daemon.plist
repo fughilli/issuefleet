@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- macOS launchd agent for the issuefleet daemon.
+     Edit the three paths (issuefleet checkout, PATH, log dir), then:
+       cp deploy/com.issuefleet.daemon.plist ~/Library/LaunchAgents/
+       launchctl load ~/Library/LaunchAgents/com.issuefleet.daemon.plist
+     Unload with `launchctl unload`. The daemon exits cleanly on SIGTERM
+     (finishes its tick); workers keep running either way. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.issuefleet.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/kevin/Projects/issuefleet/bin/issuefleet</string>
+        <string>run</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- tmux, docker, claude-container, git must be reachable. -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/kevin/.local/bin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/kevin/.local/state/issuefleet/daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/kevin/.local/state/issuefleet/daemon.log</string>
+</dict>
+</plist>
