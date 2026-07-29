@@ -41,8 +41,10 @@ machine until the orchestrator pushes it.
 Relaying is at-least-once with explicit dedupe: every posted comment embeds
 an HTML-comment marker (`<!-- issuefleet:msg:<id> -->`); before posting, the
 relay checks for the marker, so a crash between "posted" and "acked" cannot
-double-post. The same marker (plus the API user's identity) keeps the
-orchestrator from re-ingesting its own comments.
+double-post. The same marker keeps the orchestrator from re-ingesting its
+own comments — deliberately *not* an API-user identity check, because with a
+personal (non-bot) key the operator *is* that user and an identity filter
+would silently eat their replies to the agent.
 
 ## Setup
 
@@ -167,8 +169,11 @@ Two log layers per worker:
   `<worktree>/.agent/logs/turn-NNNN.jsonl` and archived host-side at
   teardown.
 
-Steering happens in Linear: comment on a claimed issue and the comment is
-injected into the agent's next turn. Remove the label (or close the issue)
+Steering happens in Linear: comment on a claimed issue — plain language, no
+@-mention needed — and the comment is injected into the agent's next turn on
+the next tick. A reply wakes an idle agent (waiting on a question, idling
+after its PR, or budget-idled); comments accumulated between ticks are
+batched into one turn. Remove the label (or close the issue)
 to un-claim. Stopping the daemon never stops the agents — they live in
 detached tmux sessions; a restarted daemon re-adopts the fleet from the
 registry.

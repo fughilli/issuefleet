@@ -138,11 +138,10 @@ class Reconciler:
                 lines.append(f"{rec.issue_key}: would push {rec.branch} and open/update PR")
             else:
                 lines.append(f"{rec.issue_key}: would relay {msg.kind} to Linear")
-        viewer = self.tracker.get_viewer_id()
         inbound = [
             c
             for c in self.tracker.comments_since(rec.issue_id, rec.comment_cursor)
-            if c.author_id != viewer and MARKER_PREFIX not in c.body
+            if MARKER_PREFIX not in c.body
         ]
         if inbound:
             lines.append(f"{rec.issue_key}: would ingest {len(inbound)} new Linear comment(s)")
@@ -295,15 +294,19 @@ class Reconciler:
         mailbox.archive_outbox(msg, receipt={"pr": pr.number, "url": pr.url})
 
     def _ingest_comments(self, rec: WorkerRecord, mailbox: Mailbox) -> None:
-        viewer = self.tracker.get_viewer_id()
         comments = self.tracker.comments_since(rec.issue_id, rec.comment_cursor)
         advanced = False
         for c in comments:
             if rec.comment_cursor is None or c.created_at > rec.comment_cursor:
                 rec.comment_cursor = c.created_at
                 advanced = True
-            if c.author_id == viewer or MARKER_PREFIX in c.body:
-                continue  # belt and braces: never re-ingest our own posts
+            # The marker is the authoritative self-post filter: every
+            # orchestrator post carries one by construction. Do NOT also
+            # filter on the API user's identity — with a personal (non-bot)
+            # key the operator IS that user, and an identity check would
+            # silently eat their replies to the agent.
+            if MARKER_PREFIX in c.body:
+                continue
             mailbox.ensure().put_inbox(
                 "reply", {"author": c.author_name, "text": c.body, "source": "linear"}
             )

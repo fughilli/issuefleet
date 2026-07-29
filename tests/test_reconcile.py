@@ -295,6 +295,31 @@ class ReconcileTest(unittest.TestCase):
         replies = [m for m in self.mailbox().pending_inbox() if m.kind == "reply"]
         self.assertEqual(len(replies), 1)
 
+    def test_operator_reply_from_api_key_account_is_ingested(self):
+        # With a personal (non-bot) Linear key, the operator's replies come
+        # from the same user as the orchestrator's posts. Only the marker
+        # may filter — an identity check would silently eat the reply.
+        from issuefleet.model import Comment
+
+        self.claim_one()
+        self.mailbox().put_outbox("status", {"text": "plan"})
+        self.rec.tick()  # bot posts (marker-stamped) under the viewer id
+        self.tracker.comments["issue-1"].append(
+            Comment(
+                id="op1",
+                author_id=self.tracker.viewer_id,  # operator == API user
+                author_name="kevin",
+                body="looks good, ship it",
+                created_at="2026-07-29T23:00:00+00:00",
+            )
+        )
+        self.rec.tick()
+        replies = [m for m in self.mailbox().pending_inbox() if m.kind == "reply"]
+        self.assertEqual(len(replies), 1)
+        self.assertEqual(replies[0].payload["text"], "looks good, ship it")
+        # ...while the orchestrator's own marker-stamped posts stayed out.
+        self.assertEqual(replies[0].payload["author"], "kevin")
+
     # -- isolation ---------------------------------------------------------
 
     def test_sick_worker_does_not_stall_the_fleet(self):
