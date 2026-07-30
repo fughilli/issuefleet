@@ -78,20 +78,27 @@ provides bazelisk/python/tmux on hosts that want it.
 
 **GitHub App (preferred).** PRs open as `yourapp[bot]`, auth uses
 short-lived installation tokens instead of a long-lived PAT, and the app's
-own webhook covers every installed repo (no per-repo webhook setup). Setup:
+own webhook covers every installed repo (no per-repo webhook setup).
 
-1. Create the app (Settings → Developer settings → GitHub Apps → New):
-   permissions *Contents: RW* and *Pull requests: RW*; subscribe to *Issue
-   comment, Pull request, Pull request review, Pull request review comment*
-   events; webhook URL = your tunnel's `/webhook/github`, with a secret
-   (goes in `[webhooks] github_secret_file`).
-2. Note the **App ID**, generate a **private key** (PEM), save it to
-   `github_app_key_file` (chmod 600), and **install** the app on the target
-   repos/orgs.
-3. Set `[credentials] github_app_id`. That's it — `github_auth = "auto"`
-   switches to app auth when the id + key are present; installations are
-   discovered per repo owner (pin `github_app_installation_id` to skip
-   discovery). `doctor` shows the resolved `slug[bot]` and installations.
+One-command setup via GitHub's app-manifest flow (no token required):
+
+```sh
+bin/issuefleet github-app-setup --webhook-url https://<tunnel>/webhook/github
+# add --org <org> to create it under an org instead of your user account
+```
+
+It serves a localhost page, you click **Create GitHub App** once, and the
+manifest conversion hands back everything: the private key lands in
+`github_app_key_file`, the webhook secret in `[webhooks]
+github_secret_file`, and it prints the `github_app_id` line for your config
+plus the **install** link (installing it on the target repos is the one
+remaining click). Permissions and event subscriptions are baked into the
+manifest (*Contents/Pull requests: RW*; issue-comment/PR/review events).
+
+With `github_auth = "auto"` the daemon switches to app auth as soon as the
+id + key exist; installations are discovered per repo owner (pin
+`github_app_installation_id` to skip discovery). `doctor` shows the
+resolved `slug[bot]` and installation list.
 
 App JWTs are RS256-signed via the `openssl` CLI (stdlib Python can't sign
 RSA; openssl ships with macOS/Linux, and doctor checks for it).

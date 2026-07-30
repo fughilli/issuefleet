@@ -12,3 +12,8 @@ __pycache__/
 # Nix
 result
 result-*
+
+# Secrets (operator-provided tokens/keys; never committed)
+credentials/
+*.pem
+*.secret

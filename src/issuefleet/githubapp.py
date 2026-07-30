@@ -141,3 +141,100 @@ class AppTokenProvider:
     def app_slug(self) -> str:
         """The app's slug (doctor display); bot user is <slug>[bot]."""
         return self._jwt_call("GET", "/app").get("slug", "?")
+
+
+# ---------------------------------------------------------------------------
+# App creation via the manifest flow (`issuefleet github-app-setup`).
+#
+# There is no PAT-authenticated API for creating a GitHub App. The manifest
+# flow is the closest thing: serve a local page that form-POSTs the manifest
+# to github.com, the operator clicks "Create GitHub App" once, GitHub
+# redirects back with a one-time code, and the (unauthenticated)
+# /app-manifests/{code}/conversions endpoint returns the App ID, private
+# key, and webhook secret in one response.
+# ---------------------------------------------------------------------------
+
+
+def build_manifest(name: str, redirect_url: str, webhook_url: str | None) -> dict:
+    manifest = {
+        "name": name,
+        "url": "https://github.com/apps",  # required informational homepage
+        "redirect_url": redirect_url,
+        "public": False,
+        "default_permissions": {"contents": "write", "pull_requests": "write"},
+        "default_events": [
+            "issue_comment",
+            "pull_request",
+            "pull_request_review",
+            "pull_request_review_comment",
+        ],
+    }
+    if webhook_url:
+        manifest["hook_attributes"] = {"url": webhook_url}
+    return manifest
+
+
+def manifest_form_html(manifest: dict, target_url: str) -> str:
+    """A self-submitting form; GitHub only accepts the manifest as a form
+    POST from a browser, not as an API call."""
+    payload = json.dumps(manifest).replace("&", "&amp;").replace('"', "&quot;")
+    return f"""<!doctype html>
+<html><body onload="document.forms[0].submit()">
+<p>Redirecting to GitHub to create the app…</p>
+<form action="{target_url}" method="post">
+<input type="hidden" name="manifest" value="{payload}">
+<noscript><button type="submit">Create GitHub App</button></noscript>
+</form></body></html>"""
+
+
+def convert_manifest_code(code: str, transport=urllib_transport) -> dict:
+    """One-time exchange; the response contains id, slug, pem,
+    webhook_secret, and html_url. No authentication required."""
+    resp = transport(
+        "POST",
+        f"{API_ROOT}/app-manifests/{code}/conversions",
+        {"Accept": "application/vnd.github+json", "Content-Type": "application/json"},
+        {},
+    )
+    if not resp.get("pem"):
+        raise GithubAppError(f"manifest conversion returned no private key: {resp}")
+    return resp
+
+
+def run_manifest_flow(port: int, form_html: str, timeout_s: int = 600) -> str:
+    """Serve the form at /, capture the redirect code at /callback."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from urllib.parse import parse_qs, urlparse
+
+    captured: dict = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            parsed = urlparse(self.path)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            if parsed.path == "/callback":
+                params = parse_qs(parsed.query)
+                if "code" in params:
+                    captured["code"] = params["code"][0]
+                    self.wfile.write(b"issuefleet: app created. You can close this tab.")
+                else:
+                    captured["error"] = "no code in redirect"
+                    self.wfile.write(b"issuefleet: no code in redirect; see terminal.")
+            else:
+                self.wfile.write(form_html.encode())
+
+    server = HTTPServer(("127.0.0.1", port), Handler)
+    server.timeout = timeout_s
+    try:
+        while not captured:
+            server.handle_request()
+    finally:
+        server.server_close()
+    if "code" not in captured:
+        raise GithubAppError(f"manifest flow failed: {captured.get('error')}")
+    return captured["code"]

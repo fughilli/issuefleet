@@ -71,6 +71,11 @@ end-to-end flow — `docs/SMOKE_TEST.md` is the step-by-step procedure.
      README "Bot identities". Unproven live like the rest of this batch —
      first `doctor` run with the app configured probes /app +
      /app/installations and will surface any mismatch.
+     Also: `issuefleet github-app-setup` (manifest flow) creates the app
+     with one browser click and writes key + webhook secret itself — run
+     it on the Mac. The operator's classic PAT in credentials/ (now
+     gitignored, never committed) stays as the token-mode fallback; app
+     creation needs no token.
    - Linear agents platform: `issuefleet linear-oauth` (actor=app install,
      no seat), Bearer auth auto-detected via lin_oauth_ prefix,
      delegation/@-mention claims via AgentSessionEvent webhooks (10s ack

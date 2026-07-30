@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -16,7 +17,11 @@ from issuefleet.githubapp import (
     GithubAppError,
     b64url,
     build_jwt,
+    build_manifest,
+    convert_manifest_code,
+    manifest_form_html,
     openssl_sign,
+    run_manifest_flow,
 )
 
 MINIMAL = {
@@ -167,6 +172,56 @@ class ForgeCallableTokenTest(unittest.TestCase):
         forge.get_pr(1)
         forge.get_pr(1)
         self.assertEqual(seen, ["Bearer tok-a", "Bearer tok-b"])
+
+
+class ManifestFlowTest(unittest.TestCase):
+    def test_manifest_contents(self):
+        m = build_manifest("issuefleet", "http://localhost:9780/callback",
+                           "https://tunnel.example/webhook/github")
+        self.assertEqual(m["default_permissions"], {"contents": "write", "pull_requests": "write"})
+        self.assertIn("pull_request_review_comment", m["default_events"])
+        self.assertFalse(m["public"])
+        self.assertEqual(m["hook_attributes"]["url"], "https://tunnel.example/webhook/github")
+        self.assertNotIn("hook_attributes", build_manifest("x", "r", None))
+
+    def test_form_html_escapes_and_targets(self):
+        m = build_manifest('issue"fleet', "http://localhost:9780/callback", None)
+        html = manifest_form_html(m, "https://github.com/settings/apps/new")
+        self.assertIn('action="https://github.com/settings/apps/new"', html)
+        self.assertIn("&quot;", html)
+        self.assertNotIn('value="{"', html)  # quotes inside the JSON are escaped
+
+    def test_convert_code(self):
+        calls = []
+
+        def transport(method, url, headers, payload):
+            calls.append((method, url))
+            return {"id": 99, "slug": "issuefleet", "pem": "PEMPEM", "webhook_secret": "whs"}
+
+        app = convert_manifest_code("c0de", transport=transport)
+        self.assertEqual(app["id"], 99)
+        self.assertEqual(calls[0], ("POST", "https://api.github.com/app-manifests/c0de/conversions"))
+        with self.assertRaisesRegex(GithubAppError, "no private key"):
+            convert_manifest_code("x", transport=lambda *a: {"message": "Not Found"})
+
+    def test_flow_serves_form_then_captures_code(self):
+        import threading
+        import urllib.request
+
+        result = {}
+
+        def run():
+            result["code"] = run_manifest_flow(9788, "<html>FORM</html>", timeout_s=10)
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        time.sleep(0.2)
+        with urllib.request.urlopen("http://127.0.0.1:9788/", timeout=5) as resp:
+            self.assertIn(b"FORM", resp.read())
+        with urllib.request.urlopen("http://127.0.0.1:9788/callback?code=abc123", timeout=5) as resp:
+            self.assertIn(b"created", resp.read())
+        t.join(timeout=5)
+        self.assertEqual(result.get("code"), "abc123")
 
 
 class GithubAuthModeTest(unittest.TestCase):

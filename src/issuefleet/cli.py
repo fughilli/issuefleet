@@ -286,6 +286,49 @@ def cmd_logs(cfg: Config, key: str, follow: bool) -> int:
     return 0
 
 
+def cmd_github_app_setup(cfg: Config, args) -> int:
+    from issuefleet import githubapp
+
+    port = args.port
+    redirect_url = f"http://localhost:{port}/callback"
+    webhook_url = args.webhook_url
+    if not webhook_url:
+        print("NOTE: no --webhook-url given; the app is created without a webhook. "
+              "Add one later in the app's settings (point it at your tunnel's "
+              "/webhook/github) to get push wake-ups.")
+    manifest = githubapp.build_manifest(args.name, redirect_url, webhook_url)
+    target = (
+        f"https://github.com/organizations/{args.org}/settings/apps/new"
+        if args.org
+        else "https://github.com/settings/apps/new"
+    )
+    html = githubapp.manifest_form_html(manifest, target)
+    print(f"Open  http://localhost:{port}/  in your browser and click "
+          "'Create GitHub App' (one click; no token needed).")
+    code = githubapp.run_manifest_flow(port, html)
+    app = githubapp.convert_manifest_code(code)
+
+    cfg.github_app_key_file.parent.mkdir(parents=True, exist_ok=True)
+    cfg.github_app_key_file.write_text(app["pem"])
+    cfg.github_app_key_file.chmod(0o600)
+    print(f"Private key written to {cfg.github_app_key_file} (chmod 600).")
+    if app.get("webhook_secret"):
+        wsf = cfg.webhooks.github_secret_file
+        wsf.parent.mkdir(parents=True, exist_ok=True)
+        wsf.write_text(app["webhook_secret"])
+        wsf.chmod(0o600)
+        print(f"Webhook secret written to {wsf} (chmod 600).")
+
+    slug = app.get("slug", "?")
+    print(f"\nApp created: {app.get('html_url')} — PRs will open as {slug}[bot].")
+    print("\nAdd to your config [credentials]:\n"
+          f"  github_app_id = \"{app['id']}\"\n"
+          "\nThen INSTALL it on the target repos (required):\n"
+          f"  https://github.com/apps/{slug}/installations/new\n"
+          "\nFinally: bin/issuefleet doctor")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="issuefleet", description=__doc__)
     ap.add_argument("--config", default=DEFAULT_CONFIG, help=f"config path (default {DEFAULT_CONFIG})")
@@ -294,6 +337,12 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("doctor", help="verify tooling, credentials, config; show what would be claimed")
     sub.add_parser("linear-oauth", help="one-time Linear agent (actor=app) install; writes the token")
+    p = sub.add_parser("github-app-setup",
+                       help="create the GitHub App via the manifest flow; writes key + secret")
+    p.add_argument("--name", default="issuefleet", help="app name (default: issuefleet)")
+    p.add_argument("--org", help="create under this org instead of your user account")
+    p.add_argument("--webhook-url", help="public URL for /webhook/github (your tunnel)")
+    p.add_argument("--port", type=int, default=9780, help="localhost port for the flow")
     p = sub.add_parser("once", help="a single reconcile tick (cron-friendly)")
     p.add_argument("--dry-run", action="store_true", help="log would-be actions; mutate nothing")
     sub.add_parser("run", help="the daemon")
@@ -325,6 +374,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "linear-oauth":
             return cmd_linear_oauth(cfg)
+        if args.cmd == "github-app-setup":
+            return cmd_github_app_setup(cfg, args)
         if args.cmd == "once":
             return cmd_once(cfg, args.dry_run)
         if args.cmd == "run":
