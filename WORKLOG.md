@@ -71,11 +71,17 @@ end-to-end flow — `docs/SMOKE_TEST.md` is the step-by-step procedure.
      README "Bot identities". Unproven live like the rest of this batch —
      first `doctor` run with the app configured probes /app +
      /app/installations and will surface any mismatch.
-     Also: `issuefleet github-app-setup` (manifest flow) creates the app
-     with one browser click and writes key + webhook secret itself — run
-     it on the Mac. The operator's classic PAT in credentials/ (now
-     gitignored, never committed) stays as the token-mode fallback; app
-     creation needs no token.
+     Also: `issuefleet github-app-setup` (manifest flow) — **live-verified
+     2026-07-30**: created https://github.com/apps/issuefleet (app id
+     4440229, webhook-less variant), private key written. Remaining for
+     app auth: operator installs the app on target repos, sets
+     github_app_id in config, `doctor` (first live probe of /app +
+     /app/installations + JWT signing). Because the app was created
+     without a webhook, NO github webhook secret exists yet — when adding
+     the webhook later in the app's settings, also set a secret there and
+     write it to [webhooks] github_secret_file, or the endpoint stays
+     disabled. The classic PAT in credentials/ (gitignored) remains the
+     token-mode fallback until then.
    - Linear agents platform: `issuefleet linear-oauth` (actor=app install,
      no seat), Bearer auth auto-detected via lin_oauth_ prefix,
      delegation/@-mention claims via AgentSessionEvent webhooks (10s ack
