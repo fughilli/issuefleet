@@ -35,12 +35,29 @@ log = logging.getLogger("issuefleet")
 def build_stack(cfg: Config) -> Reconciler:
     linear_key, _ = creds.resolve_linear_key(cfg)
     tracker = LinearTracker(LinearClient(linear_key, auth=cfg.linear_auth))
-    github_token, _ = creds.resolve_github_token(cfg)
     git = Gitops()
+    if creds.github_auth_mode(cfg) == "app":
+        from issuefleet.githubapp import AppTokenProvider
+
+        provider = AppTokenProvider(
+            cfg.github_app_id,
+            cfg.github_app_key_file,
+            installation_id=cfg.github_app_installation_id,
+        )
+
+        def token_source(owner: str):
+            return lambda: provider.token_for_owner(owner)
+
+    else:
+        github_token, _ = creds.resolve_github_token(cfg)
+
+        def token_source(owner: str):
+            return github_token
+
     forges = {}
     for project in cfg.projects:
         slug = parse_repo_slug(git.remote_url(project.repo))
-        forges[project.name] = GithubForge(github_token, slug)
+        forges[project.name] = GithubForge(token_source(slug.split("/")[0]), slug)
     registry = Registry(cfg.state_dir)
     runner = TmuxRunner(log_dir=cfg.state_dir / "logs")
     return Reconciler(cfg, registry, tracker, forges, git, runner)

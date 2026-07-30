@@ -76,11 +76,29 @@ provides bazelisk/python/tmux on hosts that want it.
 
 ## Bot identities (optional, recommended)
 
-**GitHub machine user.** Create a normal account (e.g. `yourname-fleet`),
-add it as a collaborator on the target repos, issue its fine-grained PAT
-(Contents: RW, Pull requests: RW), and put that token in
-`github_token_file`. Pure config — PRs are then opened by the bot, and it's
-@-mentionable. No issuefleet code involved.
+**GitHub App (preferred).** PRs open as `yourapp[bot]`, auth uses
+short-lived installation tokens instead of a long-lived PAT, and the app's
+own webhook covers every installed repo (no per-repo webhook setup). Setup:
+
+1. Create the app (Settings → Developer settings → GitHub Apps → New):
+   permissions *Contents: RW* and *Pull requests: RW*; subscribe to *Issue
+   comment, Pull request, Pull request review, Pull request review comment*
+   events; webhook URL = your tunnel's `/webhook/github`, with a secret
+   (goes in `[webhooks] github_secret_file`).
+2. Note the **App ID**, generate a **private key** (PEM), save it to
+   `github_app_key_file` (chmod 600), and **install** the app on the target
+   repos/orgs.
+3. Set `[credentials] github_app_id`. That's it — `github_auth = "auto"`
+   switches to app auth when the id + key are present; installations are
+   discovered per repo owner (pin `github_app_installation_id` to skip
+   discovery). `doctor` shows the resolved `slug[bot]` and installations.
+
+App JWTs are RS256-signed via the `openssl` CLI (stdlib Python can't sign
+RSA; openssl ships with macOS/Linux, and doctor checks for it).
+
+*Simpler fallback:* a machine-user account with a fine-grained PAT in
+`github_token_file` — pure config, no app registration, but a long-lived
+credential and per-repo webhooks.
 
 **Linear agent (agents platform).** Instead of a personal API key, install
 issuefleet as a first-class Linear agent: it appears as an app user
@@ -115,10 +133,11 @@ loop immediately** instead of waiting out the poll interval. Webhooks are
 an accelerator only — polling remains the source of truth, so lost or
 replayed deliveries cost nothing.
 
-- `POST /webhook/github` — add a repo webhook (Settings → Webhooks) for
-  *Issue comments, Pull request reviews, Pull request review comments,
-  Pull requests*, content type JSON, with a secret; verified via
-  `X-Hub-Signature-256` (HMAC-SHA256).
+- `POST /webhook/github` — with a GitHub App, configure the webhook once on
+  the app (covers all installed repos); otherwise add a repo webhook
+  (Settings → Webhooks) for *Issue comments, Pull request reviews, Pull
+  request review comments, Pull requests*, content type JSON, with a
+  secret. Verified via `X-Hub-Signature-256` (HMAC-SHA256).
 - `POST /webhook/linear` — the OAuth app's webhook (or a workspace webhook);
   verified via `Linear-Signature` plus a 60-second timestamp replay guard.
 
@@ -141,6 +160,10 @@ linear_api_key_env = "LINEAR_API_KEY"
 linear_api_key_file = "~/.config/issuefleet/linear.key"
 github_token_env = ["GITHUB_TOKEN", "GH_TOKEN"]   # checked in order
 github_token_file = "~/.config/issuefleet/github.key"
+github_auth = "auto"                       # auto | token (PAT) | app (GitHub App)
+github_app_id = ""                         # App ID; with the key file, auto=app
+github_app_key_file = "~/.config/issuefleet/github_app.pem"
+# github_app_installation_id = 12345678    # optional; default: discover per owner
 linear_auth = "auto"                       # auto | api_key (raw) | oauth (Bearer)
 linear_oauth_client_id = ""                # Linear agent install (see Bot identities)
 linear_oauth_client_secret_file = "~/.config/issuefleet/linear_oauth_client.secret"

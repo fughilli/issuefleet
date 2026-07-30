@@ -56,6 +56,16 @@ def resolve_linear_key(cfg: Config) -> tuple[str, str]:
     )
 
 
+def github_auth_mode(cfg: Config) -> str:
+    """'app' or 'token'. auto = app when the App ID is configured and its
+    private key file exists, else fall back to a PAT."""
+    if cfg.github_auth != "auto":
+        return cfg.github_auth
+    if cfg.github_app_id and cfg.github_app_key_file.is_file():
+        return "app"
+    return "token"
+
+
 def resolve_github_token(cfg: Config) -> tuple[str, str]:
     """Env vars in configured order, then the key file, then `gh auth token`
     if gh happens to exist (brief §5.3)."""

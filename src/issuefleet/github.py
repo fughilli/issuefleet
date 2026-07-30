@@ -42,18 +42,23 @@ def _to_pr(d: dict) -> PullRequest:
 
 
 class GithubForge:
-    def __init__(self, token: str, slug: str, transport=urllib_transport):
+    def __init__(self, token, slug: str, transport=urllib_transport):
+        """token: a PAT string, or a zero-arg callable returning a current
+        token (GitHub App installation tokens expire hourly)."""
         self.token = token
         self.slug = slug  # "owner/name"
         self.owner = slug.split("/")[0]
         self.transport = transport
+
+    def _current_token(self) -> str:
+        return self.token() if callable(self.token) else self.token
 
     def _call(self, method: str, path: str, payload: dict | None = None) -> dict | list:
         return self.transport(
             method,
             f"{API_ROOT}{path}",
             {
-                "Authorization": f"Bearer {self.token}",
+                "Authorization": f"Bearer {self._current_token()}",
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
                 "Content-Type": "application/json",

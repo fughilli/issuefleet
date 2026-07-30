@@ -99,6 +99,12 @@ class Config:
     linear_api_key_file: Path = Path("~/.config/issuefleet/linear.key").expanduser()
     github_token_env: list[str] = field(default_factory=lambda: ["GITHUB_TOKEN", "GH_TOKEN"])
     github_token_file: Path = Path("~/.config/issuefleet/github.key").expanduser()
+    # GitHub auth mode: "token" (PAT/machine user), "app" (GitHub App — PRs
+    # open as <app>[bot]), or "auto" (app when app_id + key file exist).
+    github_auth: str = "auto"
+    github_app_id: str = ""  # numeric App ID (not secret)
+    github_app_key_file: Path = Path("~/.config/issuefleet/github_app.pem").expanduser()
+    github_app_installation_id: int | None = None  # None = discover per repo owner
     # Linear auth mode: "auto" infers from the token prefix (lin_api_ = raw
     # personal key, lin_oauth_ = Bearer OAuth/agent token); or force one.
     linear_auth: str = "auto"
@@ -225,6 +231,15 @@ def parse(data: dict, source: str = "<config>") -> Config:
         cfg.github_token_env = [v] if isinstance(v, str) else list(v)
     if "github_token_file" in creds:
         cfg.github_token_file = _path(creds["github_token_file"])
+    if "github_auth" in creds:
+        if creds["github_auth"] not in ("auto", "token", "app"):
+            raise ConfigError(f"{source}: github_auth must be auto, token, or app")
+        cfg.github_auth = creds["github_auth"]
+    cfg.github_app_id = str(creds.get("github_app_id", "") or "")
+    if "github_app_key_file" in creds:
+        cfg.github_app_key_file = _path(creds["github_app_key_file"])
+    if "github_app_installation_id" in creds:
+        cfg.github_app_installation_id = int(creds["github_app_installation_id"])
     if "linear_auth" in creds:
         if creds["linear_auth"] not in ("auto", "api_key", "oauth"):
             raise ConfigError(f"{source}: linear_auth must be auto, api_key, or oauth")

@@ -63,7 +63,14 @@ end-to-end flow — `docs/SMOKE_TEST.md` is the step-by-step procedure.
      verified GitHub/Linear events — no more waiting out the poll interval.
      Operator setup: tunnel (Cloudflare/Tailscale), repo webhook w/ secret,
      Linear webhook w/ signing secret; see README "Webhooks".
-   - GitHub bot = machine-user PAT swap (docs only).
+   - GitHub identity 2026-07-30: **GitHub App auth** (preferred over the
+     machine-user PAT, which remains the fallback). RS256 app JWTs signed
+     via the openssl CLI (stdlib can't do RSA; real sign→verify roundtrip
+     in tests), installation tokens cached per owner with 5-min refresh
+     margin, forge accepts a callable token source. Operator setup in
+     README "Bot identities". Unproven live like the rest of this batch —
+     first `doctor` run with the app configured probes /app +
+     /app/installations and will surface any mismatch.
    - Linear agents platform: `issuefleet linear-oauth` (actor=app install,
      no seat), Bearer auth auto-detected via lin_oauth_ prefix,
      delegation/@-mention claims via AgentSessionEvent webhooks (10s ack

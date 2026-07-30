@@ -203,14 +203,50 @@ def _check_linear(cfg: Config, tracker) -> list[Check]:
 
 def _check_github(cfg: Config, git: Gitops, forges: dict | None) -> list[Check]:
     out = []
-    try:
-        token, source = creds.resolve_github_token(cfg)
-    except creds.CredentialError as e:
-        return [Check(FAIL, "GitHub token", str(e))]
-    out.append(Check(OK, "GitHub token", f"from {source}"))
-    if not creds.file_permissions_ok(cfg.github_token_file):
-        out.append(Check(WARN, f"{cfg.github_token_file}",
-                         "readable by group/other — chmod 600 it"))
+    mode = creds.github_auth_mode(cfg)
+    token_source = None
+    if mode == "app":
+        if shutil.which("openssl") is None:
+            return [Check(FAIL, "GitHub App auth", "openssl not on PATH — required to sign "
+                          "the app JWT (RS256 is beyond the Python stdlib)")]
+        if not cfg.github_app_id:
+            return [Check(FAIL, "GitHub App auth", "github_auth=app but github_app_id is unset")]
+        if not cfg.github_app_key_file.is_file():
+            return [Check(FAIL, "GitHub App auth",
+                          f"private key not found at {cfg.github_app_key_file} — generate one "
+                          "on the app's settings page and save it there (chmod 600)")]
+        if not creds.file_permissions_ok(cfg.github_app_key_file):
+            out.append(Check(WARN, f"{cfg.github_app_key_file}",
+                             "readable by group/other — chmod 600 it"))
+        if forges is None:  # live probe only when not injected with fakes
+            from issuefleet.githubapp import AppTokenProvider, GithubAppError
+
+            try:
+                provider = AppTokenProvider(
+                    cfg.github_app_id, cfg.github_app_key_file,
+                    installation_id=cfg.github_app_installation_id,
+                )
+                slug_name = provider.app_slug()
+                installs = "pinned installation" if cfg.github_app_installation_id else \
+                    "installed on: " + ", ".join(sorted(provider.installations()))
+                out.append(Check(OK, "GitHub App", f"{slug_name}[bot] (app id "
+                                 f"{cfg.github_app_id}); {installs}"))
+                token_source = lambda owner: (lambda: provider.token_for_owner(owner))
+            except (GithubAppError, Exception) as e:
+                out.append(Check(FAIL, "GitHub App", str(e)))
+                return out
+        else:
+            out.append(Check(OK, "GitHub App", f"app id {cfg.github_app_id} (fake probe)"))
+    else:
+        try:
+            token, source = creds.resolve_github_token(cfg)
+        except creds.CredentialError as e:
+            return [Check(FAIL, "GitHub token", str(e))]
+        out.append(Check(OK, "GitHub token", f"from {source}"))
+        if not creds.file_permissions_ok(cfg.github_token_file):
+            out.append(Check(WARN, f"{cfg.github_token_file}",
+                             "readable by group/other — chmod 600 it"))
+        token_source = lambda owner: token
 
     for project in cfg.projects:
         name = project.name
@@ -224,7 +260,7 @@ def _check_github(cfg: Config, git: Gitops, forges: dict | None) -> list[Check]:
         except Exception as e:
             out.append(Check(FAIL, f"[{name}] origin remote", str(e)))
             continue
-        forge = (forges or {}).get(name) or GithubForge(token, slug)
+        forge = (forges or {}).get(name) or GithubForge(token_source(slug.split("/")[0]), slug)
         try:
             forge.repo_accessible()
             out.append(Check(OK, f"[{name}] GitHub API", f"can read {slug}"))

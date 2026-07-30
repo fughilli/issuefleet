@@ -13,6 +13,11 @@ linear_api_key_env = "LINEAR_API_KEY"
 linear_api_key_file = "~/.config/issuefleet/linear.key"
 github_token_env = ["GITHUB_TOKEN", "GH_TOKEN"]
 github_token_file = "~/.config/issuefleet/github.key"
+# GitHub App identity (preferred): PRs open as <app>[bot], short-lived
+# tokens, one app-level webhook. auto switches to app when id + key exist.
+github_auth = "auto"
+github_app_id = ""
+github_app_key_file = "~/.config/issuefleet/github_app.pem"
 linear_auth = "auto"                # personal key (raw) vs agent token (Bearer)
 # For the Linear agent install (issuefleet linear-oauth):
 linear_oauth_client_id = ""
