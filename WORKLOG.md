@@ -103,8 +103,10 @@ end-to-end flow — `docs/SMOKE_TEST.md` is the step-by-step procedure.
   entirely unrun: riskiest seams are claude-container-inside-a-container
   (root USER_UID → root-owned worktree files) and the tmux-in-daemon-
   container caveat (daemon restart kills worker sessions; crash-restart
-  path recovers). Also GitHub App doctor chain is live-green as of today;
-  Linear agent install + webhook path still untested live.
+  path recovers). Also live-green as of 2026-07-30: GitHub App doctor chain AND the
+  linear-oauth actor=app install (doctor authenticates as the 'issuefleet'
+  app user, Bearer). Still untested live: the webhook path end-to-end
+  (tunnel -> signature verify -> AgentSessionEvent -> claim/activities).
 - `deploy/*.plist|.service` contain operator-specific paths to edit.
 
 ## Don't retry (dead ends)
