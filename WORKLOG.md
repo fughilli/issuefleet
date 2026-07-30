@@ -97,7 +97,14 @@ end-to-end flow — `docs/SMOKE_TEST.md` is the step-by-step procedure.
 
 ## Open questions / blockers
 
-- Tool name confirmation (see deviations).
+- Tool name confirmation (see deviations). Note: the operator's checkout
+  dir is `~/Projects/linear_dispatch`, which may be the preferred name.
+- Homelab compose stack (deploy/docker/, added 2026-07-30) is authored but
+  entirely unrun: riskiest seams are claude-container-inside-a-container
+  (root USER_UID → root-owned worktree files) and the tmux-in-daemon-
+  container caveat (daemon restart kills worker sessions; crash-restart
+  path recovers). Also GitHub App doctor chain is live-green as of today;
+  Linear agent install + webhook path still untested live.
 - `deploy/*.plist|.service` contain operator-specific paths to edit.
 
 ## Don't retry (dead ends)

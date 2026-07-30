@@ -293,6 +293,13 @@ Both ship with the daemon's stdout going to `<state_dir>/daemon.log`.
 Alternatively, run `issuefleet once` from cron — every command is
 restart-safe and idempotent.
 
+**Homelab (containerized, autostarting):** `deploy/docker/` holds a compose
+stack — the daemon plus a Tailscale sidecar that Funnels
+`https://issuefleet.<tailnet>.ts.net/webhook/*` to the listener, with
+`restart: unless-stopped`. Workers are launched as *sibling* containers via
+the mounted docker socket, which imposes a same-path mount invariant —
+read `deploy/docker/README.md` before using it.
+
 ## Known edges (honestly)
 
 - **No auto-rebase.** Agents branch off the base ref at claim time.

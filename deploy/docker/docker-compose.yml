@@ -1,0 +1,55 @@
+# issuefleet + Tailscale Funnel, autostarting. See README.md in this dir.
+#
+# THE INVARIANT: /srv/issuefleet/{worktrees,repos,claude-config} are mounted
+# at identical paths on host and in the daemon container, because the
+# launcher passes them to the HOST docker daemon when starting workers.
+# Keep the config.toml paths in agreement:
+#   worktree_root = "/srv/issuefleet/worktrees"
+#   repo          = "/srv/issuefleet/repos/<name>"
+#   [agent] container_config_dir = "/srv/issuefleet/claude-config"
+
+services:
+  tailscale:
+    image: tailscale/tailscale:latest
+    hostname: issuefleet            # becomes the tailnet machine name
+    restart: unless-stopped
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY}    # from .env; a reusable or tagged auth key
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_SERVE_CONFIG=/config/funnel.json
+    volumes:
+      - ts-state:/var/lib/tailscale
+      - ./funnel.json:/config/funnel.json:ro
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+
+  issuefleet:
+    build:
+      context: ../..                # the issuefleet repo root
+      dockerfile: deploy/docker/Dockerfile
+    restart: unless-stopped
+    # Share the tailscale service's network namespace so Funnel's proxy to
+    # 127.0.0.1:8787 reaches the webhook listener directly (keep the
+    # listener's default loopback bind).
+    network_mode: service:tailscale
+    depends_on:
+      - tailscale
+    volumes:
+      # Workers are launched on the HOST docker daemon:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Same-path mounts (the invariant above):
+      - /srv/issuefleet/worktrees:/srv/issuefleet/worktrees
+      - /srv/issuefleet/repos:/srv/issuefleet/repos
+      - /srv/issuefleet/claude-config:/srv/issuefleet/claude-config
+      # Daemon-only state (registry, archives, logs) — path-free:
+      - /srv/issuefleet/state:/srv/issuefleet/state
+      # Operator-provided pieces:
+      - /srv/issuefleet/config:/etc/issuefleet:ro          # config.toml + key files
+      - /srv/issuefleet/ssh:/root/.ssh:ro                  # push key + known_hosts
+      - /srv/issuefleet/bin/claude-container:/usr/local/bin/claude-container:ro
+
+volumes:
+  ts-state:
