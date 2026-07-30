@@ -178,11 +178,25 @@ class ManifestFlowTest(unittest.TestCase):
     def test_manifest_contents(self):
         m = build_manifest("issuefleet", "http://localhost:9780/callback",
                            "https://tunnel.example/webhook/github")
-        self.assertEqual(m["default_permissions"], {"contents": "write", "pull_requests": "write"})
+        # issues:read is load-bearing: the issue_comment event AND the
+        # PR-feedback poll both require it (GitHub rejected the manifest
+        # without it: "Default events are not supported by permissions").
+        self.assertEqual(
+            m["default_permissions"],
+            {"contents": "write", "pull_requests": "write", "issues": "read"},
+        )
         self.assertIn("pull_request_review_comment", m["default_events"])
         self.assertFalse(m["public"])
-        self.assertEqual(m["hook_attributes"]["url"], "https://tunnel.example/webhook/github")
-        self.assertNotIn("hook_attributes", build_manifest("x", "r", None))
+        self.assertEqual(
+            m["hook_attributes"], {"url": "https://tunnel.example/webhook/github", "active": True}
+        )
+
+    def test_manifest_without_webhook_omits_hook_and_events(self):
+        # GitHub rejects events without an active hook ("Hook url cannot be
+        # blank"), so a webhook-less app must carry neither.
+        m = build_manifest("x", "r", None)
+        self.assertNotIn("hook_attributes", m)
+        self.assertNotIn("default_events", m)
 
     def test_form_html_escapes_and_targets(self):
         m = build_manifest('issue"fleet', "http://localhost:9780/callback", None)

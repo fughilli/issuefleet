@@ -161,16 +161,26 @@ def build_manifest(name: str, redirect_url: str, webhook_url: str | None) -> dic
         "url": "https://github.com/apps",  # required informational homepage
         "redirect_url": redirect_url,
         "public": False,
-        "default_permissions": {"contents": "write", "pull_requests": "write"},
-        "default_events": [
+        # issues:read is required both by the issue_comment event AND by the
+        # PR-feedback poll (GET /issues/{n}/comments serves PR conversation
+        # comments) — GitHub's manifest validator rejects the event without
+        # it, which also would have been a runtime 403 on polling.
+        "default_permissions": {
+            "contents": "write",
+            "pull_requests": "write",
+            "issues": "read",
+        },
+    }
+    if webhook_url:
+        # Events require an active hook; a manifest with events but no hook
+        # URL is rejected ("Hook url cannot be blank").
+        manifest["hook_attributes"] = {"url": webhook_url, "active": True}
+        manifest["default_events"] = [
             "issue_comment",
             "pull_request",
             "pull_request_review",
             "pull_request_review_comment",
-        ],
-    }
-    if webhook_url:
-        manifest["hook_attributes"] = {"url": webhook_url}
+        ]
     return manifest
 
 
