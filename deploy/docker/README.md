@@ -15,7 +15,7 @@ Workers are therefore *siblings* of the daemon container, and every path
 the launcher bind-mounts into them (worktree, the repo's `.git`, the claude
 config dir) is resolved **by the host**. Hence the invariant:
 
-> `<ROOT>/{worktrees,repos,claude-config,state}` are mounted at identical
+> `<ROOT>/{worktrees,repos,state}` (+ the live claude-container config) are mounted at identical
 > absolute paths on the host and in the daemon container, and the
 > config.toml must use those paths.
 
@@ -52,7 +52,9 @@ What you must provide by hand:
 # 2. Claude credentials for workers: seed the shared config dir (same
 #    content as ~/.config/claude-container/config — OAuth credentials +
 #    settings.json with bypassPermissions). Never copied automatically.
-cp -r ~/.config/claude-container/config/* ~/.issuefleet/claude-config/
+# (nothing to copy — the stack shares your LIVE ~/.config/claude-container/config
+#  read-write, so OAuth refreshes stay coherent. Just make sure it exists:
+#  run `claude-container` once on the host if you never have.)
 
 ```
 
@@ -70,7 +72,7 @@ plain `~/...` defaults — no changes needed:
 state_dir = "${ISSUEFLEET_ROOT}/state"
 worktree_root = "${ISSUEFLEET_ROOT}/worktrees"   # same-path invariant
 [agent]
-container_config_dir = "${ISSUEFLEET_ROOT}/claude-config"   # same-path invariant
+container_config_dir = "${ISSUEFLEET_CLAUDE_CONFIG}"   # LIVE shared claude creds
 [webhooks]
 enabled = true                                    # bind stays 127.0.0.1
 [[projects]]

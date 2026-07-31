@@ -1,6 +1,6 @@
 # issuefleet + Tailscale Funnel, autostarting. See README.md in this dir.
 #
-# THE INVARIANT: worktrees/repos/claude-config/state are mounted at
+# THE INVARIANT: worktrees/repos/state (+ the live claude config) are mounted at
 # identical paths on host and in the daemon container, because the launcher
 # passes them to the HOST docker daemon when starting workers. The root is
 # Layout: DATA lives under ISSUEFLEET_ROOT ($HOME/.issuefleet, declared once
@@ -14,7 +14,7 @@
 #   worktree_root = "${ISSUEFLEET_ROOT}/worktrees"
 #   repo          = "${ISSUEFLEET_ROOT}/repos/<name>"
 #   state_dir     = "${ISSUEFLEET_ROOT}/state"
-#   [agent] container_config_dir = "${ISSUEFLEET_ROOT}/claude-config"
+#   [agent] container_config_dir = "${ISSUEFLEET_CLAUDE_CONFIG}"
 
 services:
   tailscale:
@@ -67,6 +67,7 @@ services:
       - ISSUEFLEET_GID=${ISSUEFLEET_GID:?run via bazel or source env.sh}
       # Lets config.toml use ${ISSUEFLEET_ROOT}/... paths portably.
       - ISSUEFLEET_ROOT=${ISSUEFLEET_ROOT}
+      - ISSUEFLEET_CLAUDE_CONFIG=${ISSUEFLEET_CLAUDE_CONFIG}
       # Same, for a `repo` that points at a checkout the daemon doesn't own.
       # Must be passed: the daemon's fallback is ~/Projects, and ~ is /root
       # in here — which would miss the same-path mount below.
@@ -84,7 +85,10 @@ services:
       # Same-path mounts (the invariant above):
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/worktrees:${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/worktrees
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/repos:${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/repos
-      - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/claude-config:${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/claude-config
+      # Worker Claude creds: the LIVE host claude-container config, shared
+      # (same-path, read-WRITE so token refreshes persist) — never a copy,
+      # which the host rotating its OAuth token would revoke.
+      - ${ISSUEFLEET_CLAUDE_CONFIG:?not set - run via bazel or source env.sh}:${ISSUEFLEET_CLAUDE_CONFIG:?not set - run via bazel or source env.sh}
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/state:${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/state
       # Checkouts outside the data root (a `repo` pointing at your own working
       # tree). Read-write: the daemon registers worktrees in that repo's .git.

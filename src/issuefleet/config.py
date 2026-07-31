@@ -155,6 +155,10 @@ def _reject_secrets(table: dict, where: str) -> None:
 _PATH_VARS = {
     "ISSUEFLEET_ROOT": "~/.issuefleet",
     "ISSUEFLEET_PROJECTS": "~/Projects",
+    # Worker Claude creds: the launcher's live shared config dir. Shared,
+    # never copied — a snapshot's OAuth token is revoked when the host
+    # rotates its own.
+    "ISSUEFLEET_CLAUDE_CONFIG": "~/.config/claude-container/config",
 }
 
 

@@ -158,6 +158,24 @@ class ConfigTest(unittest.TestCase):
             if saved is not None:
                 os.environ["ISSUEFLEET_PROJECTS"] = saved
 
+    def test_claude_config_var_defaults(self):
+        import os
+        from pathlib import Path
+
+        saved = os.environ.pop("ISSUEFLEET_CLAUDE_CONFIG", None)
+        try:
+            data = {"agent": {"container_config_dir": "${ISSUEFLEET_CLAUDE_CONFIG}"},
+                    "projects": MINIMAL["projects"]}
+            cfg = config.parse(data)
+            self.assertEqual(cfg.container_config_dir,
+                             Path("~/.config/claude-container/config").expanduser())
+            os.environ["ISSUEFLEET_CLAUDE_CONFIG"] = "/live/creds"
+            self.assertEqual(str(config.parse(data).container_config_dir), "/live/creds")
+        finally:
+            os.environ.pop("ISSUEFLEET_CLAUDE_CONFIG", None)
+            if saved is not None:
+                os.environ["ISSUEFLEET_CLAUDE_CONFIG"] = saved
+
     def test_git_url_optional(self):
         self.assertIsNone(config.parse(MINIMAL).projects[0].git_url)
         data = {"projects": [dict(MINIMAL["projects"][0], git_url="git@github.com:a/b.git")]}
