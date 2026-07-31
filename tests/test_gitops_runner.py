@@ -115,6 +115,16 @@ class GitopsTest(unittest.TestCase):
         ).stdout
         self.assertNotIn("agent/fug-1-x", refs)
 
+    def test_remove_worktree_survives_corrupt_worktree(self):
+        # A dir that exists but isn't a valid worktree (a prior stop rm'd it
+        # and something recreated the path) must not raise — teardown has to
+        # complete.
+        self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
+        # Corrupt it: remove the .git pointer so git no longer recognizes it.
+        (self.wt / ".git").unlink()
+        self.git.remove_worktree(self.repo, self.wt, "agent/fug-1-x")  # no raise
+        self.assertFalse(self.wt.exists())
+
     def test_push_to_explicit_url_ignores_origin(self):
         # The daemon pushes to the forge's URL with a scoped token, not to
         # whatever `origin` points at (which may be an SSH remote using the

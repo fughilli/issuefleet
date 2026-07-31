@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -138,9 +139,20 @@ class Gitops:
         )
 
     def remove_worktree(self, repo: Path, path: Path, branch: str) -> None:
-        if Path(path).exists():
-            _git(["worktree", "remove", "--force", str(path)], cwd=repo)
-        _git(["worktree", "prune"], cwd=repo)
+        # Best-effort: teardown must complete even if the worktree is
+        # already partly gone (a prior stop rm'd the dir; git then reports
+        # "not a working tree"). Fall back to rm + prune rather than raise.
+        path = Path(path)
+        if path.exists():
+            try:
+                _git(["worktree", "remove", "--force", str(path)], cwd=repo)
+            except GitError as e:
+                log.warning("worktree remove %s: %s; removing the dir and pruning", path, e)
+                shutil.rmtree(path, ignore_errors=True)
+        try:
+            _git(["worktree", "prune"], cwd=repo)
+        except GitError as e:
+            log.warning("worktree prune in %s: %s", repo, e)
 
     def delete_remote_branch(
         self, repo: Path, branch: str, url: str | None = None, auth_header: str | None = None

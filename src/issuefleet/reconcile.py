@@ -620,9 +620,17 @@ class Reconciler:
                 agent_dir, dest, ignore=shutil.ignore_patterns("bin", "tmp"), dirs_exist_ok=True
             )
 
-        # 3. Stop the container/session, remove the worktree, prune.
-        self.runner.stop(rec)
-        self.git.remove_worktree(Path(rec.repo), Path(rec.worktree), rec.branch)
+        # 3. Stop the container/session, remove the worktree, prune. Each is
+        # best-effort: the registry entry MUST be dropped (step 5) so a
+        # failure here can't leave a worker no `stop` can ever clear.
+        try:
+            self.runner.stop(rec)
+        except Exception:
+            log.exception("worker %s: stopping the session failed", rec.issue_key)
+        try:
+            self.git.remove_worktree(Path(rec.repo), Path(rec.worktree), rec.branch)
+        except Exception:
+            log.exception("worker %s: removing the worktree failed", rec.issue_key)
 
         # 4. Tracker/forge bookkeeping (best-effort; teardown must complete).
         try:
