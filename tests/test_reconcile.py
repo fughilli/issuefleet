@@ -184,6 +184,65 @@ class ReconcileTest(unittest.TestCase):
         kinds = [(m.kind, m.payload.get("text", "")) for m in self.mailbox().pending_inbox()]
         self.assertTrue(any(k == "reply" and "no commits" in t for k, t in kinds))
 
+    # -- file-issue (bot authoring Linear issues) --------------------------
+
+    def test_file_issue_creates_and_reports_back(self):
+        self.claim_one()
+        self.tracker.team_labels["team-1"] = {"backlog": "l1"}
+        self.mailbox().put_outbox(
+            "file_issue",
+            {"title": "First WORKLOG item", "description": "do the thing",
+             "priority": 2, "labels": ["backlog"]},
+        )
+        self.rec.tick()
+        self.assertEqual(len(self.tracker.created), 1)
+        c = self.tracker.created[0]
+        self.assertEqual(c["title"], "First WORKLOG item")
+        self.assertEqual(c["team"], "team-1")  # inherited from the delegated issue
+        self.assertIn(MARKER_PREFIX, c["description"])  # dedupe marker embedded
+        # The worker is told the new key/url via an info notice.
+        info = [m for m in self.mailbox().pending_inbox() if m.kind == "info"]
+        self.assertTrue(any("FUG-101" in m.payload["text"] for m in info))
+        self.assertEqual(self.mailbox().pending_outbox(), [])  # acked
+
+    def test_file_issue_reports_unknown_labels(self):
+        self.claim_one()
+        self.mailbox().put_outbox(
+            "file_issue", {"title": "T", "labels": ["ghost"]}
+        )
+        self.rec.tick()
+        info = [m for m in self.mailbox().pending_inbox() if m.kind == "info"]
+        self.assertTrue(any("labels not found" in m.payload["text"] for m in info))
+
+    def test_file_issue_deduped_when_marker_already_present(self):
+        # A create landed but the ack never happened (crash mid-relay); the
+        # retry must find the existing issue by marker, not file a duplicate.
+        self.claim_one()
+        m = self.mailbox().put_outbox("file_issue", {"title": "T", "description": "d"})
+        from issuefleet import marker
+        from fakes import make_issue
+
+        self.tracker.add_issue(
+            make_issue(50, labels=[], description=f"d\n\n{marker(m.id)}",
+                       url="https://linear.app/x/issue/FUG-50")
+        )
+        self.rec.tick()
+        self.assertEqual(self.tracker.created, [])  # not filed again
+        info = [m for m in self.mailbox().pending_inbox() if m.kind == "info"]
+        self.assertTrue(any("deduped" in i.payload["text"] for i in info))
+        self.assertEqual(self.mailbox().pending_outbox(), [])
+
+    def test_file_issue_failure_leaves_message_pending_then_retries(self):
+        self.claim_one()
+        self.mailbox().put_outbox("file_issue", {"title": "T"})
+        self.tracker.fail_next_create = 1
+        self.rec.tick()
+        self.assertEqual(len(self.mailbox().pending_outbox()), 1)  # not dropped
+        self.assertEqual(self.tracker.created, [])
+        self.rec.tick()
+        self.assertEqual(len(self.tracker.created), 1)  # filed on retry
+        self.assertEqual(self.mailbox().pending_outbox(), [])
+
     def test_resubmission_updates_existing_pr(self):
         self.claim_one()
         self.mailbox().put_outbox("ready", {"title": "v1", "body": "b1"})

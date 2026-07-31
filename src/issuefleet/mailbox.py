@@ -14,7 +14,7 @@ the cross-process handoff relies only on rename() atomicity. Messages are
 never deleted here — consumed/archived files are the durable audit trail and
 get archived wholesale at teardown.
 
-Outbox kinds: status, question, ready.
+Outbox kinds: status, question, ready, file_issue.
 Inbox kinds:  reply, pr_feedback, pr_closed, info, shutdown, unclaimed.
 """
 
@@ -32,7 +32,7 @@ from issuefleet.model import now_iso
 
 _NAME_RE = re.compile(r"^(\d{6})-([a-z_]+)-([0-9a-f]+)\.json$")
 
-OUTBOX_KINDS = ("status", "question", "ready")
+OUTBOX_KINDS = ("status", "question", "ready", "file_issue")
 INBOX_KINDS = ("reply", "pr_feedback", "pr_closed", "info", "shutdown", "unclaimed")
 
 

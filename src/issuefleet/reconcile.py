@@ -270,6 +270,11 @@ class Reconciler:
         for msg in mailbox.pending_outbox():
             if msg.kind == "ready":
                 lines.append(f"{rec.issue_key}: would push {rec.branch} and open/update PR")
+            elif msg.kind == "file_issue":
+                lines.append(
+                    f"{rec.issue_key}: would file a new Linear issue "
+                    f"({msg.payload.get('title', '?')!r})"
+                )
             else:
                 lines.append(f"{rec.issue_key}: would relay {msg.kind} to Linear")
         inbound = [
@@ -397,6 +402,8 @@ class Reconciler:
                             f"\n\n{marker(msg.id)}",
                         )
                         mailbox.archive_outbox(msg, receipt={"relayed": "linear"})
+                elif msg.kind == "file_issue":
+                    self._handle_file_issue(rec, mailbox, msg)
                 elif msg.kind == "ready":
                     self._handle_ready(rec, project, mailbox, msg)
                 else:
@@ -407,6 +414,40 @@ class Reconciler:
                 # order; next tick retries (dedupe via marker).
                 log.exception("worker %s: relay of %s failed; will retry", rec.issue_key, msg.kind)
                 return
+
+    def _handle_file_issue(self, rec: WorkerRecord, mailbox: Mailbox, msg) -> None:
+        """Relay a worker's request to author a new Linear issue. Dedupe is by
+        a marker embedded in the new issue's description: a create that landed
+        but wasn't acked (crash between the API call and archive) is found on
+        retry instead of filed twice. The worker learns the new key/url via an
+        `info` message so it can summarize back to the human."""
+        needle = MARKER_PREFIX + msg.id
+        existing = self.tracker.find_issue_by_marker(needle)
+        if existing is not None:
+            mailbox.put_inbox(
+                "info",
+                {"text": f"Issue already filed (deduped): {existing.key} — {existing.url}"},
+            )
+            mailbox.archive_outbox(msg, receipt={"issue": existing.key, "deduped": True})
+            return
+
+        p = msg.payload
+        description = f"{p.get('description', '')}\n\n{marker(msg.id)}".strip()
+        issue, unknown = self.tracker.create_issue(
+            title=p["title"],
+            description=description,
+            priority=p.get("priority"),
+            labels=p.get("labels") or [],
+            team=p.get("team"),
+            project=p.get("project"),
+            use_context_project=p.get("use_context_project", True),
+            context_issue_id=rec.issue_id,
+        )
+        text = f"Filed {issue.key}: {issue.title} — {issue.url}"
+        if unknown:
+            text += f"\n(labels not found, skipped: {', '.join(unknown)})"
+        mailbox.put_inbox("info", {"text": text})
+        mailbox.archive_outbox(msg, receipt={"issue": issue.key, "url": issue.url})
 
     def _handle_ready(self, rec: WorkerRecord, project: ProjectConfig, mailbox: Mailbox, msg) -> None:
         forge = self.forges[project.name]

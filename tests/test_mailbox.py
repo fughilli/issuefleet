@@ -51,6 +51,10 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(self.mb.pending_inbox(), [])
         self.assertEqual(len(list(self.mb.inbox_consumed.glob("*.json"))), 1)
 
+    def test_file_issue_is_an_outbox_kind(self):
+        m = self.mb.put_outbox("file_issue", {"title": "New ticket"})
+        self.assertEqual(self.mb.pending_outbox()[0].id, m.id)
+
     def test_unknown_kinds_rejected(self):
         with self.assertRaises(MailboxError):
             self.mb.put_outbox("reply", {})  # reply is an inbox kind

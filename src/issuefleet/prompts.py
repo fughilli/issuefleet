@@ -28,6 +28,13 @@ credentials**: a host-side orchestrator relays for you.
     declare the issue satisfied. The orchestrator verifies you have commits,
     pushes the branch, and opens (or updates) the pull request. PR review
     feedback comes back to you the same way replies do.
+  - `.agent/bin/agentctl file-issue --title "<title>" --description-file <file>`
+    — author a NEW Linear issue (e.g. to break a backlog into tickets). It
+    lands in this issue's team and project by default; add `--priority 0-4`,
+    repeatable `--label <name>`, `--team`, `--project`, or `--no-project` to
+    steer it. The new issue's key and url come back to you as a notice, so you
+    can list what you filed with `agentctl status`. Use this only when a human
+    asked you to file issues — don't spawn tickets unprompted.
   - `.agent/bin/agentctl idle` — nothing left to do right now (e.g. you were
     woken by a message that needs no action, and your work is already
     submitted). Stops your turns until a human writes again. Never spin
