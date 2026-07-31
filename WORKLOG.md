@@ -109,12 +109,13 @@ end-to-end flow — `docs/SMOKE_TEST.md` is the step-by-step procedure.
   session claim -> activities all worked, and exposed an echo loop —
   Linear sends `prompted` events for the app's OWN activities, which we
   re-injected as waking replies (fix: abdd3e4, marker-style self-filter
-  for activities + ready-restore turn bound). Operator must RESTART the
-  daemon (host-side filter) and RECYCLE any live worker (agent-side
-  ready-restore is staged at claim). Still unexplained: the merged PR
-  reportedly did NOT tear the worker down — needs `status` + daemon log
-  from the operator; suspect the record's pr_number or a crashed-phase
-  early return. Verify next session.
+  for activities + ready-restore turn bound). RESOLVED 2026-07-31 via the
+  operator's archive zip: teardown was FINE (merge wound the worker down);
+  the echo actually entered via Linear's *mirror comments* of session
+  activities (unmarked, authored by the app user) — closed by identity
+  filtering under app auth (831dd1a). The post-merge "loop" was a macOS
+  DNS outage traceback storm (now collapsed to one-liners). Operator:
+  restart daemon; recycle workers claimed before abdd3e4.
 - `deploy/*.plist|.service` contain operator-specific paths to edit.
 
 ## Don't retry (dead ends)

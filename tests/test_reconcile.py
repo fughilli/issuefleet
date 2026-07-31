@@ -320,6 +320,56 @@ class ReconcileTest(unittest.TestCase):
         # ...while the orchestrator's own marker-stamped posts stayed out.
         self.assertEqual(replies[0].payload["author"], "kevin")
 
+    def test_app_identity_filters_viewer_comments(self):
+        # Authenticated AS THE APP, viewer-authored comments are the app's
+        # own — including Linear's unmarked mirrors of session activities
+        # (the live echo loop of 2026-07-30). Identity filtering applies.
+        from issuefleet.model import Comment
+
+        self.tracker.app_identity = True
+        self.claim_one()
+        self.tracker.comments["issue-1"].append(
+            Comment(
+                id="mirror1",
+                author_id=self.tracker.viewer_id,
+                author_name="issuefleet",
+                body="Pull request ready: https://github.example/pr/1",  # no marker!
+                created_at="2026-07-30T16:16:00+00:00",
+            )
+        )
+        self.tracker.human_comment("issue-1", "real human reply")
+        self.rec.tick()
+        replies = [m.payload["text"] for m in self.mailbox().pending_inbox() if m.kind == "reply"]
+        self.assertEqual(replies, ["real human reply"])
+
+    def test_resubmission_does_not_repeat_pr_info(self):
+        self.claim_one()
+        self.mailbox().put_outbox("ready", {"title": "v1", "body": "b"})
+        self.rec.tick()
+        self.mailbox().put_outbox("ready", {"title": "v2", "body": "b"})
+        self.rec.tick()
+        infos = [m for m in self.mailbox().pending_inbox() if m.kind == "info"]
+        self.assertEqual(len(infos), 1)  # told once, not per re-submission
+
+    def test_persistent_poll_failure_collapses_to_one_traceback(self):
+        self.claim_one()
+        self.tracker.fail_next_post = 0
+        original = self.tracker.eligible_issues
+        self.tracker.eligible_issues = lambda p: (_ for _ in ()).throw(
+            ConnectionError("DNS down")
+        )
+        try:
+            with self.assertLogs("issuefleet", level="ERROR") as cm:
+                self.rec.tick()
+                self.rec.tick()
+                self.rec.tick()
+            with_tb = [r for r in cm.records if r.exc_info]
+            without_tb = [r for r in cm.records if not r.exc_info]
+            self.assertEqual(len(with_tb), 1)  # one full traceback
+            self.assertEqual(len(without_tb), 2)  # then one-liners
+        finally:
+            self.tracker.eligible_issues = original
+
     # -- isolation ---------------------------------------------------------
 
     def test_sick_worker_does_not_stall_the_fleet(self):

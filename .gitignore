@@ -17,3 +17,6 @@ result-*
 credentials/
 *.pem
 *.secret
+
+# Operator-dropped artifacts
+*.zip

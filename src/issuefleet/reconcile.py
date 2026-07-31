@@ -84,6 +84,7 @@ class Reconciler:
         self._session_lock = threading.Lock()
         self._session_events: list = []
         self.pending_session_claims: dict[str, object] = {}  # issue_id -> SessionEvent
+        self._poll_errors: dict[str, str] = {}  # project -> last error (log-spam collapse)
 
     # ------------------------------------------------------------------ tick
 
@@ -198,8 +199,18 @@ class Reconciler:
         for project in self.cfg.projects:
             try:
                 eligible[project.name] = self.tracker.eligible_issues(project)
-            except Exception:
-                log.exception("polling %s failed; skipping claims for it this tick", project.name)
+                if self._poll_errors.pop(project.name, None):
+                    log.info("polling %s recovered", project.name)
+            except Exception as e:
+                # Full traceback once per distinct failure; a persistent
+                # outage (DNS down, API outage) collapses to one line per
+                # tick instead of a traceback storm.
+                summary = f"{type(e).__name__}: {e}"
+                if self._poll_errors.get(project.name) == summary:
+                    log.error("polling %s still failing (%s); will retry", project.name, summary)
+                else:
+                    self._poll_errors[project.name] = summary
+                    log.exception("polling %s failed; skipping claims for it this tick", project.name)
                 eligible[project.name] = []
 
         try:
@@ -432,6 +443,7 @@ class Reconciler:
         if pr is None:
             pr = forge.open_pr(rec.branch, rec.base_ref, title, body_full)
 
+        newly_opened = rec.pr_number != pr.number
         rec.pr_number, rec.pr_url = pr.number, pr.url
         rec.touch()
         self.registry.save()
@@ -446,22 +458,30 @@ class Reconciler:
                 f"prlink-{rec.issue_id}-{pr.number}",
                 f"🤖 Pull request ready: {pr.url}",
             )
-        mailbox.put_inbox("info", {"text": f"Your PR is open at {pr.url}. Review feedback will be forwarded to you."})
+        if newly_opened:  # re-submissions to the same PR don't need re-telling
+            mailbox.put_inbox(
+                "info",
+                {"text": f"Your PR is open at {pr.url}. Review feedback will be forwarded to you."},
+            )
         mailbox.archive_outbox(msg, receipt={"pr": pr.number, "url": pr.url})
 
     def _ingest_comments(self, rec: WorkerRecord, mailbox: Mailbox) -> None:
         comments = self.tracker.comments_since(rec.issue_id, rec.comment_cursor)
+        # The marker filters every post we author directly. Identity is only
+        # a valid filter when we authenticate AS AN APP: then viewer-authored
+        # comments are the app's own — notably Linear's unmarked mirrors of
+        # session activities, which fed the agent its own words as waking
+        # replies (observed live 2026-07-30). With a personal key the viewer
+        # IS the operator, and identity filtering would eat their replies.
+        app_viewer = (
+            self.tracker.get_viewer_id() if getattr(self.tracker, "app_identity", False) else None
+        )
         advanced = False
         for c in comments:
             if rec.comment_cursor is None or c.created_at > rec.comment_cursor:
                 rec.comment_cursor = c.created_at
                 advanced = True
-            # The marker is the authoritative self-post filter: every
-            # orchestrator post carries one by construction. Do NOT also
-            # filter on the API user's identity — with a personal (non-bot)
-            # key the operator IS that user, and an identity check would
-            # silently eat their replies to the agent.
-            if MARKER_PREFIX in c.body:
+            if MARKER_PREFIX in c.body or (app_viewer is not None and c.author_id == app_viewer):
                 continue
             mailbox.ensure().put_inbox(
                 "reply", {"author": c.author_name, "text": c.body, "source": "linear"}
@@ -518,11 +538,18 @@ class Reconciler:
     def _wind_down(
         self, rec: WorkerRecord, project: ProjectConfig, mailbox: Mailbox, reason: str, done: bool
     ) -> None:
-        # 1. Signal the agent (it exits its loop on the next decide()).
+        # 1. Signal the agent (it exits its loop on the next decide()), and
+        # close out the agent session so its UI doesn't hang on "working".
         try:
             mailbox.ensure().put_inbox("shutdown", {"reason": reason})
         except OSError:
             pass  # worktree may already be gone
+        if rec.agent_session_id:
+            self._emit_activity_quietly(
+                rec.agent_session_id,
+                {"type": "response" if done else "error",
+                 "body": f"Worker wound down: {reason}."},
+            )
 
         # 2. Archive mailbox + transcripts somewhere durable, outside the
         # worktree — the transcript must outlive the branch.

@@ -93,6 +93,23 @@ class AgentSessionTest(unittest.TestCase):
         self.tracker.issues["issue-1"].state_type = "canceled"
         self.rec.tick()
         self.assertIsNone(self.registry.get("issue-1"))
+        # The session got a closing activity so its UI doesn't hang.
+        finals = [c for _, c in self.tracker.activities if "wound down" in c.get("body", "").lower()]
+        self.assertEqual(len(finals), 1)
+        self.assertEqual(finals[0]["type"], "error")  # unmerged wind-down
+
+    def test_merge_teardown_closes_session_with_response(self):
+        self.add_issue()
+        self.rec.enqueue_session(created())
+        self.rec.tick()
+        self.mailbox().put_outbox("ready", {"title": "T", "body": "B"})
+        self.rec.tick()
+        self.forge.merge(self.registry.get("issue-1").pr_number)
+        self.rec.tick()
+        self.assertIsNone(self.registry.get("issue-1"))
+        finals = [c for _, c in self.tracker.activities
+                  if c["type"] == "response" and "wound down" in c["body"].lower()]
+        self.assertEqual(len(finals), 1)
 
     def test_prompt_routed_to_worker_inbox(self):
         self.add_issue()

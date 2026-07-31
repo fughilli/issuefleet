@@ -90,6 +90,10 @@ class LinearTracker:
 
     def __init__(self, client: LinearClient):
         self.client = client
+        # When authenticated as an app (agents platform), comments authored
+        # by the viewer are the app's own — including Linear's unmarked
+        # mirrors of session activities — and must be filtered on identity.
+        self.app_identity = client.auth == "oauth"
         self._viewer: dict | None = None
         self._project_ids: dict[str, str] = {}  # ProjectConfig.linear_project -> uuid
         self._team_states: dict[str, dict[str, str]] = {}  # team_id -> {lower name: state id}
