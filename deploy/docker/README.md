@@ -113,8 +113,9 @@ Your public webhook base is `https://issuefleet.<tailnet>.ts.net` — put
 ## Operating it
 
 ```sh
-bazel run //deploy/docker:doctor    # or the exec/status forms below
-docker compose exec issuefleet bin/issuefleet --config /etc/issuefleet/config.toml status
+bazel run //deploy/docker:status    # fleet: phase, turns, PR, liveness, last activity
+bazel run //deploy/docker:logs      # follow the reconcile-loop log (ticks/claims/relays)
+bazel run //deploy/docker:doctor    # health checks
 docker compose exec -it issuefleet tmux attach -t issuefleet-<proj>-<KEY>   # watch a worker
 docker compose logs -f issuefleet                                           # daemon log
 ```
