@@ -26,6 +26,7 @@ WORKDIR /opt/issuefleet
 COPY src/ src/
 COPY bin/ bin/
 
-# Stdlib-only: no pip install. Config is mounted at /etc/issuefleet.
+# Stdlib-only: no pip install. Config is mounted at /root/.config/issuefleet
+# (the default --config location).
 ENV PYTHONUNBUFFERED=1
-CMD ["bin/issuefleet", "--config", "/etc/issuefleet/config.toml", "run", "-v"]
+CMD ["bin/issuefleet", "run", "-v"]

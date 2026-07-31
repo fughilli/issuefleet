@@ -30,42 +30,42 @@ workers get empty or wrong bind mounts, with no error at launch time.
 
 ## Host preparation
 
-The tree under `$HOME/.issuefleet` is created automatically by any bazel
-target, and `up`/`doctor` seed the launcher from your PATH and print a
-checklist of anything still missing. What you must provide by hand:
+**`~/.issuefleet` is data only** (repos, worktrees, state/archives, worker
+claude credentials) — created automatically by any bazel target, with the
+launcher seeded from PATH. **Config + secrets stay in `~/.config/issuefleet`**,
+the exact same files a laptop setup uses (mounted at the container's home
+path, so `~/...` credential paths resolve identically in both worlds).
+What you must provide by hand:
 
 ```sh
-ROOT=$HOME/.issuefleet
+# 1. Config + secrets: ~/.config/issuefleet/{config.toml,linear.key,
+#    github_app.pem,*_webhook.secret} — if you ran the laptop setup, you
+#    already have all of these.
 
-# 1. Claude credentials for workers: seed the shared config dir (same
+# 2. Claude credentials for workers: seed the shared config dir (same
 #    content as ~/.config/claude-container/config — OAuth credentials +
 #    settings.json with bypassPermissions). Never copied automatically.
-cp -r ~/.config/claude-container/config/* $ROOT/claude-config/
+cp -r ~/.config/claude-container/config/* ~/.issuefleet/claude-config/
 
-# 2. Push key: a deploy key or user key authorized for the target repos
-cp <your-key> $ROOT/ssh/id_ed25519
-ssh-keyscan github.com > $ROOT/ssh/known_hosts
-chmod 600 $ROOT/ssh/id_ed25519
-
-# 3. Config + secrets under $ROOT/config (mounted at /etc/issuefleet):
-#    config.toml, linear.key, github_app.pem, *_webhook.secret — chmod 600.
+# 3. Push key: a deploy key or user key authorized for the target repos
+cp <your-key> ~/.issuefleet/ssh/id_ed25519
+ssh-keyscan github.com > ~/.issuefleet/ssh/known_hosts
+chmod 600 ~/.issuefleet/ssh/id_ed25519
 ```
 
-`config.toml` differences from a laptop setup:
+One `config.toml` serves laptop and container. Data paths use
+`${ISSUEFLEET_ROOT}` (the daemon defaults it to `~/.issuefleet` when the
+variable is unset, so this works on a laptop too); credential paths are
+plain `~/...` defaults — no changes needed:
 
 ```toml
 [daemon]
 state_dir = "${ISSUEFLEET_ROOT}/state"
 worktree_root = "${ISSUEFLEET_ROOT}/worktrees"   # same-path invariant
-[credentials]
-linear_api_key_file = "${ISSUEFLEET_ROOT}/config/linear.key"
-github_app_key_file = "${ISSUEFLEET_ROOT}/config/github_app.pem"
 [agent]
 container_config_dir = "${ISSUEFLEET_ROOT}/claude-config"   # same-path invariant
 [webhooks]
 enabled = true                                    # bind stays 127.0.0.1
-github_secret_file = "${ISSUEFLEET_ROOT}/config/github_webhook.secret"
-linear_secret_file = "${ISSUEFLEET_ROOT}/config/linear_webhook.secret"
 [[projects]]
 repo = "${ISSUEFLEET_ROOT}/repos/yourrepo"
 git_url = "git@github.com:you/yourrepo.git"   # daemon clones it on first run

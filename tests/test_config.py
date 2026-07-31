@@ -119,6 +119,25 @@ class ConfigTest(unittest.TestCase):
         finally:
             del os.environ["ISSUEFLEET_ROOT"]
 
+    def test_issuefleet_root_defaults_when_unset(self):
+        # A shared config's ${ISSUEFLEET_ROOT} paths must work on a laptop
+        # (no env var) without leaving a literal "${ISSUEFLEET_ROOT}" dir.
+        import os
+        from pathlib import Path
+
+        saved = os.environ.pop("ISSUEFLEET_ROOT", None)
+        try:
+            data = {
+                "daemon": {"worktree_root": "${ISSUEFLEET_ROOT}/worktrees"},
+                "projects": MINIMAL["projects"],
+            }
+            cfg = config.parse(data)
+            expected = Path("~/.issuefleet/worktrees").expanduser()
+            self.assertEqual(cfg.worktree_root, expected)
+        finally:
+            if saved is not None:
+                os.environ["ISSUEFLEET_ROOT"] = saved
+
     def test_git_url_optional(self):
         self.assertIsNone(config.parse(MINIMAL).projects[0].git_url)
         data = {"projects": [dict(MINIMAL["projects"][0], git_url="git@github.com:a/b.git")]}

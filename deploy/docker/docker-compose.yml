@@ -3,11 +3,14 @@
 # THE INVARIANT: worktrees/repos/claude-config/state are mounted at
 # identical paths on host and in the daemon container, because the launcher
 # passes them to the HOST docker daemon when starting workers. The root is
-# ISSUEFLEET_ROOT — declared ONCE in env.sh as $HOME/.issuefleet (resolved
-# host-side; on macOS that's inside Docker Desktop's shared /Users) and
-# exported by every bazel wrapper. The daemon container receives it in its
-# environment, and config paths expand env vars, so the SAME config.toml
-# works everywhere:
+# Layout: DATA lives under ISSUEFLEET_ROOT ($HOME/.issuefleet, declared once
+# in env.sh, exported by every bazel wrapper, same-path mounted for the
+# sibling-container worker launches); CONFIG + SECRETS live in
+# ~/.config/issuefleet exactly like a laptop setup, mounted at the
+# container's home path so ~/-based credential paths resolve in both
+# worlds. Data paths in config.toml use ${ISSUEFLEET_ROOT}/... (the daemon
+# defaults it to ~/.issuefleet when unset, so one config serves laptop and
+# container):
 #   worktree_root = "${ISSUEFLEET_ROOT}/worktrees"
 #   repo          = "${ISSUEFLEET_ROOT}/repos/<name>"
 #   state_dir     = "${ISSUEFLEET_ROOT}/state"
@@ -57,12 +60,10 @@ services:
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/repos:${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/repos
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/claude-config:${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/claude-config
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/state:${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/state
-      # Operator-provided pieces:
-      # config twice: at /etc/issuefleet (stable CMD path) AND same-path,
-      # so config.toml can reference secrets as ${ISSUEFLEET_ROOT}/config/...
-      # identically on a laptop and in here.
-      - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/config:/etc/issuefleet:ro
-      - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/config:${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/config:ro
+      # Config + secrets: the SAME ~/.config/issuefleet as a laptop setup,
+      # mounted at the container's home path so plain ~/... paths in
+      # config.toml resolve identically in both worlds.
+      - ${ISSUEFLEET_CONFIG:?not set - run via bazel (defaults to HOME/.config/issuefleet)}:/root/.config/issuefleet:ro
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/ssh:/root/.ssh:ro           # push key + known_hosts
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/bin/claude-container:/usr/local/bin/claude-container:ro
 

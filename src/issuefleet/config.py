@@ -152,7 +152,14 @@ def _path(v: str) -> Path:
     # Environment expansion makes configs portable across deployments: the
     # homelab stack sets ISSUEFLEET_ROOT in the daemon's environment, so
     # `worktree_root = "${ISSUEFLEET_ROOT}/worktrees"` is the same config
-    # text on a laptop and in the container.
+    # text on a laptop and in the container. Where the variable isn't set
+    # (plain laptop runs), it defaults to ~/.issuefleet so shared configs
+    # don't leave a literal "${ISSUEFLEET_ROOT}" directory behind.
+    if "ISSUEFLEET_ROOT" not in os.environ:
+        default_root = str(Path("~/.issuefleet").expanduser())
+        v = v.replace("${ISSUEFLEET_ROOT}", default_root).replace(
+            "$ISSUEFLEET_ROOT", default_root
+        )
     return Path(os.path.expandvars(v)).expanduser()
 
 

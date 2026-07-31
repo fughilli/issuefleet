@@ -3,10 +3,12 @@
 # lives inside /Users, which Docker Desktop shares by default; on Linux it
 # needs no sudo. Override by exporting ISSUEFLEET_ROOT before `bazel run`.
 export ISSUEFLEET_ROOT="${ISSUEFLEET_ROOT:-$HOME/.issuefleet}"
+# Config + secrets: same location as a laptop setup.
+export ISSUEFLEET_CONFIG="${ISSUEFLEET_CONFIG:-$HOME/.config/issuefleet}"
 
 # The tree is created on demand — no manual mkdir step. (Also prevents
 # docker from creating root-owned dirs at mount time on Linux.)
-mkdir -p "$ISSUEFLEET_ROOT"/{worktrees,repos,claude-config,state,config,ssh,bin}
+mkdir -p "$ISSUEFLEET_ROOT"/{worktrees,repos,claude-config,state,ssh,bin}
 chmod 700 "$ISSUEFLEET_ROOT/ssh" 2>/dev/null || true
 
 # Called by up/doctor (not down): seed what can be seeded safely and name
@@ -23,8 +25,8 @@ issuefleet_preflight() {
   # time — warn loudly instead.
   [ -s "$launcher" ] || missing="$missing
   - launcher: cp \$(command -v claude-container) $launcher"
-  [ -f "$ISSUEFLEET_ROOT/config/config.toml" ] || missing="$missing
-  - config: $ISSUEFLEET_ROOT/config/config.toml (see deploy/docker/README.md)"
+  [ -f "$HOME/.config/issuefleet/config.toml" ] || missing="$missing
+  - config: ~/.config/issuefleet/config.toml (same file as a laptop setup)"
   [ -n "$(ls -A "$ISSUEFLEET_ROOT/claude-config" 2>/dev/null)" ] || missing="$missing
   - worker claude credentials: cp -r ~/.config/claude-container/config/* $ISSUEFLEET_ROOT/claude-config/"
   [ -e "$ISSUEFLEET_ROOT/ssh/id_ed25519" ] || missing="$missing
