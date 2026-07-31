@@ -16,5 +16,16 @@ py_library(
             "//src/issuefleet",
         ],
     )
-    for f in glob(["test_*.py"])
+    for f in glob(["test_*.py"], exclude = ["test_bazel_wrapper.py"])
 ]
+
+# Exercises the real tools/bazel script, so it needs the file as a runfile.
+py_test(
+    name = "test_bazel_wrapper",
+    srcs = ["test_bazel_wrapper.py"],
+    data = ["//tools:bazel"],
+    deps = [
+        ":fakes",
+        "//src/issuefleet",
+    ],
+)

@@ -1,0 +1,3 @@
+# The Bazelisk wrapper is a plain script read from the source tree, not a build
+# target; it is exported only so tests can depend on the real file as data.
+exports_files(["bazel"])
