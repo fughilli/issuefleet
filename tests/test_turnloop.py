@@ -190,6 +190,22 @@ class ReadyWakeRestoreTest(unittest.TestCase):
             self.assertEqual(turnloop.step(self.agent_dir), 0)
         self.assertEqual(turns.TurnState.load(self.agent_dir).phase, turns.PHASE_RUNNING)
 
+    def test_failed_turns_are_never_parked_as_idle(self):
+        # Live incident: every turn failed instantly (root-refused claude);
+        # failures counted as no-ops and the worker parked into an
+        # innocent-looking idle, masking the outage.
+        st = turns.TurnState.load(self.agent_dir)
+        st.phase = turns.PHASE_RUNNING
+        st.turns_taken = 1
+        st.ever_ready = True  # even in the parkable regime
+        st.save(self.agent_dir)
+        stub = self.bin / "claude"
+        stub.write_text("#!/bin/sh\ncat > /dev/null\nexit 1\n")
+        stub.chmod(0o755)
+        for _ in range(4):
+            self.assertEqual(turnloop.step(self.agent_dir), turns.EXIT_ERROR)
+        self.assertEqual(turns.TurnState.load(self.agent_dir).phase, turns.PHASE_RUNNING)
+
     def test_wake_from_idle_restores_idle(self):
         st = turns.TurnState.load(self.agent_dir)
         st.phase = turns.PHASE_IDLE

@@ -100,6 +100,30 @@ def _check_launcher_flags(cfg: Config) -> list[Check]:
     return out
 
 
+def _check_worker_runtime(cfg: Config) -> list[Check]:
+    """The two conditions that silently break every worker launch when the
+    daemon itself runs containerized (observed live on the first stack)."""
+    out = []
+    if hasattr(os, "geteuid"):
+        if os.geteuid() == 0:
+            out.append(Check(FAIL, "running as root",
+                             "workers inherit this uid via the launcher, and claude "
+                             "refuses bypassPermissions as root — every turn fails "
+                             "instantly. Run the compose stack via the bazel targets "
+                             "(env.sh exports your uid) or set `user:` yourself"))
+        else:
+            out.append(Check(OK, f"running as uid {os.geteuid()}", "workers inherit a non-root uid"))
+    sock = Path("/var/run/docker.sock")
+    if sock.exists():
+        if os.access(sock, os.W_OK):
+            out.append(Check(OK, "docker socket", "writable"))
+        else:
+            out.append(Check(FAIL, "docker socket", "/var/run/docker.sock exists but is not "
+                             "writable by this uid — worker launches will fail; add the "
+                             "socket's group (env.sh exports ISSUEFLEET_DOCKER_GID)"))
+    return out
+
+
 def _check_container_settings(cfg: Config) -> list[Check]:
     config_dir = cfg.container_config_dir or Path("~/.config/claude-container/config").expanduser()
     settings = config_dir / "settings.json"
@@ -310,6 +334,7 @@ def run_doctor(
 
     git = git or Gitops()
     checks += _check_tools(cfg)
+    checks += _check_worker_runtime(cfg)
     checks += _check_launcher_flags(cfg)
     checks += _check_container_settings(cfg)
     checks += _check_dirs(cfg)

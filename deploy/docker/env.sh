@@ -5,6 +5,16 @@
 export ISSUEFLEET_ROOT="${ISSUEFLEET_ROOT:-$HOME/.issuefleet}"
 # Config + secrets: same location as a laptop setup.
 export ISSUEFLEET_CONFIG="${ISSUEFLEET_CONFIG:-$HOME/.config/issuefleet}"
+# The daemon container runs as YOUR uid (root would break every worker:
+# claude refuses bypassPermissions as root), plus the docker socket's
+# group so it can launch sibling containers.
+export ISSUEFLEET_UID="${ISSUEFLEET_UID:-$(id -u)}"
+export ISSUEFLEET_GID="${ISSUEFLEET_GID:-$(id -g)}"
+if [ -z "${ISSUEFLEET_DOCKER_GID:-}" ]; then
+  sock=/var/run/docker.sock
+  gid=$(stat -f %g "$sock" 2>/dev/null || stat -c %g "$sock" 2>/dev/null || echo 0)
+  export ISSUEFLEET_DOCKER_GID="$gid"
+fi
 # Checkouts the daemon does NOT own — where a `repo` that points at your own
 # working tree lives. Same-path mounted like the root, because the launcher
 # resolves a linked worktree's .git pointer in THIS container and then hands

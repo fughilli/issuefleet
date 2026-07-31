@@ -126,12 +126,12 @@ workers' *containers* — but note the tmux caveat below.
 
 ## Known edges (read before relying on it)
 
-- **UNPROVEN as a whole**: this compose stack was authored, not yet run.
-  The individually risky seams: claude-container running *inside* a
-  container (it needs bash + docker CLI, both provided; it computes
-  USER_UID from `id -u` — root in this image, so workers run as root and
-  write root-owned files into the worktrees), and Funnel serve-config
-  templating. Run `doctor` first; it validates most of the chain.
+- **The daemon must not run as root** (found live: the launcher
+  propagates the daemon's uid to workers, and claude refuses
+  bypassPermissions as root — every turn fails instantly). The compose
+  file therefore runs the service as your uid (`user:` fed by env.sh,
+  which also grants the docker socket's group). `doctor` fails loudly on
+  both conditions; always run it after changing the stack.
 - **tmux lives inside the daemon container**, so unlike the laptop setup,
   restarting the *daemon container* kills worker sessions (their docker
   containers die with the pty). The crash-restart path re-adopts and

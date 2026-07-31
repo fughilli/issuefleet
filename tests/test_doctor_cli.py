@@ -178,6 +178,25 @@ class CliParserTest(unittest.TestCase):
         self.assertTrue(a.follow)
 
 
+class WorkerRuntimeCheckTest(unittest.TestCase):
+    def test_root_euid_fails_with_guidance(self):
+        from unittest import mock
+
+        from issuefleet.doctor import _check_worker_runtime
+
+        cfg = config.parse({"projects": [{"name": "x", "linear_project": "X",
+                                          "repo": "/tmp/x",
+                                          "claim": {"strategy": "agent"}}]})
+        with mock.patch("os.geteuid", return_value=0):
+            checks = _check_worker_runtime(cfg)
+        root_check = [c for c in checks if "root" in c.label][0]
+        self.assertEqual(root_check.status, "fail")
+        self.assertIn("bypassPermissions", root_check.detail)
+        with mock.patch("os.geteuid", return_value=501):
+            checks = _check_worker_runtime(cfg)
+        self.assertEqual([c.status for c in checks if "uid 501" in c.label], ["ok"])
+
+
 class DoctorTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

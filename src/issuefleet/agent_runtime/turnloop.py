@@ -141,7 +141,13 @@ def step(agent_dir: Path) -> int:
     state = turns.TurnState.load(agent_dir)
     emitted = mb.last_outbox_seq() != pre_turn_seq
     committed = _git_head(workspace) != pre_head
-    if (
+    if rc != 0:
+        # A FAILED turn must never adjust phase: counting failures as
+        # "no-op" turns parked a 100%-failing worker into innocent-looking
+        # idle (observed live: root-refused claude, 4 instant failures,
+        # status showed 'idle'). Failures stay on the loud EXIT_ERROR path.
+        state.noop_turns = 0
+    elif (
         decision.wake_from_phase in (turns.PHASE_READY, turns.PHASE_IDLE)
         and state.phase == turns.PHASE_RUNNING
         and not emitted

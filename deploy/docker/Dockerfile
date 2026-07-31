@@ -22,11 +22,18 @@ RUN apt-get update \
     && curl -fsSL "https://download.docker.com/linux/static/stable/${arch}/docker-${DOCKER_CLI_VERSION}.tgz" \
         | tar -xz --strip-components=1 -C /usr/local/bin docker/docker
 
+# The daemon runs as the OPERATOR'S uid (compose `user:`), not root —
+# claude refuses bypassPermissions as root, which broke every worker turn
+# when the daemon ran as root and the launcher propagated uid 0. Any-uid
+# writable home for that user:
+RUN mkdir -p /home/fleet && chmod 1777 /home/fleet
+ENV HOME=/home/fleet
+
 WORKDIR /opt/issuefleet
 COPY src/ src/
 COPY bin/ bin/
 
-# Stdlib-only: no pip install. Config is mounted at /root/.config/issuefleet
-# (the default --config location).
+# Stdlib-only: no pip install. Config is mounted at
+# /home/fleet/.config/issuefleet (the default --config location under HOME).
 ENV PYTHONUNBUFFERED=1
 CMD ["bin/issuefleet", "-v", "run"]
