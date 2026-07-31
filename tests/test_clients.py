@@ -58,6 +58,7 @@ class LinearClientTest(unittest.TestCase):
         t = RecordingTransport(
             [
                 {"data": {"projects": {"nodes": [{"id": "p1", "name": "Splanc"}]}}},
+                {"data": {"__type": {"fields": [{"name": "delegate"}]}}},  # schema probe
                 {
                     "data": {
                         "project": {
@@ -88,6 +89,36 @@ class LinearClientTest(unittest.TestCase):
         self.assertEqual(issues[0].description, "")  # None normalized
         # Second page passed the cursor.
         self.assertEqual(t.calls[2]["payload"]["variables"]["after"], "c1")
+
+    def test_issue_fields_adapt_to_schema(self):
+        # Workspace WITH Issue.delegate: field included, mapped through.
+        t = RecordingTransport(
+            [{"data": {"__type": {"fields": [{"name": "delegate"}, {"name": "id"}]}}}]
+        )
+        tracker = LinearTracker(LinearClient("k", transport=t))
+        self.assertIn("delegate { id }", tracker.issue_fields())
+        # Workspace WITHOUT it: omitted, so queries can't 400.
+        t2 = RecordingTransport([{"data": {"__type": {"fields": [{"name": "id"}]}}}])
+        tracker2 = LinearTracker(LinearClient("k", transport=t2))
+        self.assertNotIn("delegate", tracker2.issue_fields())
+        # Introspection result is cached: one call each.
+        tracker.issue_fields()
+        self.assertEqual(len(t.calls), 1)
+
+    def test_delegate_id_mapped(self):
+        from issuefleet.linear import _to_issue
+
+        issue = _to_issue(
+            {
+                "id": "i1", "identifier": "FUG-14", "title": "t", "description": "",
+                "url": "u", "priority": 0, "createdAt": "",
+                "state": {"name": "Todo", "type": "unstarted"},
+                "labels": {"nodes": []}, "assignee": None,
+                "delegate": {"id": "app-user-1"}, "team": {"id": "tm"}, "project": None,
+            }
+        )
+        self.assertEqual(issue.delegate_id, "app-user-1")
+        self.assertIsNone(issue.assignee_id)
 
     def test_set_state_resolves_team_state_by_name(self):
         t = RecordingTransport(
@@ -125,6 +156,7 @@ class LinearClientTest(unittest.TestCase):
     def test_create_issue_inherits_team_and_project_from_context(self):
         t = RecordingTransport(
             [
+                {"data": {"__type": {"fields": [{"name": "delegate"}]}}},  # schema probe
                 # get_issue for the context project id (resolved first)
                 {"data": {"issue": self._created_node(id="ctx", identifier="FUG-1")}},
                 # team labels lookup (one label requested)

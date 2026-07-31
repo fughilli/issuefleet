@@ -26,6 +26,7 @@ class Issue:
     state_type: str  # Linear workflow state type: triage/backlog/unstarted/started/completed/canceled
     labels: list[str] = field(default_factory=list)
     assignee_id: str | None = None
+    delegate_id: str | None = None  # Linear agents: delegation sets this, not assignee
     created_at: str = ""
     project_id: str | None = None  # Linear project UUID (session-claim routing)
 

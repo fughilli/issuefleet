@@ -204,21 +204,31 @@ class AgentSessionTest(unittest.TestCase):
         self.assertIsNotNone(self.registry.get("issue-1"))
         self.assertEqual(self.registry.get("issue-1").claim_origin, "session")
 
-    def test_agent_strategy_poll_claims_assigned_issues(self):
-        # Webhooks down (dead tunnel): delegation is assignment, and
-        # assignment is pollable — the fleet must not go deaf.
+    def test_agent_strategy_poll_claims_delegated_issues(self):
+        # Webhooks down (dead tunnel): delegation is pollable — the fleet
+        # must not go deaf. Linear stores delegation in `delegate`, NOT
+        # `assignee` (found live: doctor showed '0 assigned' for a
+        # UI-delegated issue).
         self.cfg.projects[0].claim = config.ClaimRule("agent", "")
         self.tracker.add_issue(
-            make_issue(1, assignee_id=self.tracker.viewer_id, project_id="proj-splanc")
+            make_issue(1, delegate_id=self.tracker.viewer_id, project_id="proj-splanc")
         )
         self.rec.tick()  # no session event ever arrives
         w = self.registry.get("issue-1")
         self.assertIsNotNone(w)
         self.assertEqual(w.claim_origin, "poll")
-        # Un-assigning the agent revokes the claim.
-        self.tracker.issues["issue-1"].assignee_id = None
+        # Revoking the delegation un-claims.
+        self.tracker.issues["issue-1"].delegate_id = None
         self.rec.tick()
         self.assertIsNone(self.registry.get("issue-1"))
+
+    def test_agent_strategy_also_accepts_plain_assignment(self):
+        self.cfg.projects[0].claim = config.ClaimRule("agent", "")
+        self.tracker.add_issue(
+            make_issue(2, assignee_id=self.tracker.viewer_id, project_id="proj-splanc")
+        )
+        self.rec.tick()
+        self.assertIsNotNone(self.registry.get("issue-2"))
 
     def test_session_attaches_to_already_claimed_worker(self):
         self.tracker.add_issue(make_issue(1, project_id="proj-splanc"))  # labeled

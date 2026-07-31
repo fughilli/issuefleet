@@ -70,8 +70,11 @@ class FakeTracker:
     def eligible_issues(self, project) -> list[Issue]:
         open_issues = [i for i in self.issues.values() if i.open]
         if project.claim.strategy == "agent":
-            # Mirror LinearTracker: delegation = assignment to the app user.
-            return [i for i in open_issues if i.assignee_id == self.viewer_id]
+            # Mirror LinearTracker: delegation sets `delegate` (assignee
+            # accepted too, belt and braces).
+            return [
+                i for i in open_issues if self.viewer_id in (i.assignee_id, i.delegate_id)
+            ]
         return [i for i in open_issues if project.claim.matches(i)]
 
     def get_issue(self, issue_id: str) -> Issue | None:

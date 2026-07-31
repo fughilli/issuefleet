@@ -50,6 +50,7 @@ def _to_issue(node: dict) -> Issue:
         state_type=node["state"]["type"],
         labels=[l["name"] for l in node.get("labels", {}).get("nodes", [])],
         assignee_id=(node.get("assignee") or {}).get("id"),
+        delegate_id=(node.get("delegate") or {}).get("id"),
         created_at=node.get("createdAt", ""),
         project_id=(node.get("project") or {}).get("id"),
     )
@@ -94,6 +95,7 @@ class LinearTracker:
         # by the viewer are the app's own — including Linear's unmarked
         # mirrors of session activities — and must be filtered on identity.
         self.app_identity = client.auth == "oauth"
+        self._issue_fields: str | None = None
         self._viewer: dict | None = None
         self._project_ids: dict[str, str] = {}  # ProjectConfig.linear_project -> uuid
         self._team_states: dict[str, dict[str, str]] = {}  # team_id -> {lower name: state id}
@@ -110,6 +112,26 @@ class LinearTracker:
         return self.viewer()["id"]
 
     # -- projects / issues -------------------------------------------------
+
+    def issue_fields(self) -> str:
+        """Issue selection set, adapted to the workspace schema: `delegate`
+        (what agent delegation actually sets — NOT `assignee`) is included
+        only if the schema has it, probed once via introspection so a
+        schema without it can't break every query."""
+        if self._issue_fields is None:
+            fields = _ISSUE_FIELDS
+            try:
+                data = self.client.graphql('{ __type(name: "Issue") { fields { name } } }')
+                names = {f["name"] for f in (data.get("__type") or {}).get("fields", [])}
+                if "delegate" in names:
+                    fields += "    delegate { id }\n"
+                else:
+                    log.info("Issue.delegate not in this workspace's schema; "
+                             "delegation-claims will rely on assignee/webhooks only")
+            except Exception:
+                log.warning("schema introspection failed; using base issue fields")
+            self._issue_fields = fields
+        return self._issue_fields
 
     def _project_id(self, ref: str) -> str:
         if ref in self._project_ids:
@@ -146,7 +168,7 @@ class LinearTracker:
                          pageInfo { hasNextPage endCursor }
                        }
                      }
-                   }""" % _ISSUE_FIELDS,
+                   }""" % self.issue_fields(),
                 {"id": pid, "after": cursor},
             )
             conn = data["project"]["issues"]
@@ -160,17 +182,19 @@ class LinearTracker:
     def eligible_issues(self, project: ProjectConfig) -> list[Issue]:
         issues = self.open_issues(project)
         if project.claim.strategy == "agent":
-            # Delegation IS assignment to the app user, and assignment is
-            # pollable — so a dead webhook tunnel degrades to poll latency
-            # instead of total deafness. (@-mentions remain webhook-only.)
+            # Delegation is pollable — so a dead webhook tunnel degrades to
+            # poll latency instead of total deafness. Linear stores agent
+            # delegation in `delegate` (verified live: the UI says
+            # "assigned" but assignee stays untouched); accept either
+            # field. (@-mentions remain webhook-only.)
             me = self.get_viewer_id()
-            return [i for i in issues if i.assignee_id == me]
+            return [i for i in issues if me in (i.assignee_id, i.delegate_id)]
         return [i for i in issues if project.claim.matches(i)]
 
     def get_issue(self, issue_id: str) -> Issue | None:
         try:
             data = self.client.graphql(
-                "query($id: String!) { issue(id: $id) { %s } }" % _ISSUE_FIELDS,
+                "query($id: String!) { issue(id: $id) { %s } }" % self.issue_fields(),
                 {"id": issue_id},
             )
         except (LinearError, ApiError) as e:
