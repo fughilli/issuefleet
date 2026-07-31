@@ -7,7 +7,9 @@ export ISSUEFLEET_ROOT="${ISSUEFLEET_ROOT:-$HOME/.issuefleet}"
 export ISSUEFLEET_CONFIG="${ISSUEFLEET_CONFIG:-$HOME/.config/issuefleet}"
 # The daemon container runs as YOUR uid (root would break every worker:
 # claude refuses bypassPermissions as root), plus the docker socket's
-# group so it can launch sibling containers.
+# group so it can launch sibling containers. Note: this stat sees the
+# HOST socket — right on Linux; on macOS the in-container socket is
+# Docker Desktop's root:root one, covered by the extra group 0 in compose.
 export ISSUEFLEET_UID="${ISSUEFLEET_UID:-$(id -u)}"
 export ISSUEFLEET_GID="${ISSUEFLEET_GID:-$(id -g)}"
 if [ -z "${ISSUEFLEET_DOCKER_GID:-}" ]; then

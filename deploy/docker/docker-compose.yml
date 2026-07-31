@@ -54,7 +54,11 @@ services:
     # docker socket's group for sibling-container launches.
     user: "${ISSUEFLEET_UID:?run via bazel or source env.sh}:${ISSUEFLEET_GID:?run via bazel or source env.sh}"
     group_add:
+      # The stat'd host gid (right on Linux) AND group 0: on macOS the
+      # host socket is a user-owned symlink but the in-container socket is
+      # Docker Desktop's VM-side root:root one.
       - "${ISSUEFLEET_DOCKER_GID:-0}"
+      - "0"
     environment:
       - HOME=/home/fleet
       # Lets config.toml use ${ISSUEFLEET_ROOT}/... paths portably.
