@@ -37,20 +37,17 @@ checklist of anything still missing. What you must provide by hand:
 ```sh
 ROOT=$HOME/.issuefleet
 
-# 1. Target repos: clone (SSH remote) under $ROOT/repos/<name>
-git clone git@github.com:you/yourrepo $ROOT/repos/yourrepo
-
-# 2. Claude credentials for workers: seed the shared config dir (same
+# 1. Claude credentials for workers: seed the shared config dir (same
 #    content as ~/.config/claude-container/config — OAuth credentials +
 #    settings.json with bypassPermissions). Never copied automatically.
 cp -r ~/.config/claude-container/config/* $ROOT/claude-config/
 
-# 3. Push key: a deploy key or user key authorized for the target repos
+# 2. Push key: a deploy key or user key authorized for the target repos
 cp <your-key> $ROOT/ssh/id_ed25519
 ssh-keyscan github.com > $ROOT/ssh/known_hosts
 chmod 600 $ROOT/ssh/id_ed25519
 
-# 4. Config + secrets under $ROOT/config (mounted at /etc/issuefleet):
+# 3. Config + secrets under $ROOT/config (mounted at /etc/issuefleet):
 #    config.toml, linear.key, github_app.pem, *_webhook.secret — chmod 600.
 ```
 
@@ -71,6 +68,7 @@ github_secret_file = "${ISSUEFLEET_ROOT}/config/github_webhook.secret"
 linear_secret_file = "${ISSUEFLEET_ROOT}/config/linear_webhook.secret"
 [[projects]]
 repo = "${ISSUEFLEET_ROOT}/repos/yourrepo"
+git_url = "git@github.com:you/yourrepo.git"   # daemon clones it on first run
 # ...
 ```
 

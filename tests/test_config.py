@@ -119,6 +119,11 @@ class ConfigTest(unittest.TestCase):
         finally:
             del os.environ["ISSUEFLEET_ROOT"]
 
+    def test_git_url_optional(self):
+        self.assertIsNone(config.parse(MINIMAL).projects[0].git_url)
+        data = {"projects": [dict(MINIMAL["projects"][0], git_url="git@github.com:a/b.git")]}
+        self.assertEqual(config.parse(data).projects[0].git_url, "git@github.com:a/b.git")
+
     def test_launcher_args_default_and_override(self):
         self.assertEqual(config.parse(MINIMAL).launcher_args, ["--skills-ignore-new"])
         data = dict(MINIMAL)

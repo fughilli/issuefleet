@@ -214,6 +214,39 @@ state_done = "Done"
             del os.environ["LINEAR_API_KEY"]
             del os.environ["GITHUB_TOKEN"]
 
+    def test_missing_repo_with_git_url_warns_and_checks_api(self):
+        import os
+
+        os.environ["LINEAR_API_KEY"] = "k"
+        os.environ["GITHUB_TOKEN"] = "t"
+        try:
+            p = self.write_config(
+                f"""
+[daemon]
+state_dir = "{self.root}/state"
+worktree_root = "{self.root}/wt"
+[[projects]]
+name = "x"
+linear_project = "X"
+repo = "{self.root}/not-cloned-yet"
+git_url = "git@github.com:fughilli/somerepo.git"
+claim = {{ strategy = "agent" }}
+"""
+            )
+            tracker = FakeDoctorTracker()
+            git = FakeGit(self.root)
+            git.is_repo = lambda repo: False
+            out = io.StringIO()
+            run_doctor(p, tracker=tracker, forges={"x": FakeForge()}, git=git,
+                       runner=FakeRunner(), stream=out)
+            text = out.getvalue()
+            self.assertIn("will be cloned from git@github.com:fughilli/somerepo.git", text)
+            self.assertIn("-> fughilli/somerepo", text)  # slug derived from git_url
+            self.assertNotIn("not a git repository", text)
+        finally:
+            del os.environ["LINEAR_API_KEY"]
+            del os.environ["GITHUB_TOKEN"]
+
     def test_missing_credentials_is_actionable(self):
         import os
 

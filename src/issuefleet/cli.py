@@ -36,6 +36,15 @@ def build_stack(cfg: Config) -> Reconciler:
     linear_key, _ = creds.resolve_linear_key(cfg)
     tracker = LinearTracker(LinearClient(linear_key, auth=cfg.linear_auth))
     git = Gitops()
+    for project in cfg.projects:
+        if not git.is_repo(project.repo):
+            if not project.git_url:
+                raise SystemExit(
+                    f"[{project.name}] repo {project.repo} does not exist and no "
+                    "git_url is configured to clone it from"
+                )
+            log.info("[%s] cloning %s -> %s", project.name, project.git_url, project.repo)
+            git.clone(project.git_url, project.repo)
     if creds.github_auth_mode(cfg) == "app":
         from issuefleet.githubapp import AppTokenProvider
 

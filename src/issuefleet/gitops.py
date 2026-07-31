@@ -37,6 +37,12 @@ def _git(args: list[str], cwd: Path | None = None) -> str:
 
 
 class Gitops:
+    def clone(self, url: str, path: Path) -> None:
+        """Bootstrap a missing main checkout (daemon startup, not doctor)."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _git(["clone", url, str(path)])
+
     def create_worktree(self, repo: Path, branch: str, base_ref: str, path: Path) -> None:
         path = Path(path)
         if (path / ".git").exists():

@@ -118,6 +118,13 @@ class GitopsTest(unittest.TestCase):
     def test_remote_url(self):
         self.assertEqual(self.git.remote_url(self.repo), str(self.origin))
 
+    def test_clone_bootstraps_missing_checkout(self):
+        dest = Path(self.tmp.name) / "deep" / "nested" / "clone"  # parents created
+        self.git.clone(str(self.origin), dest)
+        self.assertTrue(self.git.is_repo(dest))
+        self.assertTrue((dest / "README.md").is_file())
+        self.assertEqual(self.git.remote_url(dest), str(self.origin))
+
 
 @unittest.skipIf(shutil.which("tmux") is None, "tmux not available")
 class TmuxRunnerTest(unittest.TestCase):

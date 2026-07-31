@@ -257,11 +257,17 @@ def _check_github(cfg: Config, git: Gitops, forges: dict | None) -> list[Check]:
 
     for project in cfg.projects:
         name = project.name
-        if not git.is_repo(project.repo):
-            out.append(Check(FAIL, f"[{name}] repo {project.repo}", "not a git repository"))
-            continue
+        have_clone = git.is_repo(project.repo)
+        if not have_clone:
+            if not project.git_url:
+                out.append(Check(FAIL, f"[{name}] repo {project.repo}",
+                                 "does not exist and no git_url is configured — the daemon "
+                                 "can bootstrap it if you add git_url to the project"))
+                continue
+            out.append(Check(WARN, f"[{name}] repo {project.repo}",
+                             f"missing — will be cloned from {project.git_url} on first run"))
         try:
-            remote = git.remote_url(project.repo)
+            remote = git.remote_url(project.repo) if have_clone else project.git_url
             slug = parse_repo_slug(remote)
             out.append(Check(OK, f"[{name}] origin", f"{remote} -> {slug}"))
         except Exception as e:
@@ -273,11 +279,12 @@ def _check_github(cfg: Config, git: Gitops, forges: dict | None) -> list[Check]:
             out.append(Check(OK, f"[{name}] GitHub API", f"can read {slug}"))
         except Exception as e:
             out.append(Check(FAIL, f"[{name}] GitHub API", str(e)))
-        try:
-            git.has_commits_ahead(project.repo, project.base_ref)  # resolves the base ref
-            out.append(Check(OK, f"[{name}] base ref {project.base_ref!r}"))
-        except Exception as e:
-            out.append(Check(FAIL, f"[{name}] base ref {project.base_ref!r}", str(e)))
+        if have_clone:
+            try:
+                git.has_commits_ahead(project.repo, project.base_ref)  # resolves the base ref
+                out.append(Check(OK, f"[{name}] base ref {project.base_ref!r}"))
+            except Exception as e:
+                out.append(Check(FAIL, f"[{name}] base ref {project.base_ref!r}", str(e)))
     return out
 
 

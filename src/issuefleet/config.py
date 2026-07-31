@@ -52,6 +52,9 @@ class ProjectConfig:
     linear_project: str  # Linear project name or UUID
     repo: Path  # local main checkout (push remote = origin)
     claim: ClaimRule
+    # SSH remote to clone from when `repo` doesn't exist yet — the daemon
+    # bootstraps the checkout itself. Without it, a missing repo is an error.
+    git_url: str | None = None
     base_ref: str = "main"
     branch_template: str = "agent/{key}-{slug}"
     state_in_progress: str = "In Progress"
@@ -200,6 +203,7 @@ def parse(data: dict, source: str = "<config>") -> Config:
                 linear_project=p["linear_project"],
                 repo=_path(p["repo"]),
                 claim=ClaimRule(strategy=strategy, value=claim_raw.get("value", "")),
+                git_url=p.get("git_url"),
                 base_ref=p.get("base_ref", "main"),
                 branch_template=p.get("branch_template", "agent/{key}-{slug}"),
                 state_in_progress=p.get("state_in_progress", "In Progress"),
