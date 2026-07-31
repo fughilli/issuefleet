@@ -51,6 +51,17 @@ class RegistryTest(unittest.TestCase):
     def test_empty_state_dir_is_fine(self):
         self.assertEqual(Registry(self.state_dir / "does-not-exist-yet").all(), [])
 
+    def test_reload_picks_up_external_changes(self):
+        reg = Registry(self.state_dir)
+        reg.add(make_record())
+        # A separate process removes the worker on disk.
+        other = Registry(self.state_dir)
+        other.remove("i1")
+        # The first instance still has it in memory until it reloads.
+        self.assertIsNotNone(reg.get("i1"))
+        reg.reload()
+        self.assertIsNone(reg.get("i1"))
+
     def test_corrupt_registry_fails_loudly(self):
         (self.state_dir / "registry.json").write_text("{oops")
         with self.assertRaisesRegex(RuntimeError, "corrupt"):

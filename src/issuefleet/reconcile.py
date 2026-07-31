@@ -185,6 +185,10 @@ class Reconciler:
             log.exception("agent activity emit failed (session %s)", session_id)
 
     def tick(self) -> None:
+        # registry.json is the source of truth; a separate `stop`/`once`
+        # process may have changed it since the last tick. Reload so we
+        # never service a worker whose worktree was removed underneath us.
+        self.registry.reload()
         self._drain_session_events()
         for rec in self.registry.all():
             try:
@@ -300,6 +304,14 @@ class Reconciler:
 
     def _service(self, rec: WorkerRecord) -> None:
         project = self.cfg.project(rec.project)
+        # Worktree gone from under us (a hand `stop`, a manual rm): the
+        # worker is unserviceable — drop the registry entry rather than
+        # crash every tick reading files that no longer exist.
+        if not (Path(rec.worktree) / ".agent").is_dir():
+            log.warning("worker %s: worktree %s is gone; dropping the registry entry",
+                        rec.issue_key, rec.worktree)
+            self.registry.remove(rec.issue_id)
+            return
         mailbox = Mailbox(Path(rec.worktree) / ".agent" / "mailbox")
 
         issue = self.tracker.get_issue(rec.issue_id)
