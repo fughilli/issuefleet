@@ -140,6 +140,22 @@ class GitopsTest(unittest.TestCase):
                                    capture_output=True, text=True).stdout
         self.assertIn("agent/fug-1-x", in_other)
         self.assertNotIn("agent/fug-1-x", in_origin)
+
+        # History rewrite then re-push must update the URL remote — the live
+        # bug was a force that silently no-op'd against a URL, freezing the
+        # PR at the first commit. Reset to a divergent commit and re-push.
+        first_sha = subprocess.run(["git", "ls-remote", str(other), "agent/fug-1-x"],
+                                   capture_output=True, text=True).stdout.split()[0]
+        run(["git", "reset", "--hard", "HEAD~1"], cwd=self.wt)
+        (self.wt / "rewritten.txt").write_text("clean single commit")
+        run(["git", "add", "."], cwd=self.wt)
+        run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "rewrite"],
+            cwd=self.wt)
+        self.git.push(self.wt, "agent/fug-1-x", url=str(other), auth_header="basic zzz")
+        new_sha = subprocess.run(["git", "ls-remote", str(other), "agent/fug-1-x"],
+                                 capture_output=True, text=True).stdout.split()[0]
+        self.assertNotEqual(new_sha, first_sha)  # the rewrite actually landed
+
         self.git.delete_remote_branch(self.repo, "agent/fug-1-x", url=str(other))
         in_other = subprocess.run(["git", "ls-remote", "--heads", str(other)],
                                   capture_output=True, text=True).stdout
