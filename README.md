@@ -218,10 +218,7 @@ launcher_args = ["--skills-ignore-new"]
 name = "splanc"              # short handle used in paths, sessions, logs
 linear_project = "Splanc"    # Linear project name (or UUID if names collide)
 repo = "~/Projects/splanc"   # local main checkout; `origin` must point at GitHub
-git_url = "git@github.com:you/splanc.git"  # optional: daemon clones `repo` if missing
-# local_checkout = "~/Projects/splanc"     # optional: symlink `repo` to an existing
-#                                          # checkout instead (wins over git_url; the
-#                                          # target must be visible where the daemon runs)
+git_url = "git@github.com:you/splanc.git"  # daemon clones `repo` from here if missing
 base_ref = "main"            # branch agents fork from and PRs target
 claim = { strategy = "label", value = "agent" }
 branch_template = "agent/{key}-{slug}"     # {key}=fug-12, {slug} from the title

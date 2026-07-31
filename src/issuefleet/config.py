@@ -52,14 +52,12 @@ class ProjectConfig:
     linear_project: str  # Linear project name or UUID
     repo: Path  # local main checkout (push remote = origin)
     claim: ClaimRule
-    # SSH remote to clone from when `repo` doesn't exist yet — the daemon
-    # bootstraps the checkout itself. Without it, a missing repo is an error.
+    # Remote to clone from when `repo` doesn't exist yet — the daemon
+    # bootstraps the checkout itself, and `repo` is always a real clone it
+    # owns. Without it, a missing repo is an error. (Only owner/name is
+    # parsed from this; the clone itself goes over HTTPS with the GitHub
+    # App's scoped token.)
     git_url: str | None = None
-    # An existing checkout elsewhere on this machine: `repo` becomes a
-    # symlink to it instead of a clone. Wins over git_url when it exists.
-    # (Container caveat: the target must be visible at the same path where
-    # the daemon runs — for the compose stack, prefer git_url.)
-    local_checkout: Path | None = None
     base_ref: str = "main"
     branch_template: str = "agent/{key}-{slug}"
     state_in_progress: str = "In Progress"
@@ -148,18 +146,26 @@ def _reject_secrets(table: dict, where: str) -> None:
             )
 
 
+# Path variables the daemon fills in itself when the environment doesn't.
+# The homelab stack exports both (deploy/docker/env.sh) and same-path mounts
+# them, so one config.toml is the same text on a laptop and in the container.
+# ISSUEFLEET_ROOT is the data root; ISSUEFLEET_PROJECTS is where checkouts
+# the daemon does NOT own live (a `repo` pointing at your own working tree —
+# `~` can't be used there, since it is /root inside the container).
+_PATH_VARS = {
+    "ISSUEFLEET_ROOT": "~/.issuefleet",
+    "ISSUEFLEET_PROJECTS": "~/Projects",
+}
+
+
 def _path(v: str) -> Path:
-    # Environment expansion makes configs portable across deployments: the
-    # homelab stack sets ISSUEFLEET_ROOT in the daemon's environment, so
-    # `worktree_root = "${ISSUEFLEET_ROOT}/worktrees"` is the same config
-    # text on a laptop and in the container. Where the variable isn't set
-    # (plain laptop runs), it defaults to ~/.issuefleet so shared configs
-    # don't leave a literal "${ISSUEFLEET_ROOT}" directory behind.
-    if "ISSUEFLEET_ROOT" not in os.environ:
-        default_root = str(Path("~/.issuefleet").expanduser())
-        v = v.replace("${ISSUEFLEET_ROOT}", default_root).replace(
-            "$ISSUEFLEET_ROOT", default_root
-        )
+    # Substituting the default ourselves (rather than leaning on expandvars)
+    # keeps a shared config from leaving a literal "${ISSUEFLEET_ROOT}"
+    # directory behind on plain laptop runs.
+    for var, default in _PATH_VARS.items():
+        if var not in os.environ:
+            fallback = str(Path(default).expanduser())
+            v = v.replace("${%s}" % var, fallback).replace("$%s" % var, fallback)
     return Path(os.path.expandvars(v)).expanduser()
 
 
@@ -209,6 +215,14 @@ def parse(data: dict, source: str = "<config>") -> Config:
             )
         if strategy != "agent" and not claim_raw.get("value"):
             raise ConfigError(f"{where}: claim.value is required (e.g. the label name)")
+        if "local_checkout" in p:
+            # Removed: `repo` is always a clone the daemon owns. Silently
+            # ignoring the key would swap a symlink for a clone with no
+            # warning, so say so instead.
+            raise ConfigError(
+                f"{where}: local_checkout is no longer supported — the daemon always "
+                "clones into `repo` now. Drop the key (and set git_url if unset)."
+            )
         projects.append(
             ProjectConfig(
                 name=p["name"],
@@ -216,7 +230,6 @@ def parse(data: dict, source: str = "<config>") -> Config:
                 repo=_path(p["repo"]),
                 claim=ClaimRule(strategy=strategy, value=claim_raw.get("value", "")),
                 git_url=p.get("git_url"),
-                local_checkout=_path(p["local_checkout"]) if p.get("local_checkout") else None,
                 base_ref=p.get("base_ref", "main"),
                 branch_template=p.get("branch_template", "agent/{key}-{slug}"),
                 state_in_progress=p.get("state_in_progress", "In Progress"),

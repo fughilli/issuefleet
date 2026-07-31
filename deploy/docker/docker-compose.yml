@@ -52,6 +52,17 @@ services:
     environment:
       # Lets config.toml use ${ISSUEFLEET_ROOT}/... paths portably.
       - ISSUEFLEET_ROOT=${ISSUEFLEET_ROOT}
+      # Same, for a `repo` that points at a checkout the daemon doesn't own.
+      # Must be passed: the daemon's fallback is ~/Projects, and ~ is /root
+      # in here — which would miss the same-path mount below.
+      - ISSUEFLEET_PROJECTS=${ISSUEFLEET_PROJECTS}
+      # Those checkouts belong to the host user; this container is root, and
+      # git refuses a repo it doesn't own ("dubious ownership"). Scope the
+      # exemption to that tree rather than using the blanket `*`. NOTE: this
+      # covers the daemon only — see README on worker containers.
+      - GIT_CONFIG_COUNT=1
+      - GIT_CONFIG_KEY_0=safe.directory
+      - GIT_CONFIG_VALUE_0=${ISSUEFLEET_PROJECTS}/*
     volumes:
       # Workers are launched on the HOST docker daemon:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -60,6 +71,9 @@ services:
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/repos:${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/repos
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/claude-config:${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/claude-config
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/state:${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/state
+      # Checkouts outside the data root (a `repo` pointing at your own working
+      # tree). Read-write: the daemon registers worktrees in that repo's .git.
+      - ${ISSUEFLEET_PROJECTS:?not set - run via bazel (defaults to HOME/Projects) or export it}:${ISSUEFLEET_PROJECTS:?not set - run via bazel (defaults to HOME/Projects) or export it}
       # Config + secrets: the SAME ~/.config/issuefleet as a laptop setup,
       # mounted at the container's home path so plain ~/... paths in
       # config.toml resolve identically in both worlds.

@@ -5,10 +5,16 @@
 export ISSUEFLEET_ROOT="${ISSUEFLEET_ROOT:-$HOME/.issuefleet}"
 # Config + secrets: same location as a laptop setup.
 export ISSUEFLEET_CONFIG="${ISSUEFLEET_CONFIG:-$HOME/.config/issuefleet}"
+# Checkouts the daemon does NOT own — where a `repo` that points at your own
+# working tree lives. Same-path mounted like the root, because the launcher
+# resolves a linked worktree's .git pointer in THIS container and then hands
+# the resulting path to the host docker daemon; both sides must agree.
+export ISSUEFLEET_PROJECTS="${ISSUEFLEET_PROJECTS:-$HOME/Projects}"
 
 # The tree is created on demand — no manual mkdir step. (Also prevents
 # docker from creating root-owned dirs at mount time on Linux.)
 mkdir -p "$ISSUEFLEET_ROOT"/{worktrees,repos,claude-config,state,bin}
+mkdir -p "$ISSUEFLEET_PROJECTS"
 
 # Called by up/doctor (not down): seed what can be seeded safely and name
 # what the operator still has to provide. The launcher is a plain script,

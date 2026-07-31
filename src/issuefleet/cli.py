@@ -62,14 +62,12 @@ def build_stack(cfg: Config) -> Reconciler:
         # no SSH key is ever needed.
         if git.is_repo(project.repo):
             slug = parse_repo_slug(git.remote_url(project.repo))
-        elif project.local_checkout is not None and git.is_repo(project.local_checkout):
-            slug = parse_repo_slug(git.remote_url(project.local_checkout))
         elif project.git_url:
             slug = parse_repo_slug(project.git_url)
         else:
             raise SystemExit(
                 f"[{project.name}] repo {project.repo} does not exist and the project "
-                "has neither a local_checkout nor a git_url to bootstrap from"
+                "has no git_url to clone from"
             )
         forge = GithubForge(token_source(slug.split("/")[0]), slug)
         try:

@@ -19,6 +19,13 @@ config dir) is resolved **by the host**. Hence the invariant:
 > absolute paths on the host and in the daemon container, and the
 > config.toml must use those paths.
 
+The same applies to any checkout the daemon does *not* own — a `repo` that
+points at your own working tree rather than `<ROOT>/repos/...`. Those live
+under `$ISSUEFLEET_PROJECTS` (`~/Projects` by default), which is same-path
+mounted and passed into the daemon's environment for the same reason. Write
+it as `${ISSUEFLEET_PROJECTS}/yourrepo` in config.toml, never `~/yourrepo`:
+`~` is `/root` inside the container and would miss the mount entirely.
+
 The root is declared ONCE, in `deploy/docker/env.sh`, as
 **`$HOME/.issuefleet` on every platform** (inside Docker Desktop's shared
 `/Users` on macOS; no sudo anywhere). Every bazel wrapper exports it,
@@ -131,8 +138,29 @@ workers' *containers* — but note the tmux caveat below.
   broken — but prefer `docker compose restart tailscale` / config reloads
   over restarting the issuefleet service while workers are mid-task.
 - The launcher's linked-worktree `.git` mount only works because repos and
-  worktrees share the ROOT prefix visible to the host daemon. Don't
-  relocate one without the other.
+  worktrees are visible at the same path to both the daemon container and
+  the host daemon — under ROOT, or under `$ISSUEFLEET_PROJECTS`. Don't
+  relocate one without the other. The failure is quiet: the launcher
+  resolves the worktree's `.git` pointer in the daemon container and, if it
+  doesn't resolve, prints "git won't work in the container" and starts the
+  worker anyway, without the mount.
+- **Git ownership: the mount SHAPE matters, not just the path.** A checkout
+  under `$ISSUEFLEET_PROJECTS` belongs to the host user, while both this
+  container and the workers it launches run as root — normally git's
+  "dubious ownership" refusal. What saves the workers is that Docker
+  Desktop presents a bind-mount *root* as root-owned, and the launcher
+  mounts the worktree as its own mount root (`-v $WORKSPACE_DIR:/workspace`):
+  git checks the directory it starts from, passes, then follows the gitdir
+  pointer into the host-owned `.git` without re-checking. The daemon has no
+  such luck — it reaches the checkout through the *parent* tree mount, where
+  the repo dir keeps its real uid — hence the `safe.directory` entry in
+  `GIT_CONFIG_*` in docker-compose.yml. Measured, not assumed: same repo,
+  parent-tree mount `rc=128`, launcher-shaped mount `rc=0`.
+  Two corollaries. Running this container as the host uid (to "fix" the
+  mismatch) makes it *worse*: uid 501 can't connect to the root-owned
+  docker socket, and it turns the root-owned `/workspace` into the dubious
+  one. And this rests on Docker Desktop's ownership synthesis — on a Linux
+  host the uids are real, so re-test rather than assume it carries over.
 - **Don't run the laptop-mode daemon and this stack against the same
   Linear projects simultaneously** — they have separate registries and
   will double-claim issues. Stop `bin/issuefleet run` before `:up`.

@@ -50,8 +50,11 @@ def ensure_checkout(
     it must stay side-effect-free). Returns a description of what was done,
     or None if the repo was already in place. Raises GitError on dead ends.
 
-    Order: existing repo wins; then a symlink to local_checkout; then a
-    clone from git_url."""
+    `repo` is always a clone the daemon owns: existing repo wins, otherwise
+    clone from git_url. Pointing it at a checkout elsewhere on the machine
+    is deliberately not supported — the path has to resolve identically for
+    the daemon and for the worker containers it launches, which a checkout
+    outside the mounted tree does not."""
     repo = Path(project.repo)
     if git.is_repo(repo):
         return None
@@ -60,22 +63,14 @@ def ensure_checkout(
             f"{repo} is a symlink to a missing target "
             f"({os.readlink(repo)}); remove or fix it"
         )
-    if project.local_checkout is not None and git.is_repo(project.local_checkout):
-        repo.parent.mkdir(parents=True, exist_ok=True)
-        repo.symlink_to(Path(project.local_checkout).resolve())
-        return f"symlinked to local checkout {project.local_checkout}"
     if project.git_url:
         # Prefer the caller-supplied HTTPS URL + token (scoped app auth, no
         # SSH key needed); fall back to the configured remote as-is.
         url = clone_url or project.git_url
         git.clone(url, repo, auth_header=auth_header if clone_url else None)
-        suffix = ""
-        if project.local_checkout is not None:
-            suffix = f" (local_checkout {project.local_checkout} not found)"
-        return f"cloned from {url}{suffix}"
+        return f"cloned from {url}"
     raise GitError(
-        f"{repo} does not exist and the project has neither a usable "
-        "local_checkout nor a git_url to bootstrap from"
+        f"{repo} does not exist and the project has no git_url to clone from"
     )
 
 
