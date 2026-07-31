@@ -105,8 +105,16 @@ end-to-end flow — `docs/SMOKE_TEST.md` is the step-by-step procedure.
   container caveat (daemon restart kills worker sessions; crash-restart
   path recovers). Also live-green as of 2026-07-30: GitHub App doctor chain AND the
   linear-oauth actor=app install (doctor authenticates as the 'issuefleet'
-  app user, Bearer). Still untested live: the webhook path end-to-end
-  (tunnel -> signature verify -> AgentSessionEvent -> claim/activities).
+  app user, Bearer). Webhook path ran live 2026-07-30: delegation ->
+  session claim -> activities all worked, and exposed an echo loop —
+  Linear sends `prompted` events for the app's OWN activities, which we
+  re-injected as waking replies (fix: abdd3e4, marker-style self-filter
+  for activities + ready-restore turn bound). Operator must RESTART the
+  daemon (host-side filter) and RECYCLE any live worker (agent-side
+  ready-restore is staged at claim). Still unexplained: the merged PR
+  reportedly did NOT tear the worker down — needs `status` + daemon log
+  from the operator; suspect the record's pr_number or a crashed-phase
+  early return. Verify next session.
 - `deploy/*.plist|.service` contain operator-specific paths to edit.
 
 ## Don't retry (dead ends)
