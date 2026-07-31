@@ -16,18 +16,20 @@ ARG DOCKER_CLI_VERSION=27.5.1
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        bash ca-certificates curl git openssh-client openssl tmux \
+        bash ca-certificates curl git openssh-client openssl tmux util-linux \
     && rm -rf /var/lib/apt/lists/* \
     && arch="$(uname -m)" \
     && curl -fsSL "https://download.docker.com/linux/static/stable/${arch}/docker-${DOCKER_CLI_VERSION}.tgz" \
         | tar -xz --strip-components=1 -C /usr/local/bin docker/docker
 
-# The daemon runs as the OPERATOR'S uid (compose `user:`), not root —
-# claude refuses bypassPermissions as root, which broke every worker turn
-# when the daemon ran as root and the launcher propagated uid 0. Any-uid
-# writable home for that user:
+# The daemon runs as the OPERATOR'S uid — claude refuses bypassPermissions
+# as root, which broke every worker turn when the launcher propagated uid
+# 0. entrypoint.sh (root) makes the docker socket usable, then setprivs
+# down to ISSUEFLEET_UID/GID. Any-uid writable home for that user:
 RUN mkdir -p /home/fleet && chmod 1777 /home/fleet
 ENV HOME=/home/fleet
+COPY deploy/docker/entrypoint.sh /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
 
 WORKDIR /opt/issuefleet
 COPY src/ src/

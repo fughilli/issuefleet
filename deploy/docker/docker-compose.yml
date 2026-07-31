@@ -49,18 +49,12 @@ services:
     network_mode: service:tailscale
     depends_on:
       - tailscale
-    # Host uid/gid (exported by env.sh): workers inherit this uid via the
-    # launcher, and claude refuses to run as root. group_add grants the
-    # docker socket's group for sibling-container launches.
-    user: "${ISSUEFLEET_UID:?run via bazel or source env.sh}:${ISSUEFLEET_GID:?run via bazel or source env.sh}"
-    group_add:
-      # The stat'd host gid (right on Linux) AND group 0: on macOS the
-      # host socket is a user-owned symlink but the in-container socket is
-      # Docker Desktop's VM-side root:root one.
-      - "${ISSUEFLEET_DOCKER_GID:-0}"
-      - "0"
+    # entrypoint.sh starts as root only to make the docker socket usable
+    # (Docker Desktop mounts it root:root 0755 — no group_add can help),
+    # then drops to this uid/gid; workers inherit it via the launcher.
     environment:
-      - HOME=/home/fleet
+      - ISSUEFLEET_UID=${ISSUEFLEET_UID:?run via bazel or source env.sh}
+      - ISSUEFLEET_GID=${ISSUEFLEET_GID:?run via bazel or source env.sh}
       # Lets config.toml use ${ISSUEFLEET_ROOT}/... paths portably.
       - ISSUEFLEET_ROOT=${ISSUEFLEET_ROOT}
       # Same, for a `repo` that points at a checkout the daemon doesn't own.
