@@ -473,7 +473,8 @@ class Reconciler:
         title = msg.payload.get("title") or f"{rec.issue_key}: {rec.issue_title}"
         body = msg.payload.get("body", "")
         body_full = f"{body}\n\nCloses-Linear: {rec.issue_key} ({rec.issue_url})"
-        self.git.push(Path(rec.worktree), rec.branch)
+        push_url, push_auth = forge.push_spec()
+        self.git.push(Path(rec.worktree), rec.branch, url=push_url, auth_header=push_auth)
 
         pr = None
         if rec.pr_number is not None:
@@ -616,7 +617,10 @@ class Reconciler:
             if done:
                 self.tracker.set_state(rec.issue_id, project.state_done)
                 if project.delete_remote_branch:
-                    self.git.delete_remote_branch(Path(rec.repo), rec.branch)
+                    url, auth = self.forges[project.name].push_spec()
+                    self.git.delete_remote_branch(
+                        Path(rec.repo), rec.branch, url=url, auth_header=auth
+                    )
             self._post_once(
                 rec.issue_id,
                 f"winddown-{rec.issue_id}",

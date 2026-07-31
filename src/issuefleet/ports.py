@@ -59,6 +59,11 @@ class Forge(Protocol):
         normalized. Caller dedupes by id."""
         ...
 
+    def push_spec(self) -> tuple[str, str]:
+        """(https url, authorization header value) for git push/clone with
+        this forge's scoped token."""
+        ...
+
 
 class Git(Protocol):
     def create_worktree(self, repo: Path, branch: str, base_ref: str, path: Path) -> None:
@@ -72,13 +77,15 @@ class Git(Protocol):
 
     def has_commits_ahead(self, worktree: Path, base_ref: str) -> bool: ...
 
-    def push(self, worktree: Path, branch: str) -> None:
-        """Push with --force-with-lease (re-submissions may rebase)."""
+    def push(self, worktree: Path, branch: str, url=None, auth_header=None) -> None:
+        """Push with --force-with-lease (re-submissions may rebase), to the
+        forge's HTTPS URL with its scoped token — never the operator's SSH
+        key."""
         ...
 
     def remove_worktree(self, repo: Path, path: Path, branch: str) -> None: ...
 
-    def delete_remote_branch(self, repo: Path, branch: str) -> None: ...
+    def delete_remote_branch(self, repo: Path, branch: str, url=None, auth_header=None) -> None: ...
 
 
 class Runner(Protocol):

@@ -8,8 +8,7 @@ export ISSUEFLEET_CONFIG="${ISSUEFLEET_CONFIG:-$HOME/.config/issuefleet}"
 
 # The tree is created on demand — no manual mkdir step. (Also prevents
 # docker from creating root-owned dirs at mount time on Linux.)
-mkdir -p "$ISSUEFLEET_ROOT"/{worktrees,repos,claude-config,state,ssh,bin}
-chmod 700 "$ISSUEFLEET_ROOT/ssh" 2>/dev/null || true
+mkdir -p "$ISSUEFLEET_ROOT"/{worktrees,repos,claude-config,state,bin}
 
 # Called by up/doctor (not down): seed what can be seeded safely and name
 # what the operator still has to provide. The launcher is a plain script,
@@ -29,8 +28,6 @@ issuefleet_preflight() {
   - config: ~/.config/issuefleet/config.toml (same file as a laptop setup)"
   [ -n "$(ls -A "$ISSUEFLEET_ROOT/claude-config" 2>/dev/null)" ] || missing="$missing
   - worker claude credentials: cp -r ~/.config/claude-container/config/* $ISSUEFLEET_ROOT/claude-config/"
-  [ -e "$ISSUEFLEET_ROOT/ssh/id_ed25519" ] || missing="$missing
-  - push key: $ISSUEFLEET_ROOT/ssh/{id_ed25519,known_hosts}"
   if [ -n "$missing" ]; then
     echo "warning: still needed before workers can run:$missing" >&2
   fi

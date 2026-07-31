@@ -59,8 +59,10 @@ rule applies to any repo change you end up committing.)
 
    [[projects]]  # apply this pattern to EVERY project block:
    # repo    -> "${ISSUEFLEET_ROOT}/repos/<name>"
-   # git_url -> the SSH remote, e.g. "git@github.com:fughilli/issuefleet.git"
-   #            (smoke: fughilli/issuefleet-smoke, splanc: fughilli/splanc)
+   # git_url -> the remote, e.g. "git@github.com:fughilli/issuefleet.git"
+   #            (smoke: fughilli/issuefleet-smoke, splanc: fughilli/splanc).
+   #            Only owner/name is parsed from it; actual clones/pushes go
+   #            over HTTPS with the GitHub App's scoped token.
    ```
 
 3. **Migrate state.** The old state dir is whatever `state_dir` was before
@@ -69,10 +71,10 @@ rule applies to any repo change you end up committing.)
    `mkdir -p ~/.issuefleet/state && cp -a <old_state_dir>/. ~/.issuefleet/state/`
 
 4. **Seed the container-stack extras** (harmless for laptop mode too):
-   - `mkdir -p ~/.issuefleet/claude-config ~/.issuefleet/ssh`
+   - `mkdir -p ~/.issuefleet/claude-config`
    - `cp -a ~/.config/claude-container/config/. ~/.issuefleet/claude-config/`
-   - Copy the operator's GitHub-push SSH key:
-     `cp ~/.ssh/id_ed25519 ~/.issuefleet/ssh/ && ssh-keyscan github.com > ~/.issuefleet/ssh/known_hosts && chmod 700 ~/.issuefleet/ssh && chmod 600 ~/.issuefleet/ssh/id_ed25519`
+   (No SSH key anywhere: pushes and clones use the GitHub App's scoped
+   installation token over HTTPS.)
 
 5. **Verify.** `bin/issuefleet doctor` must show 0 problems. Expect WARNs
    of the form "repo … missing — will be cloned from … on first run" (the

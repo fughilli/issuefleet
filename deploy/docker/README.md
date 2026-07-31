@@ -47,11 +47,11 @@ What you must provide by hand:
 #    settings.json with bypassPermissions). Never copied automatically.
 cp -r ~/.config/claude-container/config/* ~/.issuefleet/claude-config/
 
-# 3. Push key: a deploy key or user key authorized for the target repos
-cp <your-key> ~/.issuefleet/ssh/id_ed25519
-ssh-keyscan github.com > ~/.issuefleet/ssh/known_hosts
-chmod 600 ~/.issuefleet/ssh/id_ed25519
 ```
+
+No SSH key: clones, pushes, and branch deletion all use the GitHub App's
+scoped installation token over HTTPS — the operator's keys never enter the
+container, and with branch protection on the base ref the bot is PR-only.
 
 One `config.toml` serves laptop and container. Data paths use
 `${ISSUEFLEET_ROOT}` (the daemon defaults it to `~/.issuefleet` when the

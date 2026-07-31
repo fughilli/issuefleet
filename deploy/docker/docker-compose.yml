@@ -64,7 +64,6 @@ services:
       # mounted at the container's home path so plain ~/... paths in
       # config.toml resolve identically in both worlds.
       - ${ISSUEFLEET_CONFIG:?not set - run via bazel (defaults to HOME/.config/issuefleet)}:/root/.config/issuefleet:ro
-      - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/ssh:/root/.ssh:ro           # push key + known_hosts
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/bin/claude-container:/usr/local/bin/claude-container:ro
 
 volumes:

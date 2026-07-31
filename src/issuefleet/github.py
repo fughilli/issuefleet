@@ -1,11 +1,14 @@
-"""GitHub REST v3 Forge implementation (fine-grained PAT over urllib).
+"""GitHub REST v3 Forge implementation (app installation token or PAT).
 
-Pushing is NOT done here — branches go out over the repo's existing SSH
-remote (gitops.py); the token only opens/reads/updates PRs.
+The forge also supplies the credentials for git-over-HTTPS pushes and
+clones (push_spec): branches go out with the same scoped token that opens
+PRs — never an SSH key, which would carry the operator's full push rights.
+With branch protection on the base ref, the bot is PR-only by construction.
 """
 
 from __future__ import annotations
 
+import base64
 import logging
 import re
 
@@ -52,6 +55,14 @@ class GithubForge:
 
     def _current_token(self) -> str:
         return self.token() if callable(self.token) else self.token
+
+    def push_spec(self) -> tuple[str, str]:
+        """(url, authorization-header-value) for git push/clone over HTTPS
+        with this forge's token. Passed to git as http.extraheader rather
+        than embedded in the URL, so the token can't leak into error
+        messages or process listings via the remote URL."""
+        basic = base64.b64encode(f"x-access-token:{self._current_token()}".encode()).decode()
+        return (f"https://github.com/{self.slug}.git", f"basic {basic}")
 
     def _call(self, method: str, path: str, payload: dict | None = None) -> dict | list:
         return self.transport(

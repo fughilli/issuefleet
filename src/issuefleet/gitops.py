@@ -37,7 +37,15 @@ def _git(args: list[str], cwd: Path | None = None) -> str:
     return proc.stdout.strip()
 
 
-def ensure_checkout(git: "Gitops", project) -> str | None:
+def _auth_args(auth_header: str | None) -> list[str]:
+    # http.extraheader keeps the token out of remote URLs (which git echoes
+    # into error messages) — same technique actions/checkout uses.
+    return ["-c", f"http.extraheader=AUTHORIZATION: {auth_header}"] if auth_header else []
+
+
+def ensure_checkout(
+    git: "Gitops", project, clone_url: str | None = None, auth_header: str | None = None
+) -> str | None:
     """Bootstrap a project's main checkout at daemon startup (never doctor —
     it must stay side-effect-free). Returns a description of what was done,
     or None if the repo was already in place. Raises GitError on dead ends.
@@ -57,11 +65,14 @@ def ensure_checkout(git: "Gitops", project) -> str | None:
         repo.symlink_to(Path(project.local_checkout).resolve())
         return f"symlinked to local checkout {project.local_checkout}"
     if project.git_url:
-        git.clone(project.git_url, repo)
+        # Prefer the caller-supplied HTTPS URL + token (scoped app auth, no
+        # SSH key needed); fall back to the configured remote as-is.
+        url = clone_url or project.git_url
+        git.clone(url, repo, auth_header=auth_header if clone_url else None)
         suffix = ""
         if project.local_checkout is not None:
             suffix = f" (local_checkout {project.local_checkout} not found)"
-        return f"cloned from {project.git_url}{suffix}"
+        return f"cloned from {url}{suffix}"
     raise GitError(
         f"{repo} does not exist and the project has neither a usable "
         "local_checkout nor a git_url to bootstrap from"
@@ -69,11 +80,11 @@ def ensure_checkout(git: "Gitops", project) -> str | None:
 
 
 class Gitops:
-    def clone(self, url: str, path: Path) -> None:
+    def clone(self, url: str, path: Path, auth_header: str | None = None) -> None:
         """Bootstrap a missing main checkout (daemon startup, not doctor)."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        _git(["clone", url, str(path)])
+        _git([*_auth_args(auth_header), "clone", url, str(path)])
 
     def create_worktree(self, repo: Path, branch: str, base_ref: str, path: Path) -> None:
         path = Path(path)
@@ -117,22 +128,36 @@ class Gitops:
                 continue
         raise GitError(f"cannot resolve base ref {base_ref!r} (or origin/{base_ref}) in {worktree}")
 
-    def push(self, worktree: Path, branch: str) -> None:
+    def push(
+        self, worktree: Path, branch: str, url: str | None = None, auth_header: str | None = None
+    ) -> None:
         # force-with-lease: a post-review rebase updates the PR without
-        # clobbering a concurrent push (brief §4.4). SSH remote, no token.
-        _git(["push", "--force-with-lease", "origin", f"{branch}:{branch}"], cwd=worktree)
+        # clobbering a concurrent push (brief §4.4). Pushed to the forge's
+        # HTTPS URL with its scoped token — deliberately NOT the operator's
+        # SSH key, which would carry their full push rights (the brief's
+        # push-over-SSH call was overridden on the operator's request).
+        _git(
+            [*_auth_args(auth_header), "push", "--force-with-lease",
+             url or "origin", f"{branch}:{branch}"],
+            cwd=worktree,
+        )
 
     def remove_worktree(self, repo: Path, path: Path, branch: str) -> None:
         if Path(path).exists():
             _git(["worktree", "remove", "--force", str(path)], cwd=repo)
         _git(["worktree", "prune"], cwd=repo)
 
-    def delete_remote_branch(self, repo: Path, branch: str) -> None:
+    def delete_remote_branch(
+        self, repo: Path, branch: str, url: str | None = None, auth_header: str | None = None
+    ) -> None:
         """Called only after a merge: drop the remote branch, and the local
         one with it (best-effort each — the remote may already be gone if
         GitHub auto-deleted it)."""
         try:
-            _git(["push", "origin", "--delete", branch], cwd=repo)
+            _git(
+                [*_auth_args(auth_header), "push", url or "origin", "--delete", branch],
+                cwd=repo,
+            )
         except GitError as e:
             log.warning("remote branch %s: %s", branch, e)
         try:

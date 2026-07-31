@@ -115,6 +115,26 @@ class GitopsTest(unittest.TestCase):
         ).stdout
         self.assertNotIn("agent/fug-1-x", refs)
 
+    def test_push_to_explicit_url_ignores_origin(self):
+        # The daemon pushes to the forge's URL with a scoped token, not to
+        # whatever `origin` points at (which may be an SSH remote using the
+        # operator's key). Simulated with a second bare repo as the "url".
+        other = Path(self.tmp.name) / "other.git"
+        run(["git", "init", "--bare", "-b", "main", str(other)])
+        self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
+        self.commit_in_worktree()
+        self.git.push(self.wt, "agent/fug-1-x", url=str(other), auth_header="basic zzz")
+        in_other = subprocess.run(["git", "ls-remote", "--heads", str(other)],
+                                  capture_output=True, text=True).stdout
+        in_origin = subprocess.run(["git", "ls-remote", "--heads", str(self.origin)],
+                                   capture_output=True, text=True).stdout
+        self.assertIn("agent/fug-1-x", in_other)
+        self.assertNotIn("agent/fug-1-x", in_origin)
+        self.git.delete_remote_branch(self.repo, "agent/fug-1-x", url=str(other))
+        in_other = subprocess.run(["git", "ls-remote", "--heads", str(other)],
+                                  capture_output=True, text=True).stdout
+        self.assertNotIn("agent/fug-1-x", in_other)
+
     def test_remote_url(self):
         self.assertEqual(self.git.remote_url(self.repo), str(self.origin))
 

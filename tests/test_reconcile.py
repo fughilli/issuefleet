@@ -168,6 +168,8 @@ class ReconcileTest(unittest.TestCase):
         self.rec.tick()
         w = self.worker()
         self.assertEqual(self.git.pushed, [w.branch])
+        # Pushed with the forge's scoped token over HTTPS, never SSH/origin.
+        self.assertEqual(self.git.push_specs, [("https://github.example/o/r.git", "basic fake-token")])
         [opened] = self.forge.opened
         self.assertEqual(opened["head"], w.branch)
         self.assertIn("Closes-Linear: FUG-1", opened["body"])

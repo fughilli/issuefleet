@@ -37,13 +37,6 @@ def build_stack(cfg: Config) -> Reconciler:
     linear_key, _ = creds.resolve_linear_key(cfg)
     tracker = LinearTracker(LinearClient(linear_key, auth=cfg.linear_auth))
     git = Gitops()
-    for project in cfg.projects:
-        try:
-            action = gitops_mod.ensure_checkout(git, project)
-            if action:
-                log.info("[%s] %s -> %s", project.name, project.repo, action)
-        except gitops_mod.GitError as e:
-            raise SystemExit(f"[{project.name}] {e}")
     if creds.github_auth_mode(cfg) == "app":
         from issuefleet.githubapp import AppTokenProvider
 
@@ -64,8 +57,31 @@ def build_stack(cfg: Config) -> Reconciler:
 
     forges = {}
     for project in cfg.projects:
-        slug = parse_repo_slug(git.remote_url(project.repo))
-        forges[project.name] = GithubForge(token_source(slug.split("/")[0]), slug)
+        # Slug from whichever source exists — the forge (and its scoped
+        # token) must exist BEFORE the clone, which uses it over HTTPS so
+        # no SSH key is ever needed.
+        if git.is_repo(project.repo):
+            slug = parse_repo_slug(git.remote_url(project.repo))
+        elif project.local_checkout is not None and git.is_repo(project.local_checkout):
+            slug = parse_repo_slug(git.remote_url(project.local_checkout))
+        elif project.git_url:
+            slug = parse_repo_slug(project.git_url)
+        else:
+            raise SystemExit(
+                f"[{project.name}] repo {project.repo} does not exist and the project "
+                "has neither a local_checkout nor a git_url to bootstrap from"
+            )
+        forge = GithubForge(token_source(slug.split("/")[0]), slug)
+        try:
+            clone_url, clone_auth = forge.push_spec()
+            action = gitops_mod.ensure_checkout(
+                git, project, clone_url=clone_url, auth_header=clone_auth
+            )
+            if action:
+                log.info("[%s] %s -> %s", project.name, project.repo, action)
+        except gitops_mod.GitError as e:
+            raise SystemExit(f"[{project.name}] {e}")
+        forges[project.name] = forge
     registry = Registry(cfg.state_dir)
     runner = TmuxRunner(log_dir=cfg.state_dir / "logs")
     return Reconciler(cfg, registry, tracker, forges, git, runner)

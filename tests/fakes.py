@@ -232,6 +232,9 @@ class FakeForge:
     def repo_accessible(self) -> bool:
         return True
 
+    def push_spec(self):
+        return ("https://github.example/o/r.git", "basic fake-token")
+
 
 class FakeGit:
     """Worktree/branch/push stand-in. Records actions; creates real dirs so
@@ -243,6 +246,7 @@ class FakeGit:
         self.removed: list[str] = []
         self.deleted_remote: list[str] = []
         self.ahead = True  # what has_commits_ahead reports
+        self.push_specs: list[tuple] = []  # (url, auth_header) per push
         self.excludes: list[tuple[str, str]] = []  # (worktree, pattern)
         self.fail_next_push = 0
 
@@ -255,17 +259,18 @@ class FakeGit:
     def remove_worktree(self, repo: Path, path: Path, branch: str) -> None:
         self.removed.append(str(path))
 
-    def delete_remote_branch(self, repo: Path, branch: str) -> None:
+    def delete_remote_branch(self, repo: Path, branch: str, url=None, auth_header=None) -> None:
         self.deleted_remote.append(branch)
 
     def has_commits_ahead(self, worktree: Path, base_ref: str) -> bool:
         return self.ahead
 
-    def push(self, worktree: Path, branch: str) -> None:
+    def push(self, worktree: Path, branch: str, url=None, auth_header=None) -> None:
         if self.fail_next_push > 0:
             self.fail_next_push -= 1
             raise ConnectionError("fake git push failure")
         self.pushed.append(branch)
+        self.push_specs.append((url, auth_header))
 
 
 class FakeRunner:

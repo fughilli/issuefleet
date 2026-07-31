@@ -238,6 +238,23 @@ class ManifestFlowTest(unittest.TestCase):
         self.assertEqual(result.get("code"), "abc123")
 
 
+class PushSpecTest(unittest.TestCase):
+    def test_push_spec_is_https_with_basic_header(self):
+        import base64
+
+        forge = GithubForge("ghs_tok1", "fughilli/issuefleet", transport=lambda *a: {})
+        url, header = forge.push_spec()
+        self.assertEqual(url, "https://github.com/fughilli/issuefleet.git")
+        scheme, b64 = header.split(" ")
+        self.assertEqual(scheme, "basic")
+        self.assertEqual(base64.b64decode(b64).decode(), "x-access-token:ghs_tok1")
+
+    def test_push_spec_mints_fresh_callable_tokens(self):
+        tokens = iter(["t1", "t2"])
+        forge = GithubForge(lambda: next(tokens), "o/r", transport=lambda *a: {})
+        self.assertNotEqual(forge.push_spec()[1], forge.push_spec()[1])
+
+
 class GithubAuthModeTest(unittest.TestCase):
     def test_auto_prefers_app_when_configured(self):
         with tempfile.TemporaryDirectory() as tmp:

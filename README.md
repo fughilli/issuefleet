@@ -22,7 +22,7 @@ get none.**
 │                                               │      │  └─ claude-container             │
 │   Linear GraphQL ◄──── relay ────┐            │      │      └─ turnloop → claude -p     │
 │   GitHub REST    ◄── (dedup'd) ──┤            │      │           │                      │
-│   git push (SSH) ◄───────────────┤            │      │           ▼ agentctl             │
+│   git push (app │token, HTTPS) ◄─┤            │      │           ▼ agentctl             │
 │                                  │            │      │   <worktree>/.agent/mailbox/     │
 │   registry.json (durable fleet state)         │◄─────┼── outbox/ status|question|ready| │
 │                                               │      │           file_issue             │
@@ -67,11 +67,15 @@ would silently eat their replies to the agent.
    printf '%s' 'lin_api_...' > ~/.config/issuefleet/linear.key
    chmod 600 ~/.config/issuefleet/linear.key
    ```
-2. **GitHub token** — a fine-grained PAT with **Contents: RW** and
-   **Pull requests: RW** on the target repo(s). `export GITHUB_TOKEN=...` or
-   write it to `~/.config/issuefleet/github.key` (chmod 600). Pushes use
-   your existing SSH remote, not the token; the token only manages PRs.
-   Secrets never go in the config file — the config parser rejects them.
+2. **GitHub credential** — preferably the GitHub App (see Bot identities);
+   fallback: a fine-grained PAT with **Contents: RW** and **Pull requests:
+   RW** in `~/.config/issuefleet/github.key` (chmod 600). Clones, pushes,
+   and PRs all use this credential over HTTPS — deliberately never an SSH
+   key, which would carry the operator's full push rights. With branch
+   protection on the base ref, the bot is PR-only by construction (GitHub
+   has no "non-default branches only" push permission; protection or a
+   ruleset is the enforcement). Secrets never go in the config file — the
+   parser rejects them.
 3. **The claim label** — create a label (default suggestion: `agent`) in the
    Linear team, or pick another claim strategy (below).
 4. **Config** — write `~/.config/issuefleet/config.toml` (schema below,
@@ -357,6 +361,10 @@ read `deploy/docker/README.md` before using it.
   reply to the agent in the seconds between delegation and the claim
   completing, re-send after the worker's first activity appears. The
   initial delegation itself is never lost — it stays queued until claimed.
+- **Contents:RW can push any *unprotected* branch.** The scoped token
+  keeps the bot off other repos and expires hourly, but "PR-only" on the
+  target repo comes from branch protection/rulesets on the base ref — set
+  that up; the app has no bypass.
 - **The Linear agents API surface is new** and was implemented from
   Linear's docs without a live workspace to test against; the OAuth flow,
   activity mutations, and webhook payload parsing are unit-tested but
