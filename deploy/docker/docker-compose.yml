@@ -59,6 +59,10 @@ services:
     # (Docker Desktop mounts it root:root 0755 — no group_add can help),
     # then drops to this uid/gid; workers inherit it via the launcher.
     environment:
+      # Bind beyond container-loopback: docker's port publish forwards to
+      # the container IP (not its 127.0.0.1), and the sidecar's funnel
+      # still works. Exposure = docker bridge + tailnet only; HMAC on top.
+      - ISSUEFLEET_WEBHOOK_BIND=0.0.0.0
       - ISSUEFLEET_UID=${ISSUEFLEET_UID:?run via bazel or source env.sh}
       - ISSUEFLEET_GID=${ISSUEFLEET_GID:?run via bazel or source env.sh}
       # Lets config.toml use ${ISSUEFLEET_ROOT}/... paths portably.

@@ -132,6 +132,14 @@ def cmd_once(cfg: Config, dry_run: bool) -> int:
     return 0
 
 
+def _webhook_bind(wcfg) -> str:
+    # The containerized stack must bind beyond loopback: docker's port
+    # publish forwards to the container's eth0 IP, and the sidecar-shared
+    # netns exposes 0.0.0.0 only to the docker bridge + tailnet (endpoints
+    # stay HMAC-verified). Env override keeps the laptop default loopback.
+    return os.environ.get("ISSUEFLEET_WEBHOOK_BIND", wcfg.bind)
+
+
 def _start_webhooks(cfg: Config, reconciler: Reconciler, wake: threading.Event):
     from issuefleet import webhooks as webhooks_mod
 
@@ -157,7 +165,7 @@ def _start_webhooks(cfg: Config, reconciler: Reconciler, wake: threading.Event):
             ).start()
 
     server = webhooks_mod.WebhookServer(
-        bind=wcfg.bind,
+        bind=_webhook_bind(wcfg),
         port=wcfg.port,
         wake=wake.set,
         on_session=on_session,
@@ -166,7 +174,7 @@ def _start_webhooks(cfg: Config, reconciler: Reconciler, wake: threading.Event):
     ).start()
     log.info(
         "webhook listener on %s:%d (/webhook/github%s, /webhook/linear%s) — put a tunnel in front",
-        wcfg.bind, server.port,
+        _webhook_bind(wcfg), server.port,
         "" if github_secret else " [no secret: disabled]",
         "" if linear_secret else " [no secret: disabled]",
     )

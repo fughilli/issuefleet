@@ -197,6 +197,22 @@ class WorkerRuntimeCheckTest(unittest.TestCase):
         self.assertEqual([c.status for c in checks if "uid 501" in c.label], ["ok"])
 
 
+class WebhookBindTest(unittest.TestCase):
+    def test_env_overrides_config_bind(self):
+        import os
+
+        from issuefleet.cli import _webhook_bind
+        from issuefleet.config import WebhookConfig
+
+        w = WebhookConfig()
+        self.assertEqual(_webhook_bind(w), "127.0.0.1")
+        os.environ["ISSUEFLEET_WEBHOOK_BIND"] = "0.0.0.0"
+        try:
+            self.assertEqual(_webhook_bind(w), "0.0.0.0")
+        finally:
+            del os.environ["ISSUEFLEET_WEBHOOK_BIND"]
+
+
 class DoctorTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
