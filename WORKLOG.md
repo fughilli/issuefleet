@@ -1,6 +1,12 @@
 # WORKLOG
 
-_Last updated: 2026-07-29 by an agent session. Read together with `git log`._
+_Last updated: 2026-07-31 by an agent session. Read together with `git log`._
+
+_Follow-up / backlog work is now tracked on the Linear issue board, not here.
+FUG-14 converted the former "Next up" / "Open questions" backlog into tickets
+(FUG-16…FUG-23); future follow-ups go straight to the board. This log keeps
+the project narrative, the verification record, and the dead-ends reference
+only._
 
 ## Goal
 
@@ -23,11 +29,7 @@ live workers. 2026-07-31: bazel targets for the homelab stack
 (//deploy/docker:image|up|down — docker-CLI wrappers, deliberately not
 rules_oci: the apt layer isn't hermetically expressible without
 rules_distroless) + GitHub Actions CI (test with in-tree bazel caches;
-multi-arch image pushed to ghcr.io/fughilli/issuefleet on main). CI is
-UNRUN until the next push lands; GHCR package visibility may need one
-manual flip to public. Remaining before "done": Splanc pointing + its
-GitHub App installation (doctor shows 404), homelab compose stack (unrun),
-flake.lock, robustness spot-checks from SMOKE_TEST §6.
+multi-arch image pushed to ghcr.io/fughilli/issuefleet on main).
 
 The full system is built and committed — core, agent runtime, real
 Linear/GitHub clients, gitops, tmux runner, doctor/CLI, docs, deploy units.
@@ -51,8 +53,6 @@ end-to-end flow — `docs/SMOKE_TEST.md` is the step-by-step procedure.
 - §5.4 exclusion path: git does not read `.git/worktrees/<name>/info/exclude`
   (verified on git 2.43) — using `$GIT_COMMON_DIR/info/exclude` instead.
   Flagged in README "Known edges".
-- Name `issuefleet` self-selected from the brief's suggestion list (session
-  ran unattended); trivial rename if the operator objects.
 - Dry-run is implemented as `Reconciler.plan()` (API reads, zero writes)
   rather than no-op client wrappers — simpler and honestly side-effect-free.
 
@@ -66,90 +66,7 @@ end-to-end flow — `docs/SMOKE_TEST.md` is the step-by-step procedure.
   back to the worker as an `info` notice so it can summarize. Deduped by a
   marker embedded in the new issue's description (`find_issue_by_marker`,
   best-effort — degrades to at-least-once if the backend rejects the content
-  filter). Offline-tested (mailbox/clients/reconcile/fakes). **Unverified
-  live:** the `issues(filter:{description:{contains}})` dedupe probe shape and
-  `IssueCreateInput` field names against the real API — confirm on first run.
-
-## Next up
-
-1. Smoke test (operator's Mac, 2026-07-29): **happy path verified live
-   through PR creation** — claim → provision → container → first turn →
-   plan status relayed as Linear comment → commit → `agentctl ready` →
-   branch pushed → PR opened → link posted back to the issue (SMOKE_TEST
-   steps 1–4 essentially done; driven by manual `once` ticks, so relays
-   only happened on tick — expected, not a bug). Still unverified live:
-   PR review feedback forwarding + re-submission, merge → teardown/archive
-   (step 5), the robustness spot-checks (step 6), and the long-running
-   `run` daemon itself. The skill-approval wedge was
-   root-caused: the launcher keyed skill choices per workspace *path* in
-   its user config dir, so every worktree re-prompted — the operator fixed
-   claude-container itself (choices now keyed on the resolved main working
-   tree via skill_identity_dir(), shared by all worktrees; new
-   --skills-ignore-new launch flag). issuefleet side (2026-07-29): runner
-   passes `[agent] launcher_args` (default ["--skills-ignore-new"]) before
-   the in-container command; doctor probes `--help` to confirm the
-   installed launcher knows each flag. Requires launcher > 1.6.12.
-   (`copy_from_repo` stays, but only for untracked workspace state like
-   .claude/settings.local.json — it never held skill approval.)
-2. NEW 2026-07-29: webhooks + bot identities shipped (offline-tested only):
-   - `[webhooks]` listener (loopback + tunnel) wakes the reconcile loop on
-     verified GitHub/Linear events — no more waiting out the poll interval.
-     Operator setup: tunnel (Cloudflare/Tailscale), repo webhook w/ secret,
-     Linear webhook w/ signing secret; see README "Webhooks".
-   - GitHub identity 2026-07-30: **GitHub App auth** (preferred over the
-     machine-user PAT, which remains the fallback). RS256 app JWTs signed
-     via the openssl CLI (stdlib can't do RSA; real sign→verify roundtrip
-     in tests), installation tokens cached per owner with 5-min refresh
-     margin, forge accepts a callable token source. Operator setup in
-     README "Bot identities". Unproven live like the rest of this batch —
-     first `doctor` run with the app configured probes /app +
-     /app/installations and will surface any mismatch.
-     Also: `issuefleet github-app-setup` (manifest flow) — **live-verified
-     2026-07-30**: created https://github.com/apps/issuefleet (app id
-     4440229, webhook-less variant), private key written. Remaining for
-     app auth: operator installs the app on target repos, sets
-     github_app_id in config, `doctor` (first live probe of /app +
-     /app/installations + JWT signing). Because the app was created
-     without a webhook, NO github webhook secret exists yet — when adding
-     the webhook later in the app's settings, also set a secret there and
-     write it to [webhooks] github_secret_file, or the endpoint stays
-     disabled. The classic PAT in credentials/ (gitignored) remains the
-     token-mode fallback until then.
-   - Linear agents platform: `issuefleet linear-oauth` (actor=app install,
-     no seat), Bearer auth auto-detected via lin_oauth_ prefix,
-     delegation/@-mention claims via AgentSessionEvent webhooks (10s ack
-     from the webhook thread), status/question/ready → thought/elicitation/
-     response activities, prompted → worker inbox. **Everything
-     agent-platform is unproven live** — implemented from Linear docs
-     (linear.app/developers/agents + /agent-interaction); verify the
-     payload shapes on first real install, especially AgentSessionEvent
-     field names and agentActivityCreate input.
-3. `nix flake lock` on the Mac (no nix in this container); commit flake.lock.
-4. Finish `docs/SMOKE_TEST.md` (review-forward, merge teardown, robustness
-   checks, `run` daemon); then the webhook/agent live test; then Splanc.
-
-## Open questions / blockers
-
-- Tool name confirmation (see deviations). Note: the operator's checkout
-  dir is `~/Projects/linear_dispatch`, which may be the preferred name.
-- Homelab compose stack (deploy/docker/, added 2026-07-30) is authored but
-  entirely unrun: riskiest seams are claude-container-inside-a-container
-  (root USER_UID → root-owned worktree files) and the tmux-in-daemon-
-  container caveat (daemon restart kills worker sessions; crash-restart
-  path recovers). Also live-green as of 2026-07-30: GitHub App doctor chain AND the
-  linear-oauth actor=app install (doctor authenticates as the 'issuefleet'
-  app user, Bearer). Webhook path ran live 2026-07-30: delegation ->
-  session claim -> activities all worked, and exposed an echo loop —
-  Linear sends `prompted` events for the app's OWN activities, which we
-  re-injected as waking replies (fix: abdd3e4, marker-style self-filter
-  for activities + ready-restore turn bound). RESOLVED 2026-07-31 via the
-  operator's archive zip: teardown was FINE (merge wound the worker down);
-  the echo actually entered via Linear's *mirror comments* of session
-  activities (unmarked, authored by the app user) — closed by identity
-  filtering under app auth (831dd1a). The post-merge "loop" was a macOS
-  DNS outage traceback storm (now collapsed to one-liners). Operator:
-  restart daemon; recycle workers claimed before abdd3e4.
-- `deploy/*.plist|.service` contain operator-specific paths to edit.
+  filter). Offline-tested (mailbox/clients/reconcile/fakes).
 
 ## Don't retry (dead ends)
 
