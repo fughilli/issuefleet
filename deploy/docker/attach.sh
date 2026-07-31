@@ -11,7 +11,7 @@ command -v docker >/dev/null 2>&1 || { echo "error: docker not on PATH" >&2; exi
 cd deploy/docker
 source ./env.sh
 if docker compose ps --status running issuefleet 2>/dev/null | grep -q issuefleet; then
-  exec docker compose exec issuefleet bin/issuefleet attach "$1"
+  exec docker compose exec issuefleet /entrypoint.sh bin/issuefleet attach "$1"
 fi
 echo "note: containerized stack not running; attaching via the host tmux" >&2
 cd "$BUILD_WORKSPACE_DIRECTORY"

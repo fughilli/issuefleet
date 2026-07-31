@@ -9,7 +9,7 @@ command -v docker >/dev/null 2>&1 || { echo "error: docker not on PATH" >&2; exi
 source ./env.sh
 issuefleet_preflight
 if docker compose ps --status running issuefleet 2>/dev/null | grep -q issuefleet; then
-  exec docker compose exec issuefleet bin/issuefleet doctor
+  exec docker compose exec issuefleet /entrypoint.sh bin/issuefleet doctor
 fi
 echo "note: issuefleet service not running; using a one-shot container" >&2
 exec docker compose run --rm issuefleet bin/issuefleet doctor
