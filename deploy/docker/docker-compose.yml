@@ -1,12 +1,16 @@
 # issuefleet + Tailscale Funnel, autostarting. See README.md in this dir.
 #
-# THE INVARIANT: /srv/issuefleet/{worktrees,repos,claude-config} are mounted
-# at identical paths on host and in the daemon container, because the
-# launcher passes them to the HOST docker daemon when starting workers.
-# Keep the config.toml paths in agreement:
-#   worktree_root = "/srv/issuefleet/worktrees"
-#   repo          = "/srv/issuefleet/repos/<name>"
-#   [agent] container_config_dir = "/srv/issuefleet/claude-config"
+# THE INVARIANT: worktrees/repos/claude-config/state are mounted at
+# identical paths on host and in the daemon container, because the launcher
+# passes them to the HOST docker daemon when starting workers. The root is
+# ISSUEFLEET_ROOT (set it in .env), default /srv/issuefleet. On macOS /
+# Docker Desktop, /srv is not on the File Sharing list (and the sealed
+# system volume makes adding it awkward) — use a root under /Users, e.g.
+# ISSUEFLEET_ROOT=/Users/you/issuefleet. Keep config.toml in agreement:
+#   worktree_root = "<ROOT>/worktrees"
+#   repo          = "<ROOT>/repos/<name>"
+#   state_dir     = "<ROOT>/state"
+#   [agent] container_config_dir = "<ROOT>/claude-config"
 
 services:
   tailscale:
@@ -45,15 +49,14 @@ services:
       # Workers are launched on the HOST docker daemon:
       - /var/run/docker.sock:/var/run/docker.sock
       # Same-path mounts (the invariant above):
-      - /srv/issuefleet/worktrees:/srv/issuefleet/worktrees
-      - /srv/issuefleet/repos:/srv/issuefleet/repos
-      - /srv/issuefleet/claude-config:/srv/issuefleet/claude-config
-      # Daemon-only state (registry, archives, logs) — path-free:
-      - /srv/issuefleet/state:/srv/issuefleet/state
-      # Operator-provided pieces:
-      - /srv/issuefleet/config:/etc/issuefleet:ro          # config.toml + key files
-      - /srv/issuefleet/ssh:/root/.ssh:ro                  # push key + known_hosts
-      - /srv/issuefleet/bin/claude-container:/usr/local/bin/claude-container:ro
+      - ${ISSUEFLEET_ROOT:-/srv/issuefleet}/worktrees:${ISSUEFLEET_ROOT:-/srv/issuefleet}/worktrees
+      - ${ISSUEFLEET_ROOT:-/srv/issuefleet}/repos:${ISSUEFLEET_ROOT:-/srv/issuefleet}/repos
+      - ${ISSUEFLEET_ROOT:-/srv/issuefleet}/claude-config:${ISSUEFLEET_ROOT:-/srv/issuefleet}/claude-config
+      - ${ISSUEFLEET_ROOT:-/srv/issuefleet}/state:${ISSUEFLEET_ROOT:-/srv/issuefleet}/state
+      # Operator-provided pieces (container-side paths fixed; path-free):
+      - ${ISSUEFLEET_ROOT:-/srv/issuefleet}/config:/etc/issuefleet:ro   # config.toml + keys
+      - ${ISSUEFLEET_ROOT:-/srv/issuefleet}/ssh:/root/.ssh:ro           # push key + known_hosts
+      - ${ISSUEFLEET_ROOT:-/srv/issuefleet}/bin/claude-container:/usr/local/bin/claude-container:ro
 
 volumes:
   ts-state:

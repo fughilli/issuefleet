@@ -15,37 +15,41 @@ Workers are therefore *siblings* of the daemon container, and every path
 the launcher bind-mounts into them (worktree, the repo's `.git`, the claude
 config dir) is resolved **by the host**. Hence the invariant:
 
-> `/srv/issuefleet/worktrees`, `/srv/issuefleet/repos`, and
-> `/srv/issuefleet/claude-config` are mounted at identical absolute paths
-> on the host and in the daemon container, and the config.toml must use
-> those paths.
+> `<ROOT>/{worktrees,repos,claude-config,state}` are mounted at identical
+> absolute paths on the host and in the daemon container, and the
+> config.toml must use those paths.
 
-Break the invariant and workers get empty or wrong bind mounts, with no
-error at launch time.
+The root is `ISSUEFLEET_ROOT` in `.env` (default `/srv/issuefleet`).
+**macOS / Docker Desktop:** `/srv` isn't on Docker's File Sharing list and
+the sealed system volume makes adding it painful — use a root under your
+home instead, e.g. `ISSUEFLEET_ROOT=/Users/you/issuefleet` (no sudo
+needed). Break the invariant and workers get empty or wrong bind mounts,
+with no error at launch time.
 
 ## Host preparation
 
 ```sh
-sudo mkdir -p /srv/issuefleet/{worktrees,repos,claude-config,state,config,ssh,bin}
+ROOT=/srv/issuefleet          # macOS: ROOT=$HOME/issuefleet (+ set it in .env)
+sudo mkdir -p $ROOT/{worktrees,repos,claude-config,state,config,ssh,bin}
 
 # 1. Target repos: clone (SSH remote) under /srv/issuefleet/repos/<name>
-git clone git@github.com:you/yourrepo /srv/issuefleet/repos/yourrepo
+git clone git@github.com:you/yourrepo $ROOT/repos/yourrepo
 
 # 2. The launcher: copy the claude-container script (it is bind-mounted,
 #    not baked in, so launcher upgrades don't need an image rebuild)
-cp ~/Projects/claude-container/bin/claude-container /srv/issuefleet/bin/
+cp ~/Projects/claude-container/bin/claude-container $ROOT/bin/
 
 # 3. Claude credentials for workers: seed the shared config dir (same
 #    content as ~/.config/claude-container/config on your Mac — the OAuth
 #    credentials + settings.json with bypassPermissions)
-cp -r ~/.config/claude-container/config/* /srv/issuefleet/claude-config/
+cp -r ~/.config/claude-container/config/* $ROOT/claude-config/
 
 # 4. Push key: a deploy key or user key authorized for the target repos
-cp <your-key> /srv/issuefleet/ssh/id_ed25519
-ssh-keyscan github.com > /srv/issuefleet/ssh/known_hosts
-chmod 700 /srv/issuefleet/ssh && chmod 600 /srv/issuefleet/ssh/id_ed25519
+cp <your-key> $ROOT/ssh/id_ed25519
+ssh-keyscan github.com > $ROOT/ssh/known_hosts
+chmod 700 $ROOT/ssh && chmod 600 $ROOT/ssh/id_ed25519
 
-# 5. Config + secrets under /srv/issuefleet/config (mounted at /etc/issuefleet):
+# 5. Config + secrets under $ROOT/config (mounted at /etc/issuefleet):
 #    config.toml, linear.key, github_app.pem, *_webhook.secret — chmod 600.
 ```
 
@@ -53,7 +57,7 @@ chmod 700 /srv/issuefleet/ssh && chmod 600 /srv/issuefleet/ssh/id_ed25519
 
 ```toml
 [daemon]
-state_dir = "/srv/issuefleet/state"
+state_dir = "/srv/issuefleet/state"              # your ROOT, spelled out
 worktree_root = "/srv/issuefleet/worktrees"      # same-path invariant
 [credentials]
 linear_api_key_file = "/etc/issuefleet/linear.key"
@@ -90,6 +94,7 @@ settings) for an anonymous homelab pull, or `docker login ghcr.io` there.
 ```sh
 cd deploy/docker
 echo 'TS_AUTHKEY=tskey-auth-…' > .env     # create at login.tailscale.com/admin/settings/keys
+echo 'ISSUEFLEET_ROOT=/Users/you/issuefleet' >> .env   # macOS; omit on Linux for /srv/issuefleet
 docker compose up -d
 docker compose exec tailscale tailscale funnel status
 ```
@@ -128,5 +133,8 @@ workers' *containers* — but note the tmux caveat below.
   broken — but prefer `docker compose restart tailscale` / config reloads
   over restarting the issuefleet service while workers are mid-task.
 - The launcher's linked-worktree `.git` mount only works because repos and
-  worktrees share the `/srv/issuefleet` prefix visible to the host daemon.
-  Don't relocate one without the other.
+  worktrees share the ROOT prefix visible to the host daemon. Don't
+  relocate one without the other.
+- **Don't run the laptop-mode daemon and this stack against the same
+  Linear projects simultaneously** — they have separate registries and
+  will double-claim issues. Stop `bin/issuefleet run` before `:up`.
