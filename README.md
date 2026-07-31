@@ -372,3 +372,23 @@ Layout: `src/issuefleet/` (core: mailbox, turns, reconcile, clients, ports),
 construction), `tests/` (everything runs offline; gitops/tmux tests use real
 git and tmux with local fixtures). The manual end-to-end procedure is
 `docs/SMOKE_TEST.md`. `WORKLOG.md` carries session-to-session state.
+
+### Shared Bazel cache across worktrees
+
+`.bazelrc` puts the disk and repository caches in per-tree directories
+(`.bazel-disk-cache`, `.bazel-repo-cache`), so a fresh worktree — every
+issuefleet worker gets one — would otherwise build from cold. `tools/bazel` (a
+Bazelisk wrapper) fixes that: it points both caches at a single location shared
+by all worktrees of the repo and injects it via a generated `--bazelrc`, which
+overrides the per-tree defaults. It resolves the shared root as:
+
+1. `$BAZEL_SHARED_CACHE_DIR` if set — the hook for a shared volume mounted into
+   an isolated environment. A worker container's `.git` points at a host path
+   it cannot see, so mount a per-project cache dir into each worker and export
+   this variable (e.g. via `launcher_args`) to make the fleet share too.
+2. otherwise `<git-common-dir>/bazel-cache` — every linked worktree shares one
+   `.git`, so co-located worktrees (a developer's own `~/worktrees` checkouts)
+   share automatically, with no setup and nothing committed.
+
+If neither resolves (not a git checkout, or the common dir is unreachable) the
+wrapper is a no-op and the per-tree caches from `.bazelrc` apply.

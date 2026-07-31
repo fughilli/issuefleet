@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Bazel wrapper, run by Bazelisk via its tools/bazel mechanism: it exec's this
+# script instead of the real Bazel binary, with $BAZEL_REAL pointing at that
+# binary. We use the hook to point the disk and repository caches at a location
+# shared by every worktree of this repo, so a fresh worktree's first build
+# starts warm instead of totally cold (FUG-24).
+#
+# Shared cache root, in precedence order:
+#   1. $BAZEL_SHARED_CACHE_DIR — an explicit override. This is the hook for a
+#      shared volume mounted into an isolated environment (e.g. an issuefleet
+#      worker container, whose .git points at a host path it cannot see).
+#   2. <git-common-dir>/bazel-cache — the default. Every linked worktree of a
+#      repo shares one .git, so a cache under it is shared automatically and is
+#      never reported by git (everything under .git is untracked).
+# If neither resolves (not a git checkout, or the common dir is unreachable),
+# we exec Bazel unchanged and the per-tree caches from .bazelrc are used — same
+# behavior as before this wrapper existed.
+#
+# Injection is via a generated --bazelrc: a command-line rc is read *after* the
+# workspace .bazelrc, so its --disk_cache/--repository_cache win over the
+# per-tree defaults without editing them.
+set -euo pipefail
+
+bazel_real="${BAZEL_REAL:-bazel}"
+
+resolve_root() {
+  if [ -n "${BAZEL_SHARED_CACHE_DIR:-}" ]; then
+    printf '%s\n' "$BAZEL_SHARED_CACHE_DIR"
+    return 0
+  fi
+  local common
+  common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+  [ -n "$common" ] && [ -d "$common" ] || return 1
+  printf '%s/bazel-cache\n' "$common"
+}
+
+if root="$(resolve_root)"; then
+  mkdir -p "$root"
+  rc="$root/shared.bazelrc"
+  # Write atomically (temp + rename): sibling worktrees run Bazel concurrently
+  # and all target the same $root, so a plain truncating write could let one
+  # process read a half-written rc. The content is identical across worktrees,
+  # so the rename is a no-op swap in the common case.
+  tmp="$rc.$$"
+  cat > "$tmp" <<EOF
+build --disk_cache=$root/disk
+common --repository_cache=$root/repo
+EOF
+  mv -f "$tmp" "$rc"
+  exec "$bazel_real" "--bazelrc=$rc" "$@"
+fi
+
+exec "$bazel_real" "$@"

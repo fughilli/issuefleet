@@ -17,6 +17,9 @@ build --incompatible_strict_action_env
 
 # Persist caches in the project tree (gitignored) so they survive container
 # restarts that wipe ~/.cache. Content-addressable, safe on any filesystem.
+# These per-tree paths are the fallback: the tools/bazel Bazelisk wrapper
+# overrides them (via a generated --bazelrc) with a cache shared across all
+# worktrees of the repo, so a fresh worktree starts warm. See README.
 build  --disk_cache=.bazel-disk-cache
 common --repository_cache=.bazel-repo-cache
 
