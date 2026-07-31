@@ -74,6 +74,7 @@ repo = "/srv/issuefleet/repos/yourrepo"
 ```sh
 bazel run //deploy/docker:image     # docker build -> ghcr.io/fughilli/issuefleet:dev
 bazel run //deploy/docker:up       # compose up -d --build (daemon + funnel)
+bazel run //deploy/docker:doctor   # doctor inside the stack (exec, or one-shot if daemon is down)
 bazel run //deploy/docker:down     # compose down (workers survive: they're siblings)
 ```
 
@@ -102,7 +103,7 @@ Your public webhook base is `https://issuefleet.<tailnet>.ts.net` — put
 ## Operating it
 
 ```sh
-docker compose exec issuefleet bin/issuefleet --config /etc/issuefleet/config.toml doctor
+bazel run //deploy/docker:doctor    # or the exec/status forms below
 docker compose exec issuefleet bin/issuefleet --config /etc/issuefleet/config.toml status
 docker compose exec -it issuefleet tmux attach -t issuefleet-<proj>-<KEY>   # watch a worker
 docker compose logs -f issuefleet                                           # daemon log
