@@ -11,7 +11,9 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-CLAIM_STRATEGIES = ("label", "assignee", "state")
+# "agent" = no poll-based claiming; issues are claimed only by delegating
+# (assigning) them to the Linear agent or @-mentioning it (agent sessions).
+CLAIM_STRATEGIES = ("label", "assignee", "state", "agent")
 
 _FORBIDDEN_SECRET_KEYS = (
     "linear_api_key",
@@ -38,6 +40,8 @@ class ClaimRule:
             return issue.assignee_id == self.value
         if self.strategy == "state":
             return issue.state_name == self.value
+        if self.strategy == "agent":
+            return False  # poll path claims nothing; sessions claim directly
         raise ConfigError(f"unknown claim strategy {self.strategy!r}")
 
 
@@ -183,14 +187,14 @@ def parse(data: dict, source: str = "<config>") -> Config:
             raise ConfigError(
                 f"{where}: claim.strategy must be one of {CLAIM_STRATEGIES}, got {strategy!r}"
             )
-        if not claim_raw.get("value"):
+        if strategy != "agent" and not claim_raw.get("value"):
             raise ConfigError(f"{where}: claim.value is required (e.g. the label name)")
         projects.append(
             ProjectConfig(
                 name=p["name"],
                 linear_project=p["linear_project"],
                 repo=_path(p["repo"]),
-                claim=ClaimRule(strategy=strategy, value=claim_raw["value"]),
+                claim=ClaimRule(strategy=strategy, value=claim_raw.get("value", "")),
                 base_ref=p.get("base_ref", "main"),
                 branch_template=p.get("branch_template", "agent/{key}-{slug}"),
                 state_in_progress=p.get("state_in_progress", "In Progress"),

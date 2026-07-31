@@ -41,12 +41,14 @@ copy_from_repo = [".claude", ".claude-container-overlay"]
 launcher_args = ["--skills-ignore-new"]   # needs claude-container > 1.6.12
 
 # The motivating case: Linear project "Splanc" feeding fughilli/splanc.
+# With the Linear agent installed, strategy "agent" means claims happen
+# ONLY by delegating/@-mentioning the bot — no label triggering.
 [[projects]]
 name = "splanc"
 linear_project = "Splanc"
 repo = "~/Projects/splanc"
 base_ref = "main"
-claim = { strategy = "label", value = "agent" }
+claim = { strategy = "agent" }
 state_in_progress = "In Progress"
 state_done = "Done"
 delete_remote_branch = true

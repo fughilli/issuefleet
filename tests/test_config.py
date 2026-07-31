@@ -107,6 +107,27 @@ class ConfigTest(unittest.TestCase):
         state = config.ClaimRule("state", "Ready for agent")
         self.assertTrue(state.matches(make_issue(state_name="Ready for agent")))
         self.assertFalse(state.matches(make_issue(state_name="Todo")))
+        # "agent": nothing is ever poll-eligible; sessions claim directly.
+        agent = config.ClaimRule("agent", "")
+        self.assertFalse(agent.matches(make_issue(labels=["agent"], assignee_id="x")))
+
+    def test_agent_strategy_needs_no_value(self):
+        data = {
+            "projects": [
+                {
+                    "name": "a",
+                    "linear_project": "A",
+                    "repo": "/tmp/a",
+                    "claim": {"strategy": "agent"},
+                }
+            ]
+        }
+        cfg = config.parse(data)
+        self.assertEqual(cfg.projects[0].claim.strategy, "agent")
+        # ...but the others still require one.
+        data["projects"][0]["claim"] = {"strategy": "label"}
+        with self.assertRaisesRegex(config.ConfigError, "claim.value"):
+            config.parse(data)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,15 @@ Credentials host-side only; filesystem mailbox as the agents' sole channel.
 
 ## State of play
 
+**MILESTONE 2026-07-31: full lifecycle verified live end-to-end** on the
+operator's Mac via the Linear agent platform — new issue delegated to the
+bot → webhook session claim → worker → PR (as issuefleet[bot]) → merge →
+clean teardown. Both echo loops fixed and confirmed gone. New claim
+strategy `agent` (7166658+) disables label/poll triggering per the
+operator's preference: delegation/@-mention is the only claim gesture.
+Remaining before "done": Splanc pointing, homelab compose stack (unrun),
+flake.lock, robustness spot-checks from SMOKE_TEST §6.
+
 The full system is built and committed — core, agent runtime, real
 Linear/GitHub clients, gitops, tmux runner, doctor/CLI, docs, deploy units.
 `bazelisk test //tests:all` = 8 targets / ~80 tests green. See `git log`

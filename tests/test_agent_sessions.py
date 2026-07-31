@@ -192,6 +192,18 @@ class AgentSessionTest(unittest.TestCase):
         self.rec.tick()
         self.assertIsNotNone(self.registry.get("issue-1"))
 
+    def test_agent_strategy_disables_poll_claims_but_not_sessions(self):
+        self.cfg.projects[0].claim = config.ClaimRule("agent", "")
+        # Labeled or not, nothing is poll-claimed...
+        self.tracker.add_issue(make_issue(1, labels=["agent"], project_id="proj-splanc"))
+        self.rec.tick()
+        self.assertIsNone(self.registry.get("issue-1"))
+        # ...but delegation still claims.
+        self.rec.enqueue_session(created())
+        self.rec.tick()
+        self.assertIsNotNone(self.registry.get("issue-1"))
+        self.assertEqual(self.registry.get("issue-1").claim_origin, "session")
+
     def test_session_attaches_to_already_claimed_worker(self):
         self.tracker.add_issue(make_issue(1, project_id="proj-splanc"))  # labeled
         self.rec.tick()
