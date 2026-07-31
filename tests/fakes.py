@@ -31,6 +31,7 @@ class FakeTracker:
 
     def __init__(self):
         self.viewer_id = "viewer-bot"
+        self.app_identity = False  # True mirrors the OAuth/agent-app identity
         self.issues: dict[str, Issue] = {}
         self.comments: dict[str, list[Comment]] = {}  # issue_id -> comments
         self.posted: list[tuple[str, str]] = []  # (issue_id, body)
@@ -38,6 +39,7 @@ class FakeTracker:
         self.fail_next_post = 0  # countdown of post_comment calls to fail
         self.fail_get_issue: set[str] = set()  # issue_ids whose get_issue raises
         self.activities: list[tuple[str, dict]] = []  # (session_id, content)
+        self.sessions: dict[str, str] = {}  # issue_id -> discoverable session id
         self.created: list[dict] = []  # issueCreate inputs the bot filed
         self.issue_team: dict[str, str] = {}  # issue_id -> team_id
         self.team_labels: dict[str, dict[str, str]] = {}  # team_id -> {name: id}
@@ -118,6 +120,11 @@ class FakeTracker:
 
     def emit_activity(self, session_id: str, content: dict) -> None:
         self.activities.append((session_id, content))
+
+    def find_agent_session(self, issue_id: str) -> str | None:
+        if not self.app_identity:
+            return None
+        return self.sessions.get(issue_id)
 
     def resolve_project_id(self, project) -> str:
         return project.linear_project
