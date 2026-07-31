@@ -33,6 +33,26 @@ log = logging.getLogger("issuefleet")
 
 _SEEN_IDS_CAP = 1000
 
+# Activity content types the orchestrator itself emits into sessions; a
+# `prompted` webhook carrying one of these is an echo, never a user prompt.
+_AGENT_EMITTED_ACTIVITY_TYPES = {"thought", "action", "elicitation", "response", "error"}
+
+
+def _is_user_prompt(evt) -> bool:
+    """True only for prompted events that are genuinely a human talking to
+    the agent. Positive signals: activity type 'prompt', or a user actor.
+    Echoes carry an agent-emitted activity type and/or an app/integration
+    actor. When both fields are absent we accept (a lost user prompt is
+    unrecoverable — session prompts aren't pollable) and rely on the turn
+    loop's ready-restore to bound any residual echo to a single no-op turn."""
+    if evt.activity_type in _AGENT_EMITTED_ACTIVITY_TYPES:
+        return False
+    if evt.activity_type == "prompt":
+        return True
+    if evt.actor_type in ("application", "oauthclientapp", "oauth_client", "integration", "app"):
+        return False
+    return True
+
 
 def slugify(title: str, max_len: int = 32) -> str:
     out = []
@@ -85,6 +105,16 @@ class Reconciler:
                     None,
                 )
             if evt.action == "prompted":
+                if not _is_user_prompt(evt):
+                    # Linear also delivers session events for activities WE
+                    # emit; routing those into the inbox echoes the agent's
+                    # own status back as a waking reply — an infinite
+                    # relay->webhook->turn loop (observed live 2026-07-30).
+                    log.info(
+                        "dropping echoed session activity for %s (activity_type=%s actor=%s)",
+                        evt.issue_key, evt.activity_type, evt.actor_type,
+                    )
+                    continue
                 if rec is None:
                     log.warning("session prompt for unclaimed issue %s; dropped "
                                 "(sender sees the ack/queue state in the session)", evt.issue_key)

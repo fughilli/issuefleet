@@ -21,9 +21,10 @@ def created(n=1, session="sess-1"):
     )
 
 
-def prompted(n=1, session="sess-1", text="also update the docs"):
+def prompted(n=1, session="sess-1", text="also update the docs", **kw):
     return SessionEvent(
-        action="prompted", session_id=session, issue_id=f"issue-{n}", issue_key=f"FUG-{n}", body=text
+        action="prompted", session_id=session, issue_id=f"issue-{n}", issue_key=f"FUG-{n}",
+        body=text, **kw
     )
 
 
@@ -102,6 +103,30 @@ class AgentSessionTest(unittest.TestCase):
         replies = [m for m in self.mailbox().pending_inbox() if m.kind == "reply"]
         self.assertEqual(len(replies), 1)
         self.assertIn("update the docs", replies[0].payload["text"])
+
+    def test_echoed_agent_activities_do_not_wake_the_worker(self):
+        # Live-observed loop (2026-07-30): our own thought/response activity
+        # emissions come back as `prompted` webhooks; routing them to the
+        # inbox re-wakes the agent forever. Only genuine user prompts pass.
+        self.add_issue()
+        self.rec.enqueue_session(created())
+        self.rec.tick()
+        for evt in (
+            prompted(activity_type="thought"),  # our status relay, echoed
+            prompted(activity_type="response"),
+            prompted(text="anything", actor_type="application"),
+        ):
+            self.rec.enqueue_session(evt)
+        self.rec.tick()
+        self.assertEqual(self.mailbox().pending_inbox(), [])
+        # A genuine user prompt still gets through...
+        self.rec.enqueue_session(prompted(activity_type="prompt", text="use approach B"))
+        # ...as does one where Linear omits the fields (can't be recovered
+        # if dropped; the turn loop's ready-restore bounds any residual echo).
+        self.rec.enqueue_session(prompted(text="bare prompt"))
+        self.rec.tick()
+        texts = [m.payload["text"] for m in self.mailbox().pending_inbox()]
+        self.assertEqual(texts, ["use approach B", "bare prompt"])
 
     def test_relays_become_activities_not_comments(self):
         self.add_issue()

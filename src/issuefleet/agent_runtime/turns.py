@@ -72,6 +72,7 @@ class Decision:
     consume: list[Message] = field(default_factory=list)  # inbox msgs this turn ingests
     resets_auto_turns: bool = False
     post_status: str | None = None  # outbox status the loop should emit (budget trip)
+    wake_from_phase: str | None = None  # phase this run-decision woke the agent out of
 
 
 def decide(agent_dir: Path, mailbox: Mailbox, state: TurnState) -> Decision:
@@ -106,6 +107,7 @@ def decide(agent_dir: Path, mailbox: Mailbox, state: TurnState) -> Decision:
             prompt=format_inbound(waking + context),
             consume=waking + context,
             resets_auto_turns=True,
+            wake_from_phase=state.phase,
         )
 
     if state.phase == PHASE_WAITING:

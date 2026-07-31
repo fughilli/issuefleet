@@ -101,6 +101,10 @@ class Mailbox:
         return msg
 
     def _next_seq(self, box: Path, moved: Path) -> int:
+        return self._max_seq(box, moved) + 1
+
+    @staticmethod
+    def _max_seq(box: Path, moved: Path) -> int:
         # Sequence must stay monotonic even after messages move out of the
         # pending dir, so scan both.
         top = 0
@@ -109,7 +113,12 @@ class Mailbox:
                 m = _NAME_RE.match(p.name)
                 if m:
                     top = max(top, int(m.group(1)))
-        return top + 1
+        return top
+
+    def last_outbox_seq(self) -> int:
+        """Highest outbox sequence ever allocated (pending or archived).
+        Lets the turn loop detect whether a turn emitted anything."""
+        return self._max_seq(self.outbox, self.outbox_archive)
 
     # -- reading ----------------------------------------------------------
 

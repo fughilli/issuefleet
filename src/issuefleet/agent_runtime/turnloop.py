@@ -120,10 +120,22 @@ def step(agent_dir: Path) -> int:
     if decision.action != "run":
         return decision.exit_code
 
+    pre_turn_seq = mb.last_outbox_seq()
     rc = run_claude(decision.prompt, state, agent_dir)
     # agentctl may have moved phase to waiting/ready during the turn — reload
     # before recording the completed turn, so we don't clobber it.
     state = turns.TurnState.load(agent_dir)
+    if (
+        decision.wake_from_phase == turns.PHASE_READY
+        and state.phase == turns.PHASE_RUNNING
+        and mb.last_outbox_seq() == pre_turn_seq
+    ):
+        # Woken out of ready (PR submitted) by a message that needed no
+        # response: the agent emitted nothing, so go back to idling on the
+        # open PR. Without this, the running phase grants endless
+        # continuation turns to an agent with nothing left to do.
+        print("turnloop: wake produced no response; returning to ready-idle")
+        state.phase = turns.PHASE_READY
     state.turns_taken += 1
     state.save(agent_dir)
     if rc != 0:

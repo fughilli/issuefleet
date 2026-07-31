@@ -120,5 +120,58 @@ class RunClaudeTest(unittest.TestCase):
         self.assertEqual(turnloop.run_claude("x", self.state(), self.agent_dir), 3)
 
 
+class ReadyWakeRestoreTest(unittest.TestCase):
+    """A ready-idling agent woken by a message that needs no response must
+    return to ready after ONE turn — not fall into running phase and grind
+    continuation turns until the budget (live-observed loop, 2026-07-30)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.workspace = root / "ws"
+        self.agent_dir = self.workspace / ".agent"
+        self.agent_dir.mkdir(parents=True)
+        (self.agent_dir / "brief.md").write_text("# brief")
+        from issuefleet.mailbox import Mailbox
+
+        self.mb = Mailbox(self.agent_dir / "mailbox").ensure()
+        st = turns.TurnState(session_uuid="u-1", phase=turns.PHASE_READY, turns_taken=5)
+        st.save(self.agent_dir)
+        self.bin = root / "bin"
+        self.bin.mkdir()
+        self._old_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{self.bin}:{self._old_path}"
+
+    def tearDown(self):
+        os.environ["PATH"] = self._old_path
+        self.tmp.cleanup()
+
+    def stub_claude(self, extra=""):
+        stub = self.bin / "claude"
+        stub.write_text(f"#!/bin/sh\ncat > /dev/null\n{extra}\nexit 0\n")
+        stub.chmod(0o755)
+
+    def test_silent_wake_returns_to_ready(self):
+        self.mb.put_inbox("pr_feedback", {"reviewer": "alice", "text": "LGTM!"})
+        self.stub_claude()  # agent emits nothing
+        code = turnloop.step(self.agent_dir)
+        self.assertEqual(code, 0)
+        self.assertEqual(turns.TurnState.load(self.agent_dir).phase, turns.PHASE_READY)
+        # Next decision idles instead of granting a continuation turn.
+        self.assertEqual(turnloop.step(self.agent_dir), turns.EXIT_READY)
+
+    def test_responsive_wake_keeps_working(self):
+        self.mb.put_inbox("pr_feedback", {"reviewer": "bob", "text": "rename this please"})
+        # The agent posts a status during the turn (simulated by the stub
+        # dropping a validly-named message into the outbox).
+        outbox_file = self.mb.outbox / "000001-status-aaaaaaaaaaaa.json"
+        self.stub_claude(
+            extra=f"printf '%s' '{json.dumps({'seq': 1, 'kind': 'status', 'id': 'aaaaaaaaaaaa', 'ts': 't', 'payload': {'text': 'on it'}})}' > {outbox_file}"
+        )
+        code = turnloop.step(self.agent_dir)
+        self.assertEqual(code, 0)
+        self.assertEqual(turns.TurnState.load(self.agent_dir).phase, turns.PHASE_RUNNING)
+
+
 if __name__ == "__main__":
     unittest.main()

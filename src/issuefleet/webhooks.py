@@ -44,6 +44,8 @@ class SessionEvent:
     issue_id: str | None
     issue_key: str | None
     body: str | None  # prompt text (prompted) or promptContext (created)
+    activity_type: str | None = None  # e.g. "prompt" (user) vs "thought" (agent echo)
+    actor_type: str | None = None  # webhook actor: "user" vs app/integration
 
 
 def verify_github_signature(secret: str, body: bytes, header: str | None) -> bool:
@@ -74,18 +76,23 @@ def parse_session_event(payload: dict) -> SessionEvent | None:
     session = payload.get("agentSession") or {}
     issue = session.get("issue") or {}
     action = payload.get("action", "")
+    activity = payload.get("agentActivity") or {}
+    content = activity.get("content") or {}
     if action == "prompted":
-        body = (payload.get("agentActivity") or {}).get("body")
+        body = activity.get("body") or content.get("body")
     else:
         body = payload.get("promptContext")
     if not session.get("id") or action not in ("created", "prompted"):
         return None
+    actor = payload.get("actor") or {}
     return SessionEvent(
         action=action,
         session_id=session["id"],
         issue_id=issue.get("id"),
         issue_key=issue.get("identifier"),
         body=body,
+        activity_type=content.get("type") or activity.get("type"),
+        actor_type=(actor.get("type") or "").lower() or None,
     )
 
 

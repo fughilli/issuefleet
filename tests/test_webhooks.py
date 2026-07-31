@@ -72,12 +72,31 @@ class ParseSessionEventTest(unittest.TestCase):
             {
                 "type": "AgentSessionEvent",
                 "action": "prompted",
+                "actor": {"id": "u1", "type": "user"},
                 "agentSession": {"id": "sess-1", "issue": {"id": "i1", "identifier": "FUG-1"}},
-                "agentActivity": {"body": "please also update the docs"},
+                "agentActivity": {"body": "please also update the docs",
+                                  "content": {"type": "prompt"}},
             }
         )
         self.assertEqual(evt.action, "prompted")
         self.assertEqual(evt.body, "please also update the docs")
+        self.assertEqual(evt.activity_type, "prompt")
+        self.assertEqual(evt.actor_type, "user")
+
+    def test_prompted_echo_fields_extracted(self):
+        # An echo of our own activity: type from content, body may live there.
+        evt = parse_session_event(
+            {
+                "type": "AgentSessionEvent",
+                "action": "prompted",
+                "actor": {"type": "application"},
+                "agentSession": {"id": "sess-1", "issue": {"id": "i1", "identifier": "FUG-1"}},
+                "agentActivity": {"content": {"type": "thought", "body": "formed a plan"}},
+            }
+        )
+        self.assertEqual(evt.activity_type, "thought")
+        self.assertEqual(evt.actor_type, "application")
+        self.assertEqual(evt.body, "formed a plan")
 
     def test_non_session_and_malformed(self):
         self.assertIsNone(parse_session_event({"type": "Comment", "action": "create"}))
