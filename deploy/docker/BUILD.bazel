@@ -19,6 +19,7 @@ sh_binary(
     srcs = ["up.sh"],
     data = [
         "docker-compose.yml",
+        "env.sh",
         "funnel.json",
     ],
 )
@@ -26,11 +27,17 @@ sh_binary(
 sh_binary(
     name = "down",
     srcs = ["down.sh"],
-    data = ["docker-compose.yml"],
+    data = [
+        "docker-compose.yml",
+        "env.sh",
+    ],
 )
 
 sh_binary(
     name = "doctor",
     srcs = ["doctor.sh"],
-    data = ["docker-compose.yml"],
+    data = [
+        "docker-compose.yml",
+        "env.sh",
+    ],
 )

@@ -91,6 +91,34 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "duplicate"):
             config.parse(data)
 
+    def test_paths_expand_env_vars(self):
+        # ${ISSUEFLEET_ROOT}/... in config paths makes one config.toml work
+        # on a laptop and in the homelab container (which sets the var).
+        import os
+
+        os.environ["ISSUEFLEET_ROOT"] = "/data/fleet"
+        try:
+            data = {
+                "daemon": {
+                    "state_dir": "${ISSUEFLEET_ROOT}/state",
+                    "worktree_root": "${ISSUEFLEET_ROOT}/worktrees",
+                },
+                "projects": [
+                    {
+                        "name": "x",
+                        "linear_project": "X",
+                        "repo": "${ISSUEFLEET_ROOT}/repos/x",
+                        "claim": {"strategy": "agent"},
+                    }
+                ],
+            }
+            cfg = config.parse(data)
+            self.assertEqual(str(cfg.state_dir), "/data/fleet/state")
+            self.assertEqual(str(cfg.worktree_root), "/data/fleet/worktrees")
+            self.assertEqual(str(cfg.projects[0].repo), "/data/fleet/repos/x")
+        finally:
+            del os.environ["ISSUEFLEET_ROOT"]
+
     def test_launcher_args_default_and_override(self):
         self.assertEqual(config.parse(MINIMAL).launcher_args, ["--skills-ignore-new"])
         data = dict(MINIMAL)

@@ -7,6 +7,7 @@ literal key in the config is rejected outright.
 
 from __future__ import annotations
 
+import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -140,7 +141,11 @@ def _reject_secrets(table: dict, where: str) -> None:
 
 
 def _path(v: str) -> Path:
-    return Path(v).expanduser()
+    # Environment expansion makes configs portable across deployments: the
+    # homelab stack sets ISSUEFLEET_ROOT in the daemon's environment, so
+    # `worktree_root = "${ISSUEFLEET_ROOT}/worktrees"` is the same config
+    # text on a laptop and in the container.
+    return Path(os.path.expandvars(v)).expanduser()
 
 
 def load(path: str | Path) -> Config:

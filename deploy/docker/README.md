@@ -19,18 +19,20 @@ config dir) is resolved **by the host**. Hence the invariant:
 > absolute paths on the host and in the daemon container, and the
 > config.toml must use those paths.
 
-The root is `ISSUEFLEET_ROOT` in `.env` (default `/srv/issuefleet`).
-**macOS / Docker Desktop:** `/srv` isn't on Docker's File Sharing list and
-the sealed system volume makes adding it painful — use a root under your
-home instead, e.g. `ISSUEFLEET_ROOT=/Users/you/issuefleet` (no sudo
-needed). Break the invariant and workers get empty or wrong bind mounts,
-with no error at launch time.
+The root is declared ONCE, in `deploy/docker/env.sh`, as
+**`$HOME/.issuefleet` on every platform** (inside Docker Desktop's shared
+`/Users` on macOS; no sudo anywhere). Every bazel wrapper exports it,
+compose mounts `$ROOT:$ROOT` and passes `ISSUEFLEET_ROOT` into the
+daemon's environment, and config paths expand env vars — so the same
+`config.toml` runs on a laptop and in the container unchanged. Override
+by exporting `ISSUEFLEET_ROOT` before `bazel run`. Break the invariant and
+workers get empty or wrong bind mounts, with no error at launch time.
 
 ## Host preparation
 
 ```sh
-ROOT=/srv/issuefleet          # macOS: ROOT=$HOME/issuefleet (+ set it in .env)
-sudo mkdir -p $ROOT/{worktrees,repos,claude-config,state,config,ssh,bin}
+ROOT=$HOME/.issuefleet
+mkdir -p $ROOT/{worktrees,repos,claude-config,state,config,ssh,bin}
 
 # 1. Target repos: clone (SSH remote) under /srv/issuefleet/repos/<name>
 git clone git@github.com:you/yourrepo $ROOT/repos/yourrepo
@@ -57,19 +59,19 @@ chmod 700 $ROOT/ssh && chmod 600 $ROOT/ssh/id_ed25519
 
 ```toml
 [daemon]
-state_dir = "/srv/issuefleet/state"              # your ROOT, spelled out
-worktree_root = "/srv/issuefleet/worktrees"      # same-path invariant
+state_dir = "${ISSUEFLEET_ROOT}/state"
+worktree_root = "${ISSUEFLEET_ROOT}/worktrees"   # same-path invariant
 [credentials]
 linear_api_key_file = "/etc/issuefleet/linear.key"
 github_app_key_file = "/etc/issuefleet/github_app.pem"
 [agent]
-container_config_dir = "/srv/issuefleet/claude-config"   # same-path invariant
+container_config_dir = "${ISSUEFLEET_ROOT}/claude-config"   # same-path invariant
 [webhooks]
 enabled = true                                    # bind stays 127.0.0.1
 github_secret_file = "/etc/issuefleet/github_webhook.secret"
 linear_secret_file = "/etc/issuefleet/linear_webhook.secret"
 [[projects]]
-repo = "/srv/issuefleet/repos/yourrepo"
+repo = "${ISSUEFLEET_ROOT}/repos/yourrepo"
 # ...
 ```
 
@@ -94,7 +96,6 @@ settings) for an anonymous homelab pull, or `docker login ghcr.io` there.
 ```sh
 cd deploy/docker
 echo 'TS_AUTHKEY=tskey-auth-…' > .env     # create at login.tailscale.com/admin/settings/keys
-echo 'ISSUEFLEET_ROOT=/Users/you/issuefleet' >> .env   # macOS; omit on Linux for /srv/issuefleet
 docker compose up -d
 docker compose exec tailscale tailscale funnel status
 ```
