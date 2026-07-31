@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bazelbuild/setup-bazelisk@v3
+      # The repo keeps its caches in-tree (see .bazelrc), so plain
+      # actions/cache on those dirs makes warm CI builds fast.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .bazel-disk-cache
+            .bazel-repo-cache
+            .bazelisk
+          key: bazel-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel') }}
+          restore-keys: bazel-${{ runner.os }}-
+      - run: bazelisk test //tests:all
+      - run: bazelisk build //...
+
+  image:
+    # Build always (PRs prove the Dockerfile); push only from main, so the
+    # registry's :latest is exactly what main builds.
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          # amd64 for a typical homelab box, arm64 for Pi/Apple-silicon docker.
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' }}
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

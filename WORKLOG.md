@@ -19,8 +19,15 @@ operator's preference: delegation/@-mention is the only claim gesture.
 2026-07-31 late: `agentctl idle` verb + two-noop-turn auto-idle backstop
 (cb5e216) after FUG-13 forensics — a finished agent woken by a courtesy
 comment had no way to decline further turns. Agent-side change: recycle
-live workers. Remaining before "done": Splanc pointing, homelab compose
-stack (unrun), flake.lock, robustness spot-checks from SMOKE_TEST §6.
+live workers. 2026-07-31: bazel targets for the homelab stack
+(//deploy/docker:image|up|down — docker-CLI wrappers, deliberately not
+rules_oci: the apt layer isn't hermetically expressible without
+rules_distroless) + GitHub Actions CI (test with in-tree bazel caches;
+multi-arch image pushed to ghcr.io/fughilli/issuefleet on main). CI is
+UNRUN until the next push lands; GHCR package visibility may need one
+manual flip to public. Remaining before "done": Splanc pointing + its
+GitHub App installation (doctor shows 404), homelab compose stack (unrun),
+flake.lock, robustness spot-checks from SMOKE_TEST §6.
 
 The full system is built and committed — core, agent runtime, real
 Linear/GitHub clients, gitops, tmux runner, doctor/CLI, docs, deploy units.

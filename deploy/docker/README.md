@@ -69,6 +69,21 @@ repo = "/srv/issuefleet/repos/yourrepo"
 # ...
 ```
 
+## Running it (bazel targets)
+
+```sh
+bazel run //deploy/docker:image     # docker build -> ghcr.io/fughilli/issuefleet:dev
+bazel run //deploy/docker:up       # compose up -d --build (daemon + funnel)
+bazel run //deploy/docker:down     # compose down (workers survive: they're siblings)
+```
+
+CI (`.github/workflows/ci.yml`) tests every push/PR and publishes
+multi-arch (amd64+arm64) images to **ghcr.io/fughilli/issuefleet**
+(`:latest` + `:<sha>`) on pushes to main — so the homelab can skip local
+builds entirely: `docker compose pull issuefleet && docker compose up -d`.
+The GHCR package may need to be made public once (repo → Packages →
+settings) for an anonymous homelab pull, or `docker login ghcr.io` there.
+
 ## Tailscale / Funnel
 
 ```sh

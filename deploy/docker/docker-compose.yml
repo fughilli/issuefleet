@@ -27,6 +27,10 @@ services:
       - NET_RAW
 
   issuefleet:
+    # CI publishes this tag; `docker compose pull issuefleet` gets the
+    # latest without a local build. `up --build` (the bazel :up target)
+    # builds from source instead.
+    image: ghcr.io/fughilli/issuefleet:latest
     build:
       context: ../..                # the issuefleet repo root
       dockerfile: deploy/docker/Dockerfile

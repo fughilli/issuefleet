@@ -1,0 +1,30 @@
+# Runner targets for the homelab stack. These are deliberate `docker ...`
+# wrappers, not hermetic rules_oci builds: the image's apt layer can't be
+# built hermetically without heavy machinery, and wrappers keep
+# `bazel build //...` green on machines without docker (same discipline as
+# Nix targets). They need docker on PATH at *run* time only.
+#
+#   bazel run //deploy/docker:image   # build ghcr.io/fughilli/issuefleet:dev
+#   bazel run //deploy/docker:up      # compose up -d (daemon + tailscale funnel)
+#   bazel run //deploy/docker:down    # compose down
+
+sh_binary(
+    name = "image",
+    srcs = ["image.sh"],
+    data = ["Dockerfile"],
+)
+
+sh_binary(
+    name = "up",
+    srcs = ["up.sh"],
+    data = [
+        "docker-compose.yml",
+        "funnel.json",
+    ],
+)
+
+sh_binary(
+    name = "down",
+    srcs = ["down.sh"],
+    data = ["docker-compose.yml"],
+)
