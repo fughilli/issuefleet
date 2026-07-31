@@ -7,6 +7,7 @@ set -euo pipefail
 cd "${BUILD_WORKSPACE_DIRECTORY:?run via: bazel run //deploy/docker:doctor}/deploy/docker"
 command -v docker >/dev/null 2>&1 || { echo "error: docker not on PATH" >&2; exit 1; }
 source ./env.sh
+issuefleet_preflight
 if docker compose ps --status running issuefleet 2>/dev/null | grep -q issuefleet; then
   exec docker compose exec issuefleet bin/issuefleet --config /etc/issuefleet/config.toml doctor
 fi

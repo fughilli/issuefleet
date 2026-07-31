@@ -30,28 +30,27 @@ workers get empty or wrong bind mounts, with no error at launch time.
 
 ## Host preparation
 
+The tree under `$HOME/.issuefleet` is created automatically by any bazel
+target, and `up`/`doctor` seed the launcher from your PATH and print a
+checklist of anything still missing. What you must provide by hand:
+
 ```sh
 ROOT=$HOME/.issuefleet
-mkdir -p $ROOT/{worktrees,repos,claude-config,state,config,ssh,bin}
 
-# 1. Target repos: clone (SSH remote) under /srv/issuefleet/repos/<name>
+# 1. Target repos: clone (SSH remote) under $ROOT/repos/<name>
 git clone git@github.com:you/yourrepo $ROOT/repos/yourrepo
 
-# 2. The launcher: copy the claude-container script (it is bind-mounted,
-#    not baked in, so launcher upgrades don't need an image rebuild)
-cp ~/Projects/claude-container/bin/claude-container $ROOT/bin/
-
-# 3. Claude credentials for workers: seed the shared config dir (same
-#    content as ~/.config/claude-container/config on your Mac — the OAuth
-#    credentials + settings.json with bypassPermissions)
+# 2. Claude credentials for workers: seed the shared config dir (same
+#    content as ~/.config/claude-container/config — OAuth credentials +
+#    settings.json with bypassPermissions). Never copied automatically.
 cp -r ~/.config/claude-container/config/* $ROOT/claude-config/
 
-# 4. Push key: a deploy key or user key authorized for the target repos
+# 3. Push key: a deploy key or user key authorized for the target repos
 cp <your-key> $ROOT/ssh/id_ed25519
 ssh-keyscan github.com > $ROOT/ssh/known_hosts
-chmod 700 $ROOT/ssh && chmod 600 $ROOT/ssh/id_ed25519
+chmod 600 $ROOT/ssh/id_ed25519
 
-# 5. Config + secrets under $ROOT/config (mounted at /etc/issuefleet):
+# 4. Config + secrets under $ROOT/config (mounted at /etc/issuefleet):
 #    config.toml, linear.key, github_app.pem, *_webhook.secret — chmod 600.
 ```
 
