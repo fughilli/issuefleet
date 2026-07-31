@@ -230,7 +230,7 @@ Claim strategies (`claim.strategy` / `claim.value`):
 | `label` | issue carries the label `value` | label removed, or issue closed |
 | `assignee` | issue assigned to Linear user id `value` | assignee changed, or issue closed |
 | `state` | issue is in workflow state `value` | issue closed (claiming itself moves the state, so state changes can't un-claim) |
-| `agent` | never by polling — only delegation/@-mention claims (no `value` needed) | issue closed |
+| `agent` | issue assigned (delegated) to the agent app user — polled, so it works even with webhooks down; @-mentions claim via webhook | un-assigned, or issue closed |
 | *(agent session)* | issue delegated to / @-mentions the Linear agent (works under any strategy) | issue closed |
 
 With the Linear agent installed, `strategy = "agent"` is the recommended

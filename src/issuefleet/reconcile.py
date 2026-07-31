@@ -362,6 +362,8 @@ class Reconciler:
             return f"label {claim.value!r} was removed"
         if claim.strategy == "assignee" and issue.assignee_id != claim.value:
             return "assignee changed"
+        if claim.strategy == "agent" and issue.assignee_id != self.tracker.get_viewer_id():
+            return "no longer assigned to the agent"
         return None
 
     # ---------------------------------------------------------------- relays

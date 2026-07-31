@@ -142,10 +142,12 @@ class WebhookServer:
 
             def _github(self, body: bytes) -> None:
                 if outer.github_secret is None:
+                    log.warning("github webhook received but no secret configured; rejected")
                     return self._respond(403, "github webhook not configured")
                 if not verify_github_signature(
                     outer.github_secret, body, self.headers.get("X-Hub-Signature-256")
                 ):
+                    log.warning("github webhook rejected: bad signature (secret mismatch?)")
                     return self._respond(401, "bad signature")
                 event = self.headers.get("X-GitHub-Event", "?")
                 log.info("github webhook: %s -> waking reconcile loop", event)
@@ -154,16 +156,21 @@ class WebhookServer:
 
             def _linear(self, body: bytes) -> None:
                 if outer.linear_secret is None:
+                    log.warning("linear webhook received but no secret configured; rejected")
                     return self._respond(403, "linear webhook not configured")
                 if not verify_linear_signature(
                     outer.linear_secret, body, self.headers.get("Linear-Signature")
                 ):
+                    log.warning("linear webhook rejected: bad signature (secret mismatch?)")
                     return self._respond(401, "bad signature")
                 try:
                     payload = json.loads(body)
                 except json.JSONDecodeError:
+                    log.warning("linear webhook rejected: unparseable body")
                     return self._respond(400, "bad json")
                 if not linear_timestamp_fresh(payload):
+                    log.warning("linear webhook rejected: stale timestamp (replay guard; "
+                                "check host clock if this repeats)")
                     return self._respond(401, "stale timestamp")
                 evt = parse_session_event(payload)
                 if evt is not None and outer.on_session is not None:

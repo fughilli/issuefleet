@@ -192,9 +192,9 @@ class AgentSessionTest(unittest.TestCase):
         self.rec.tick()
         self.assertIsNotNone(self.registry.get("issue-1"))
 
-    def test_agent_strategy_disables_poll_claims_but_not_sessions(self):
+    def test_agent_strategy_ignores_labels_but_claims_via_sessions(self):
         self.cfg.projects[0].claim = config.ClaimRule("agent", "")
-        # Labeled or not, nothing is poll-claimed...
+        # Labels mean nothing under the agent strategy...
         self.tracker.add_issue(make_issue(1, labels=["agent"], project_id="proj-splanc"))
         self.rec.tick()
         self.assertIsNone(self.registry.get("issue-1"))
@@ -203,6 +203,22 @@ class AgentSessionTest(unittest.TestCase):
         self.rec.tick()
         self.assertIsNotNone(self.registry.get("issue-1"))
         self.assertEqual(self.registry.get("issue-1").claim_origin, "session")
+
+    def test_agent_strategy_poll_claims_assigned_issues(self):
+        # Webhooks down (dead tunnel): delegation is assignment, and
+        # assignment is pollable — the fleet must not go deaf.
+        self.cfg.projects[0].claim = config.ClaimRule("agent", "")
+        self.tracker.add_issue(
+            make_issue(1, assignee_id=self.tracker.viewer_id, project_id="proj-splanc")
+        )
+        self.rec.tick()  # no session event ever arrives
+        w = self.registry.get("issue-1")
+        self.assertIsNotNone(w)
+        self.assertEqual(w.claim_origin, "poll")
+        # Un-assigning the agent revokes the claim.
+        self.tracker.issues["issue-1"].assignee_id = None
+        self.rec.tick()
+        self.assertIsNone(self.registry.get("issue-1"))
 
     def test_session_attaches_to_already_claimed_worker(self):
         self.tracker.add_issue(make_issue(1, project_id="proj-splanc"))  # labeled

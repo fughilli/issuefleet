@@ -158,7 +158,14 @@ class LinearTracker:
             cursor = conn["pageInfo"]["endCursor"]
 
     def eligible_issues(self, project: ProjectConfig) -> list[Issue]:
-        return [i for i in self.open_issues(project) if project.claim.matches(i)]
+        issues = self.open_issues(project)
+        if project.claim.strategy == "agent":
+            # Delegation IS assignment to the app user, and assignment is
+            # pollable — so a dead webhook tunnel degrades to poll latency
+            # instead of total deafness. (@-mentions remain webhook-only.)
+            me = self.get_viewer_id()
+            return [i for i in issues if i.assignee_id == me]
+        return [i for i in issues if project.claim.matches(i)]
 
     def get_issue(self, issue_id: str) -> Issue | None:
         try:

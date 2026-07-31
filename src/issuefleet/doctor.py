@@ -181,10 +181,13 @@ def _check_linear(cfg: Config, tracker) -> list[Check]:
     for project in cfg.projects:
         try:
             issues = tracker.open_issues(project)
-            eligible = [i for i in issues if project.claim.matches(i)]
             if project.claim.strategy == "agent":
-                claim_desc = "claims via delegation/@-mention only"
+                me = tracker.get_viewer_id()
+                eligible = [i for i in issues if i.assignee_id == me]
+                claim_desc = (f"{len(eligible)} assigned to the agent "
+                              "(also claims via @-mention webhooks)")
             else:
+                eligible = [i for i in issues if project.claim.matches(i)]
                 claim_desc = (f"{len(eligible)} eligible "
                               f"({project.claim.strategy}={project.claim.value!r})")
             out.append(Check(OK, f"[{project.name}] Linear project {project.linear_project!r}",
