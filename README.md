@@ -141,11 +141,17 @@ status/question/PR updates render as native agent-session activities
    `linear_api_key_file`. The daemon then authenticates as the agent
    (Bearer; auto-detected from the `lin_oauth_` prefix).
 
-Webhooks are **mandatory** for the agent platform (Linear requires an
-activity within 10 seconds of a delegation; issuefleet acks immediately
-from the webhook thread, then the claim proceeds on the woken tick). A
-session prompt ("reply to the agent") is routed straight into the worker's
-inbox.
+Webhooks are **strongly recommended** for the agent platform: Linear wants
+an activity within 10 seconds of a delegation, and issuefleet acks
+immediately from the webhook thread, then the claim proceeds on the woken
+tick. But webhooks stay an *accelerator*, not the source of truth — if the
+tunnel is down, delegation is still poll-claimable (delegation is
+assignment, which is pollable), and the worker recovers its agent session
+by **polling** for it (`find_agent_session`) and emitting a catch-up
+activity, so the session view goes live from the next tick instead of
+hanging at "waiting… → agent didn't start." You lose the sub-10-second ack
+and pay poll latency, nothing more. A session prompt ("reply to the agent")
+is webhook-only (not pollable), routed straight into the worker's inbox.
 
 ## Webhooks (push instead of polling)
 

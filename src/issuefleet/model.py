@@ -94,6 +94,7 @@ class WorkerRecord:
     phase: str = PHASE_ACTIVE
     claim_origin: str = "poll"  # "poll" (label/assignee/state rule) | "session"
     agent_session_id: str | None = None  # Linear agent session, if any
+    session_lookup_attempts: int = 0  # poll-side session discovery tries (bounded)
     pr_number: int | None = None
     pr_url: str | None = None
     restarts: int = 0

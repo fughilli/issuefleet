@@ -39,6 +39,12 @@ class Tracker(Protocol):
         elicitation / response / error) into an agent session."""
         ...
 
+    def find_agent_session(self, issue_id: str) -> str | None:
+        """Linear agents platform: id of this app's most-recent still-open
+        agent session on an issue, so a poll-claimed worker (missed webhook)
+        can bind its session. None when there is none / not the app identity."""
+        ...
+
     def resolve_project_id(self, project) -> str:
         """Tracker-native project id for a configured project (used to route
         agent-session claims to the right [[projects]] entry)."""
