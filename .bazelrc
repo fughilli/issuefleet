@@ -3,7 +3,10 @@ common --enable_bzlmod
 common --registry=https://bcr.bazel.build
 
 # Some Bazel/JDK combos emit SVE instructions that SIGILL on certain aarch64
-# hosts; harmless where SVE is absent, so set unconditionally.
+# hosts. UseSVE only EXISTS on aarch64 JVMs — an unrecognized -XX option is
+# fatal at JVM startup (found the hard way on x86_64 CI) — so it must ride
+# behind IgnoreUnrecognizedVMOptions, in this order.
+startup --host_jvm_args=-XX:+IgnoreUnrecognizedVMOptions
 startup --host_jvm_args=-XX:UseSVE=0
 
 # rules_python 2.x requires the script bootstrap under Bazel 8.
