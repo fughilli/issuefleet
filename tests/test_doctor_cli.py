@@ -147,6 +147,37 @@ class LauncherFlagCheckTest(unittest.TestCase):
         self.assertEqual(_check_launcher_flags(self.cfg), [])
 
 
+class CliParserTest(unittest.TestCase):
+    """Global flags must parse in EITHER position — a trailing -v after the
+    subcommand bootlooped the container (usage error -> restart loop)."""
+
+    def parse(self, argv):
+        from issuefleet.cli import build_parser
+
+        return build_parser().parse_args(argv)
+
+    def test_verbose_both_positions(self):
+        self.assertTrue(getattr(self.parse(["run", "-v"]), "verbose", False))
+        self.assertTrue(getattr(self.parse(["-v", "run"]), "verbose", False))
+        self.assertFalse(getattr(self.parse(["run"]), "verbose", False))
+
+    def test_config_both_positions_no_default_clobber(self):
+        # SUPPRESS semantics: a pre-subcommand value must survive the
+        # subparser (argparse parents pitfall).
+        a = self.parse(["--config", "/x.toml", "status"])
+        self.assertEqual(getattr(a, "config"), "/x.toml")
+        a = self.parse(["status", "--config", "/y.toml"])
+        self.assertEqual(getattr(a, "config"), "/y.toml")
+        self.assertFalse(hasattr(self.parse(["status"]), "config"))
+
+    def test_subcommand_own_flags_still_work(self):
+        a = self.parse(["once", "--dry-run", "-v"])
+        self.assertTrue(a.dry_run)
+        self.assertTrue(getattr(a, "verbose", False))
+        a = self.parse(["logs", "FUG-1", "-f"])
+        self.assertTrue(a.follow)
+
+
 class DoctorTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

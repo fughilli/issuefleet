@@ -29,4 +29,4 @@ COPY bin/ bin/
 # Stdlib-only: no pip install. Config is mounted at /root/.config/issuefleet
 # (the default --config location).
 ENV PYTHONUNBUFFERED=1
-CMD ["bin/issuefleet", "run", "-v"]
+CMD ["bin/issuefleet", "-v", "run"]

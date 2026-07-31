@@ -351,41 +351,55 @@ def cmd_github_app_setup(cfg: Config, args) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="issuefleet", description=__doc__)
-    ap.add_argument("--config", default=DEFAULT_CONFIG, help=f"config path (default {DEFAULT_CONFIG})")
-    ap.add_argument("-v", "--verbose", action="store_true")
+def build_parser() -> argparse.ArgumentParser:
+    # Global flags live in a parent attached to the main parser AND every
+    # subparser, so `issuefleet run -v` and `issuefleet -v run` both work —
+    # a trailing -v after the subcommand once bootlooped the container
+    # (usage error -> exit -> restart: unless-stopped). SUPPRESS keeps a
+    # subparser's defaults from clobbering values parsed before the
+    # subcommand; main() reads them via getattr with defaults.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--config", default=argparse.SUPPRESS,
+                        help=f"config path (default {DEFAULT_CONFIG})")
+    common.add_argument("-v", "--verbose", action="store_true", default=argparse.SUPPRESS)
+
+    ap = argparse.ArgumentParser(prog="issuefleet", description=__doc__, parents=[common])
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("doctor", help="verify tooling, credentials, config; show what would be claimed")
-    sub.add_parser("linear-oauth", help="one-time Linear agent (actor=app) install; writes the token")
-    p = sub.add_parser("github-app-setup",
+    sub.add_parser("doctor", parents=[common],
+                   help="verify tooling, credentials, config; show what would be claimed")
+    sub.add_parser("linear-oauth", parents=[common],
+                   help="one-time Linear agent (actor=app) install; writes the token")
+    p = sub.add_parser("github-app-setup", parents=[common],
                        help="create the GitHub App via the manifest flow; writes key + secret")
     p.add_argument("--name", default="issuefleet", help="app name (default: issuefleet)")
     p.add_argument("--org", help="create under this org instead of your user account")
     p.add_argument("--webhook-url", help="public URL for /webhook/github (your tunnel)")
     p.add_argument("--port", type=int, default=9780, help="localhost port for the flow")
-    p = sub.add_parser("once", help="a single reconcile tick (cron-friendly)")
+    p = sub.add_parser("once", parents=[common], help="a single reconcile tick (cron-friendly)")
     p.add_argument("--dry-run", action="store_true", help="log would-be actions; mutate nothing")
-    sub.add_parser("run", help="the daemon")
-    sub.add_parser("status", help="fleet state")
+    sub.add_parser("run", parents=[common], help="the daemon")
+    sub.add_parser("status", parents=[common], help="fleet state")
     for name, help_ in (
         ("attach", "attach to a worker's tmux session"),
         ("stop", "wind one worker down"),
     ):
-        p = sub.add_parser(name, help=help_)
+        p = sub.add_parser(name, parents=[common], help=help_)
         p.add_argument("issue", help="issue key, e.g. FUG-12")
-    p = sub.add_parser("logs", help="show a worker's output")
+    p = sub.add_parser("logs", parents=[common], help="show a worker's output")
     p.add_argument("issue")
     p.add_argument("-f", "--follow", action="store_true")
+    return ap
 
-    args = ap.parse_args(argv)
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
+        level=logging.DEBUG if getattr(args, "verbose", False) else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    config_path = Path(args.config).expanduser()
+    config_path = Path(getattr(args, "config", DEFAULT_CONFIG)).expanduser()
     if args.cmd == "doctor":
         return run_doctor(config_path)
     try:
