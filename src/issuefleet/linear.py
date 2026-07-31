@@ -240,6 +240,126 @@ class LinearTracker:
     def resolve_project_id(self, project: ProjectConfig) -> str:
         return self._project_id(project.linear_project)
 
+    # -- issue authoring ---------------------------------------------------
+
+    def team_for_issue(self, issue_id: str) -> str:
+        """Team UUID of an existing issue (cached; fetches the issue if cold).
+        Used to default the destination team when the bot files new issues."""
+        team_id = self._issue_team.get(issue_id)
+        if team_id is None:
+            issue = self.get_issue(issue_id)
+            if issue is None:
+                raise LinearError(f"issue {issue_id} not found while resolving its team")
+            team_id = self._issue_team[issue_id]
+        return team_id
+
+    def _resolve_team_id(self, ref: str) -> str:
+        if len(ref) == 36 and ref.count("-") == 4:
+            return ref  # already a UUID
+        data = self.client.graphql(
+            """query($ref: String!) {
+                 teams(filter: {or: [{name: {eq: $ref}}, {key: {eq: $ref}}]}) {
+                   nodes { id name key }
+                 }
+               }""",
+            {"ref": ref},
+        )
+        nodes = data["teams"]["nodes"]
+        if not nodes:
+            raise LinearError(f"no Linear team named (or keyed) {ref!r}")
+        if len(nodes) > 1:
+            raise LinearError(f"multiple Linear teams match {ref!r}; use the UUID")
+        return nodes[0]["id"]
+
+    def _label_ids(self, team_id: str, names: list[str]) -> tuple[list[str], list[str]]:
+        """Map label names to ids for a team. Returns (ids, unresolved names);
+        unknown labels are reported, never fatal — filing the issue matters
+        more than a missing tag the operator can add on review."""
+        if not names:
+            return [], []
+        data = self.client.graphql(
+            """query($id: String!) {
+                 team(id: $id) { labels { nodes { id name } } }
+               }""",
+            {"id": team_id},
+        )
+        by_name = {n["name"].lower(): n["id"] for n in data["team"]["labels"]["nodes"]}
+        ids, unknown = [], []
+        for name in names:
+            lid = by_name.get(name.lower())
+            (ids.append(lid) if lid else unknown.append(name))
+        return ids, unknown
+
+    def find_issue_by_marker(self, needle: str) -> Issue | None:
+        """Look for an existing issue whose description carries this marker,
+        so a create that landed but wasn't acked (crash mid-relay) isn't
+        filed twice. Best-effort: if the backend rejects the content filter we
+        return None and let the caller proceed (a stray duplicate is trivially
+        deleted; a wedged relay is not)."""
+        try:
+            data = self.client.graphql(
+                "query($n: String!) { issues(filter: {description: {contains: $n}}, first: 1)"
+                " { nodes { %s } } }" % _ISSUE_FIELDS,
+                {"n": needle},
+            )
+        except (LinearError, ApiError):
+            log.warning("issue-marker dedupe probe failed; proceeding without it", exc_info=True)
+            return None
+        nodes = data["issues"]["nodes"]
+        return _to_issue(nodes[0]) if nodes else None
+
+    def create_issue(
+        self,
+        *,
+        title: str,
+        description: str = "",
+        priority: int | None = None,
+        labels: list[str] | None = None,
+        team: str | None = None,
+        project: str | None = None,
+        use_context_project: bool = True,
+        context_issue_id: str | None = None,
+    ) -> tuple[Issue, list[str]]:
+        """File a new Linear issue. team/project default to those of
+        ``context_issue_id`` (the issue the worker was delegated) so the bot
+        drops new tickets alongside the one it was asked from. Returns the
+        created Issue and any label names that didn't resolve."""
+        if team is not None:
+            team_id = self._resolve_team_id(team)
+        elif context_issue_id is not None:
+            team_id = self.team_for_issue(context_issue_id)
+        else:
+            raise LinearError("create_issue needs a team (no context issue to inherit one from)")
+
+        project_id: str | None = None
+        if project is not None:
+            project_id = self._project_id(project)
+        elif use_context_project and context_issue_id is not None:
+            src = self.get_issue(context_issue_id)
+            project_id = src.project_id if src else None
+
+        label_ids, unknown = self._label_ids(team_id, labels or [])
+
+        inp: dict = {"teamId": team_id, "title": title, "description": description}
+        if priority is not None:
+            inp["priority"] = priority
+        if project_id is not None:
+            inp["projectId"] = project_id
+        if label_ids:
+            inp["labelIds"] = label_ids
+
+        data = self.client.graphql(
+            "mutation($input: IssueCreateInput!) {"
+            " issueCreate(input: $input) { success issue { %s } } }" % _ISSUE_FIELDS,
+            {"input": inp},
+        )
+        result = data["issueCreate"]
+        if not result["success"] or not result.get("issue"):
+            raise LinearError(f"issueCreate for {title!r} reported failure")
+        node = result["issue"]
+        self._issue_team[node["id"]] = node["team"]["id"]
+        return _to_issue(node), unknown
+
     # -- workflow states ---------------------------------------------------
 
     def _states_for_issue(self, issue_id: str) -> dict[str, str]:

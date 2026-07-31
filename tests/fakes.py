@@ -38,7 +38,12 @@ class FakeTracker:
         self.fail_next_post = 0  # countdown of post_comment calls to fail
         self.fail_get_issue: set[str] = set()  # issue_ids whose get_issue raises
         self.activities: list[tuple[str, dict]] = []  # (session_id, content)
+        self.created: list[dict] = []  # issueCreate inputs the bot filed
+        self.issue_team: dict[str, str] = {}  # issue_id -> team_id
+        self.team_labels: dict[str, dict[str, str]] = {}  # team_id -> {name: id}
+        self.fail_next_create = 0
         self._comment_seq = 0
+        self._created_seq = 0
 
     def add_issue(self, issue: Issue) -> Issue:
         self.issues[issue.id] = issue
@@ -113,6 +118,54 @@ class FakeTracker:
 
     def resolve_project_id(self, project) -> str:
         return project.linear_project
+
+    def team_for_issue(self, issue_id: str) -> str:
+        return self.issue_team.get(issue_id, "team-1")
+
+    def find_issue_by_marker(self, needle: str) -> Issue | None:
+        for i in self.issues.values():
+            if needle in (i.description or ""):
+                return i
+        return None
+
+    def create_issue(self, *, title, description="", priority=None, labels=None,
+                      team=None, project=None, use_context_project=True,
+                      context_issue_id=None):
+        if self.fail_next_create > 0:
+            self.fail_next_create -= 1
+            raise ConnectionError("fake Linear outage on create_issue")
+        team_id = team or (self.team_for_issue(context_issue_id) if context_issue_id else None)
+        if team_id is None:
+            raise ValueError("no team for create_issue")
+        known = self.team_labels.get(team_id, {})
+        unknown = [n for n in (labels or []) if n.lower() not in known]
+        if project is not None:
+            project_id = project
+        elif use_context_project and context_issue_id:
+            src = self.issues.get(context_issue_id)
+            project_id = src.project_id if src else None
+        else:
+            project_id = None
+        self._created_seq += 1
+        n = self._created_seq
+        issue = Issue(
+            id=f"new-{n}",
+            key=f"FUG-{100 + n}",
+            title=title,
+            description=description,
+            url=f"https://linear.app/x/issue/FUG-{100 + n}",
+            priority=priority or 0,
+            state_name="Todo",
+            state_type="unstarted",
+            project_id=project_id,
+        )
+        self.issues[issue.id] = issue
+        self.issue_team[issue.id] = team_id
+        self.created.append({
+            "title": title, "description": description, "priority": priority,
+            "labels": labels or [], "team": team_id, "project_id": project_id,
+        })
+        return issue, unknown
 
 
 class FakeForge:

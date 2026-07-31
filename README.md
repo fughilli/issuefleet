@@ -24,19 +24,30 @@ get none.**
 │   GitHub REST    ◄── (dedup'd) ──┤            │      │           │                      │
 │   git push (SSH) ◄───────────────┤            │      │           ▼ agentctl             │
 │                                  │            │      │   <worktree>/.agent/mailbox/     │
-│   registry.json (durable fleet state)         │◄─────┼── outbox/ status|question|ready  │
+│   registry.json (durable fleet state)         │◄─────┼── outbox/ status|question|ready| │
+│                                               │      │           file_issue             │
 │   inbox writes ──────────────────────────────►│──────┼─► inbox/  reply|pr_feedback|...  │
 └───────────────────────────────────────────────┘      └──────────────────────────────────┘
 ```
 
 A worker's **only** channel to the world is a filesystem mailbox inside its
-worktree: it writes `status` / `question` / `ready` JSON messages to an
-outbox; the orchestrator polls those and performs the credentialed act
-(post a Linear comment, push the branch, open the PR). Inbound Linear
-comments and PR review feedback are written to the worker's inbox and
-injected into its next turn. Agents commit freely — a linked worktree's
-objects land in the shared `.git` on the host — but nothing leaves the
-machine until the orchestrator pushes it.
+worktree: it writes `status` / `question` / `ready` / `file_issue` JSON
+messages to an outbox; the orchestrator polls those and performs the
+credentialed act (post a Linear comment, push the branch, open the PR, or
+**file a new Linear issue**). Inbound Linear comments and PR review feedback
+are written to the worker's inbox and injected into its next turn. Agents
+commit freely — a linked worktree's objects land in the shared `.git` on the
+host — but nothing leaves the machine until the orchestrator pushes it.
+
+**Authoring issues.** Delegate (or @-mention) the bot on an issue such as
+"turn the WORKLOG backlog into tickets"; the worker reads the source, then
+calls `agentctl file-issue --title … --description-file …` once per ticket.
+The orchestrator files each on Linear — in the delegated issue's team and
+project by default (`--team` / `--project` / `--no-project` to steer),
+optionally with `--priority 0-4` and repeatable `--label` — and hands the new
+key/url back to the worker so it can summarize what it filed. You then
+review/assign the tickets. Creation is deduped by a marker embedded in the
+new issue's description, so a crash mid-relay can't file a duplicate.
 
 Relaying is at-least-once with explicit dedupe: every posted comment embeds
 an HTML-comment marker (`<!-- issuefleet:msg:<id> -->`); before posting, the

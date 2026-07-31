@@ -104,6 +104,73 @@ class LinearClientTest(unittest.TestCase):
         tracker.set_state("i1", "in progress")  # case-insensitive
         self.assertEqual(t.calls[1]["payload"]["variables"], {"id": "i1", "state": "s1"})
 
+    def _created_node(self, **kw):
+        node = {
+            "id": "new-1",
+            "identifier": "FUG-99",
+            "title": "Broke out of WORKLOG",
+            "description": None,
+            "url": "https://linear.app/x/issue/FUG-99",
+            "priority": 2,
+            "createdAt": "2026-07-31T00:00:00.000Z",
+            "state": {"name": "Todo", "type": "unstarted"},
+            "labels": {"nodes": []},
+            "assignee": None,
+            "team": {"id": "team-1"},
+            "project": {"id": "proj-1"},
+        }
+        node.update(kw)
+        return node
+
+    def test_create_issue_inherits_team_and_project_from_context(self):
+        t = RecordingTransport(
+            [
+                # get_issue for the context project id (resolved first)
+                {"data": {"issue": self._created_node(id="ctx", identifier="FUG-1")}},
+                # team labels lookup (one label requested)
+                {"data": {"team": {"labels": {"nodes": [{"id": "l1", "name": "backlog"}]}}}},
+                {"data": {"issueCreate": {"success": True, "issue": self._created_node()}}},
+            ]
+        )
+        tracker = LinearTracker(LinearClient("k", transport=t))
+        tracker._issue_team["ctx"] = "team-1"  # context issue's team already known
+        issue, unknown = tracker.create_issue(
+            title="Broke out of WORKLOG",
+            description="body <!-- issuefleet:msg:abc -->",
+            priority=2,
+            labels=["backlog", "nope"],
+            context_issue_id="ctx",
+        )
+        self.assertEqual(issue.key, "FUG-99")
+        self.assertEqual(unknown, ["nope"])  # unresolved label reported, not fatal
+        inp = t.calls[-1]["payload"]["variables"]["input"]
+        self.assertEqual(inp["teamId"], "team-1")
+        self.assertEqual(inp["projectId"], "proj-1")  # inherited from context issue
+        self.assertEqual(inp["priority"], 2)
+        self.assertEqual(inp["labelIds"], ["l1"])
+        self.assertIn("issuefleet:msg:abc", inp["description"])
+
+    def test_create_issue_no_project_omits_project_id(self):
+        t = RecordingTransport(
+            [{"data": {"issueCreate": {"success": True, "issue": self._created_node()}}}]
+        )
+        tracker = LinearTracker(LinearClient("k", transport=t))
+        tracker._issue_team["ctx"] = "team-1"
+        tracker.create_issue(
+            title="T", context_issue_id="ctx", use_context_project=False
+        )
+        inp = t.calls[-1]["payload"]["variables"]["input"]
+        self.assertNotIn("projectId", inp)
+        self.assertNotIn("priority", inp)
+        self.assertNotIn("labelIds", inp)
+
+    def test_find_issue_by_marker_returns_none_when_probe_unsupported(self):
+        # Backend rejects the content filter -> best-effort probe yields None
+        # so the caller proceeds rather than wedging the relay.
+        t = RecordingTransport([{"errors": [{"message": "unsupported filter"}]}])
+        tracker = LinearTracker(LinearClient("k", transport=t))
+        self.assertIsNone(tracker.find_issue_by_marker("issuefleet:msg:abc"))
+
 
 class GithubForgeTest(unittest.TestCase):
     def test_parse_repo_slug_forms(self):

@@ -49,6 +49,20 @@ end-to-end flow — `docs/SMOKE_TEST.md` is the step-by-step procedure.
 - Dry-run is implemented as `Reconciler.plan()` (API reads, zero writes)
   rather than no-op client wrappers — simpler and honestly side-effect-free.
 
+## Recent additions
+
+- **FUG-13 — bot authors Linear issues** (branch `agent/fug-13-…`): new
+  `agentctl file-issue` outbox verb → `Reconciler._handle_file_issue` →
+  `LinearTracker.create_issue` (`issueCreate`). New tickets inherit the
+  delegated issue's team & project by default (`--team`/`--project`/
+  `--no-project`/`--priority`/`--label` to steer); the new key/url is sent
+  back to the worker as an `info` notice so it can summarize. Deduped by a
+  marker embedded in the new issue's description (`find_issue_by_marker`,
+  best-effort — degrades to at-least-once if the backend rejects the content
+  filter). Offline-tested (mailbox/clients/reconcile/fakes). **Unverified
+  live:** the `issues(filter:{description:{contains}})` dedupe probe shape and
+  `IssueCreateInput` field names against the real API — confirm on first run.
+
 ## Next up
 
 1. Smoke test (operator's Mac, 2026-07-29): **happy path verified live
