@@ -117,6 +117,7 @@ bazel run //deploy/docker:status    # fleet: phase, turns, PR, liveness, last ac
 bazel run //deploy/docker:logs      # follow the reconcile-loop log (ticks/claims/relays)
 bazel run //deploy/docker:doctor    # health checks
 bazel run //deploy/docker:attach -- FUG-14   # a worker's live tmux (detach: Ctrl-b d)
+bazel run //deploy/docker:stop -- FUG-14     # wind one worker down by hand
 docker compose logs -f issuefleet                                           # daemon log
 ```
 

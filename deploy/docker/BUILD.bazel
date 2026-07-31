@@ -68,3 +68,12 @@ sh_binary(
         "env.sh",
     ],
 )
+
+sh_binary(
+    name = "stop",
+    srcs = ["stop.sh"],
+    data = [
+        "docker-compose.yml",
+        "env.sh",
+    ],
+)
