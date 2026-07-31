@@ -88,7 +88,7 @@ class Config:
     state_dir: Path = Path("~/.local/state/issuefleet").expanduser()
     worktree_root: Path = Path("~/worktrees").expanduser()
     # agent behavior
-    max_auto_turns: int = 40
+    max_auto_turns: int = 50
     max_restarts: int = 3
     claude_args: list[str] = field(default_factory=list)
     # Workspace-local state copied from the parent checkout into each fresh
@@ -233,7 +233,7 @@ def parse(data: dict, source: str = "<config>") -> Config:
         projects=projects,
         poll_interval_s=int(daemon.get("poll_interval_s", 60)),
         max_workers=int(daemon.get("max_workers", 4)),
-        max_auto_turns=int(agent.get("max_auto_turns", 40)),
+        max_auto_turns=int(agent.get("max_auto_turns", 50)),
         max_restarts=int(agent.get("max_restarts", 3)),
         claude_args=list(agent.get("claude_args", [])),
         copy_from_repo=list(

@@ -199,7 +199,7 @@ github_secret_file = "~/.config/issuefleet/github_webhook.secret"
 linear_secret_file = "~/.config/issuefleet/linear_webhook.secret"
 
 [agent]
-max_auto_turns = 40          # self-driven turns without human contact (the runaway brake)
+max_auto_turns = 50          # self-driven turns without human contact (the runaway brake)
 max_restarts = 3             # crash restarts before giving up
 claude_args = []             # extra flags for every `claude -p` turn
 claude_container = "claude-container"      # launcher binary
