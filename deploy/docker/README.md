@@ -134,6 +134,11 @@ workers' *containers* — but note the tmux caveat below.
 
 ## Known edges (read before relying on it)
 
+- **HOME must be writable by the operator uid.** The config bind-mount
+  makes `/home/fleet/.config` root-owned; the entrypoint chowns HOME +
+  .config to the runtime uid so the launcher can write its own state
+  (`~/.config/claude-container`). Found live: the launcher failed with
+  'mkdir: cannot create /home/fleet/.config/claude-container'.
 - **The daemon must not run as root** (found live: the launcher
   propagates the daemon's uid to workers, and claude refuses
   bypassPermissions as root — every turn fails instantly). The compose

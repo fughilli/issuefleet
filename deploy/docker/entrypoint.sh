@@ -13,6 +13,11 @@ fi
 if ! getent group "${ISSUEFLEET_GID}" >/dev/null 2>&1; then
   echo "fleet:x:${ISSUEFLEET_GID}:" >> /etc/group
 fi
+# HOME and .config must be writable by the operator uid: the config
+# bind-mount creates .config as root, but the launcher writes its own
+# state to HOME/.config/claude-container. chown the dirs (not the
+# read-only mount inside .config) to the target uid.
+chown "${ISSUEFLEET_UID}:${ISSUEFLEET_GID}" /home/fleet /home/fleet/.config 2>/dev/null || true
 SOCK=/var/run/docker.sock
 sock_gid=0
 if [ -S "$SOCK" ]; then

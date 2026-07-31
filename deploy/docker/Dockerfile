@@ -26,7 +26,10 @@ RUN apt-get update \
 # as root, which broke every worker turn when the launcher propagated uid
 # 0. entrypoint.sh (root) makes the docker socket usable, then setprivs
 # down to ISSUEFLEET_UID/GID. Any-uid writable home for that user:
-RUN mkdir -p /home/fleet && chmod 1777 /home/fleet
+# Pre-create HOME and .config so the read-only config bind-mount doesn't
+# leave a root-owned .config the launcher (running as the operator uid)
+# can't write its own state into. entrypoint chowns them to that uid.
+RUN mkdir -p /home/fleet/.config
 ENV HOME=/home/fleet
 COPY deploy/docker/entrypoint.sh /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
