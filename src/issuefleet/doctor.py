@@ -258,16 +258,30 @@ def _check_github(cfg: Config, git: Gitops, forges: dict | None) -> list[Check]:
     for project in cfg.projects:
         name = project.name
         have_clone = git.is_repo(project.repo)
+        checkout = project.local_checkout
+        use_checkout = not have_clone and checkout is not None and git.is_repo(checkout)
         if not have_clone:
-            if not project.git_url:
+            if use_checkout:
+                out.append(Check(WARN, f"[{name}] repo {project.repo}",
+                                 f"missing — will be symlinked to {checkout} on first run. "
+                                 "NOTE: the target must be visible at the same path where "
+                                 "the daemon runs; containerized deployments should prefer "
+                                 "git_url"))
+            elif project.git_url:
+                out.append(Check(WARN, f"[{name}] repo {project.repo}",
+                                 f"missing — will be cloned from {project.git_url} on first run"))
+            else:
                 out.append(Check(FAIL, f"[{name}] repo {project.repo}",
-                                 "does not exist and no git_url is configured — the daemon "
-                                 "can bootstrap it if you add git_url to the project"))
+                                 "does not exist — add git_url (clone) or local_checkout "
+                                 "(symlink) so the daemon can bootstrap it"))
                 continue
-            out.append(Check(WARN, f"[{name}] repo {project.repo}",
-                             f"missing — will be cloned from {project.git_url} on first run"))
         try:
-            remote = git.remote_url(project.repo) if have_clone else project.git_url
+            if have_clone:
+                remote = git.remote_url(project.repo)
+            elif use_checkout:
+                remote = git.remote_url(checkout)
+            else:
+                remote = project.git_url
             slug = parse_repo_slug(remote)
             out.append(Check(OK, f"[{name}] origin", f"{remote} -> {slug}"))
         except Exception as e:

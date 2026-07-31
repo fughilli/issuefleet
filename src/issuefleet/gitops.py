@@ -17,6 +17,7 @@ handles the nested-worktree case where the main checkout is itself linked.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from pathlib import Path
 
@@ -34,6 +35,37 @@ def _git(args: list[str], cwd: Path | None = None) -> str:
     if proc.returncode != 0:
         raise GitError(f"git {' '.join(args)} failed ({proc.returncode}): {proc.stderr.strip()}")
     return proc.stdout.strip()
+
+
+def ensure_checkout(git: "Gitops", project) -> str | None:
+    """Bootstrap a project's main checkout at daemon startup (never doctor —
+    it must stay side-effect-free). Returns a description of what was done,
+    or None if the repo was already in place. Raises GitError on dead ends.
+
+    Order: existing repo wins; then a symlink to local_checkout; then a
+    clone from git_url."""
+    repo = Path(project.repo)
+    if git.is_repo(repo):
+        return None
+    if repo.is_symlink() and not repo.exists():
+        raise GitError(
+            f"{repo} is a symlink to a missing target "
+            f"({os.readlink(repo)}); remove or fix it"
+        )
+    if project.local_checkout is not None and git.is_repo(project.local_checkout):
+        repo.parent.mkdir(parents=True, exist_ok=True)
+        repo.symlink_to(Path(project.local_checkout).resolve())
+        return f"symlinked to local checkout {project.local_checkout}"
+    if project.git_url:
+        git.clone(project.git_url, repo)
+        suffix = ""
+        if project.local_checkout is not None:
+            suffix = f" (local_checkout {project.local_checkout} not found)"
+        return f"cloned from {project.git_url}{suffix}"
+    raise GitError(
+        f"{repo} does not exist and the project has neither a usable "
+        "local_checkout nor a git_url to bootstrap from"
+    )
 
 
 class Gitops:

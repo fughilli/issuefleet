@@ -124,6 +124,13 @@ class ConfigTest(unittest.TestCase):
         data = {"projects": [dict(MINIMAL["projects"][0], git_url="git@github.com:a/b.git")]}
         self.assertEqual(config.parse(data).projects[0].git_url, "git@github.com:a/b.git")
 
+    def test_local_checkout_optional_and_expanded(self):
+        self.assertIsNone(config.parse(MINIMAL).projects[0].local_checkout)
+        data = {"projects": [dict(MINIMAL["projects"][0], local_checkout="~/Projects/x")]}
+        lc = config.parse(data).projects[0].local_checkout
+        self.assertNotIn("~", str(lc))
+        self.assertTrue(str(lc).endswith("Projects/x"))
+
     def test_launcher_args_default_and_override(self):
         self.assertEqual(config.parse(MINIMAL).launcher_args, ["--skills-ignore-new"])
         data = dict(MINIMAL)

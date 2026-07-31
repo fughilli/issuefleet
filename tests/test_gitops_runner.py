@@ -125,6 +125,50 @@ class GitopsTest(unittest.TestCase):
         self.assertTrue((dest / "README.md").is_file())
         self.assertEqual(self.git.remote_url(dest), str(self.origin))
 
+    def _project(self, repo, git_url=None, local_checkout=None):
+        from issuefleet.config import ClaimRule, ProjectConfig
+
+        return ProjectConfig(
+            name="p", linear_project="P", repo=Path(repo),
+            claim=ClaimRule("agent", ""), git_url=git_url,
+            local_checkout=Path(local_checkout) if local_checkout else None,
+        )
+
+    def test_ensure_checkout_symlinks_local_checkout(self):
+        from issuefleet.gitops import ensure_checkout
+
+        link = Path(self.tmp.name) / "root" / "repos" / "p"
+        action = ensure_checkout(self.git, self._project(link, local_checkout=self.repo))
+        self.assertIn("symlinked", action)
+        self.assertTrue(link.is_symlink())
+        self.assertTrue(self.git.is_repo(link))
+        # Idempotent: an existing (symlinked) repo is a no-op.
+        self.assertIsNone(ensure_checkout(self.git, self._project(link, local_checkout=self.repo)))
+
+    def test_ensure_checkout_falls_back_to_clone(self):
+        from issuefleet.gitops import ensure_checkout
+
+        dest = Path(self.tmp.name) / "root" / "repos" / "q"
+        action = ensure_checkout(
+            self.git,
+            self._project(dest, git_url=str(self.origin),
+                          local_checkout=Path(self.tmp.name) / "nope"),
+        )
+        self.assertIn("cloned", action)
+        self.assertIn("not found", action)  # says why the checkout wasn't used
+        self.assertTrue(self.git.is_repo(dest))
+        self.assertFalse(dest.is_symlink())
+
+    def test_ensure_checkout_dead_ends_raise(self):
+        from issuefleet.gitops import ensure_checkout
+
+        with self.assertRaisesRegex(GitError, "neither"):
+            ensure_checkout(self.git, self._project(Path(self.tmp.name) / "missing"))
+        broken = Path(self.tmp.name) / "broken"
+        broken.symlink_to(Path(self.tmp.name) / "gone")
+        with self.assertRaisesRegex(GitError, "missing target"):
+            ensure_checkout(self.git, self._project(broken, git_url=str(self.origin)))
+
 
 @unittest.skipIf(shutil.which("tmux") is None, "tmux not available")
 class TmuxRunnerTest(unittest.TestCase):

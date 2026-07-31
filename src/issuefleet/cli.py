@@ -19,6 +19,7 @@ from issuefleet import creds
 from issuefleet.config import Config, ConfigError
 from issuefleet.doctor import run_doctor
 from issuefleet.github import GithubForge, parse_repo_slug
+from issuefleet import gitops as gitops_mod
 from issuefleet.gitops import Gitops
 from issuefleet.linear import LinearClient, LinearTracker
 from issuefleet.mailbox import Mailbox
@@ -37,14 +38,12 @@ def build_stack(cfg: Config) -> Reconciler:
     tracker = LinearTracker(LinearClient(linear_key, auth=cfg.linear_auth))
     git = Gitops()
     for project in cfg.projects:
-        if not git.is_repo(project.repo):
-            if not project.git_url:
-                raise SystemExit(
-                    f"[{project.name}] repo {project.repo} does not exist and no "
-                    "git_url is configured to clone it from"
-                )
-            log.info("[%s] cloning %s -> %s", project.name, project.git_url, project.repo)
-            git.clone(project.git_url, project.repo)
+        try:
+            action = gitops_mod.ensure_checkout(git, project)
+            if action:
+                log.info("[%s] %s -> %s", project.name, project.repo, action)
+        except gitops_mod.GitError as e:
+            raise SystemExit(f"[{project.name}] {e}")
     if creds.github_auth_mode(cfg) == "app":
         from issuefleet.githubapp import AppTokenProvider
 

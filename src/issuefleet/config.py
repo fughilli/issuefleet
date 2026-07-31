@@ -55,6 +55,11 @@ class ProjectConfig:
     # SSH remote to clone from when `repo` doesn't exist yet — the daemon
     # bootstraps the checkout itself. Without it, a missing repo is an error.
     git_url: str | None = None
+    # An existing checkout elsewhere on this machine: `repo` becomes a
+    # symlink to it instead of a clone. Wins over git_url when it exists.
+    # (Container caveat: the target must be visible at the same path where
+    # the daemon runs — for the compose stack, prefer git_url.)
+    local_checkout: Path | None = None
     base_ref: str = "main"
     branch_template: str = "agent/{key}-{slug}"
     state_in_progress: str = "In Progress"
@@ -204,6 +209,7 @@ def parse(data: dict, source: str = "<config>") -> Config:
                 repo=_path(p["repo"]),
                 claim=ClaimRule(strategy=strategy, value=claim_raw.get("value", "")),
                 git_url=p.get("git_url"),
+                local_checkout=_path(p["local_checkout"]) if p.get("local_checkout") else None,
                 base_ref=p.get("base_ref", "main"),
                 branch_template=p.get("branch_template", "agent/{key}-{slug}"),
                 state_in_progress=p.get("state_in_progress", "In Progress"),
