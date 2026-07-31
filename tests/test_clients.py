@@ -88,7 +88,7 @@ class LinearClientTest(unittest.TestCase):
         self.assertEqual(issues[0].labels, ["agent"])
         self.assertEqual(issues[0].description, "")  # None normalized
         # Second page passed the cursor.
-        self.assertEqual(t.calls[2]["payload"]["variables"]["after"], "c1")
+        self.assertEqual(t.calls[3]["payload"]["variables"]["after"], "c1")
 
     def test_issue_fields_adapt_to_schema(self):
         # Workspace WITH Issue.delegate: field included, mapped through.
