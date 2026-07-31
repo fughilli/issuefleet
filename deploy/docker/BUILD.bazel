@@ -59,3 +59,12 @@ sh_binary(
         "env.sh",
     ],
 )
+
+sh_binary(
+    name = "attach",
+    srcs = ["attach.sh"],
+    data = [
+        "docker-compose.yml",
+        "env.sh",
+    ],
+)
