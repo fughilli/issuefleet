@@ -20,3 +20,6 @@ credentials/
 
 # Operator-dropped artifacts
 *.zip
+
+# Creds
+deploy/docker/.env

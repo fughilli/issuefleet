@@ -61,14 +61,14 @@ chmod 600 $ROOT/ssh/id_ed25519
 state_dir = "${ISSUEFLEET_ROOT}/state"
 worktree_root = "${ISSUEFLEET_ROOT}/worktrees"   # same-path invariant
 [credentials]
-linear_api_key_file = "/etc/issuefleet/linear.key"
-github_app_key_file = "/etc/issuefleet/github_app.pem"
+linear_api_key_file = "${ISSUEFLEET_ROOT}/config/linear.key"
+github_app_key_file = "${ISSUEFLEET_ROOT}/config/github_app.pem"
 [agent]
 container_config_dir = "${ISSUEFLEET_ROOT}/claude-config"   # same-path invariant
 [webhooks]
 enabled = true                                    # bind stays 127.0.0.1
-github_secret_file = "/etc/issuefleet/github_webhook.secret"
-linear_secret_file = "/etc/issuefleet/linear_webhook.secret"
+github_secret_file = "${ISSUEFLEET_ROOT}/config/github_webhook.secret"
+linear_secret_file = "${ISSUEFLEET_ROOT}/config/linear_webhook.secret"
 [[projects]]
 repo = "${ISSUEFLEET_ROOT}/repos/yourrepo"
 # ...

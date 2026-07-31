@@ -57,8 +57,12 @@ services:
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/repos:${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/repos
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/claude-config:${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/claude-config
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/state:${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/state
-      # Operator-provided pieces (container-side paths fixed; path-free):
-      - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/config:/etc/issuefleet:ro   # config.toml + keys
+      # Operator-provided pieces:
+      # config twice: at /etc/issuefleet (stable CMD path) AND same-path,
+      # so config.toml can reference secrets as ${ISSUEFLEET_ROOT}/config/...
+      # identically on a laptop and in here.
+      - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/config:/etc/issuefleet:ro
+      - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/config:${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/config:ro
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/ssh:/root/.ssh:ro           # push key + known_hosts
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/bin/claude-container:/usr/local/bin/claude-container:ro
 
