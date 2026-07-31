@@ -191,6 +191,15 @@ def cmd_run(cfg: Config) -> int:
         log.info("daemon up: %d project(s), poll every %ds%s",
                  len(cfg.projects), cfg.poll_interval_s,
                  " + webhook wake-ups" if server else "")
+        from issuefleet.model import PHASE_CRASHED
+
+        crashed = [w.issue_key for w in reconciler.registry.all() if w.phase == PHASE_CRASHED]
+        if crashed:
+            log.warning(
+                "holding %d CRASHED worker(s), not auto-restarting: %s — worktrees kept "
+                "for inspection; release with 'issuefleet stop <KEY>' and re-delegate",
+                len(crashed), ", ".join(crashed),
+            )
         try:
             while not stop["flag"]:
                 wake.clear()
