@@ -28,6 +28,12 @@ services:
     volumes:
       - ts-state:/var/lib/tailscale
       - ./funnel.json:/config/funnel.json:ro
+    # Host-loopback publish of the webhook listener (which lives in this
+    # netns): lets a HOST-side tunnel (e.g. the laptop's `tailscale funnel
+    # 8787`) keep serving existing webhook URLs during migration. Loopback
+    # only — never exposed off-box; the sidecar's own Funnel needs no port.
+    ports:
+      - "127.0.0.1:8787:8787"
     devices:
       - /dev/net/tun:/dev/net/tun
     cap_add:

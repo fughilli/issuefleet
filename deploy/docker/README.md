@@ -104,6 +104,13 @@ docker compose up -d
 docker compose exec tailscale tailscale funnel status
 ```
 
+The listener binds loopback INSIDE the shared network namespace — the
+sidecar's Funnel reaches it via 127.0.0.1 directly (no 0.0.0.0, no port
+exposure). The `127.0.0.1:8787:8787` publish on the tailscale service is
+for migration only: it lets a host-side tunnel with already-registered
+webhook URLs keep working until you repoint them at this stack's funnel
+host.
+
 Funnel must be allowed for your tailnet (the admin console prompts once).
 Your public webhook base is `https://issuefleet.<tailnet>.ts.net` — put
 `…/webhook/github` in the GitHub App's webhook settings and
