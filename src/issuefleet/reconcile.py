@@ -488,14 +488,24 @@ class Reconciler:
         push_url, push_auth = forge.push_spec()
         self.git.push(Path(rec.worktree), rec.branch, url=push_url, auth_header=push_auth)
 
+        # `agentctl ready --new-pr`: the existing PR's identity is tainted
+        # (opened under a wrong premise, messy history). Close it and open a
+        # fresh one instead of updating in place.
+        new_pr = bool(msg.payload.get("new_pr"))
+        if new_pr:
+            for existing in (rec.pr_number, getattr(forge.find_pr(rec.branch), "number", None)):
+                if existing:
+                    forge.close_pr(existing)
+            rec.pr_number = None
+
         pr = None
-        if rec.pr_number is not None:
+        if not new_pr and rec.pr_number is not None:
             pr = forge.get_pr(rec.pr_number)
             if pr.state == "open":
                 forge.update_pr(pr.number, title, body_full)
             else:
                 pr = None
-        if pr is None:
+        if not new_pr and pr is None:
             pr = forge.find_pr(rec.branch)
             if pr is not None:
                 forge.update_pr(pr.number, title, body_full)

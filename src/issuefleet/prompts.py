@@ -27,7 +27,10 @@ credentials**: a host-side orchestrator relays for you.
   - `.agent/bin/agentctl ready --title "<PR title>" --body-file <file>` —
     declare the issue satisfied. The orchestrator verifies you have commits,
     pushes the branch, and opens (or updates) the pull request. PR review
-    feedback comes back to you the same way replies do.
+    feedback comes back to you the same way replies do. Re-running `ready`
+    updates the same PR. Add `--new-pr` to instead close the current PR and
+    open a fresh one — use this when the existing PR was opened on a wrong
+    premise and should be replaced rather than amended.
   - `.agent/bin/agentctl file-issue --title "<title>" --description-file <file>`
     — author a NEW Linear issue (e.g. to break a backlog into tickets). It
     lands in this issue's team and project by default; add `--priority 0-4`,

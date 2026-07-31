@@ -245,6 +245,21 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(len(self.tracker.created), 1)  # filed on retry
         self.assertEqual(self.mailbox().pending_outbox(), [])
 
+    def test_ready_new_pr_closes_old_and_opens_fresh(self):
+        self.claim_one()
+        self.mailbox().put_outbox("ready", {"title": "v1", "body": "wrong premise"})
+        self.rec.tick()
+        old = self.worker().pr_number
+        self.mailbox().put_outbox(
+            "ready", {"title": "v2", "body": "correct", "new_pr": True}
+        )
+        self.rec.tick()
+        # Old PR closed, a genuinely new PR opened (different number).
+        self.assertIn(old, self.forge.closed)
+        self.assertEqual(len(self.forge.opened), 2)
+        self.assertNotEqual(self.worker().pr_number, old)
+        self.assertEqual(self.forge.get_pr(old).state, "closed")
+
     def test_resubmission_updates_existing_pr(self):
         self.claim_one()
         self.mailbox().put_outbox("ready", {"title": "v1", "body": "b1"})

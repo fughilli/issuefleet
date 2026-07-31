@@ -179,6 +179,7 @@ class FakeForge:
         self.feedback: dict[int, list[PrFeedback]] = {}
         self.opened: list[dict] = []
         self.updated: list[dict] = []
+        self.closed: list[int] = []
         self.fail_next_open = 0
         self._next = 100
 
@@ -186,8 +187,12 @@ class FakeForge:
         self.prs[number].state = "closed"
         self.prs[number].merged = True
 
-    def close(self, number: int) -> None:
+    def close(self, number: int) -> None:  # test helper: simulate a human close
         self.prs[number].state = "closed"
+
+    def close_pr(self, number: int) -> None:  # Forge port: the daemon closes it
+        self.prs[number].state = "closed"
+        self.closed.append(number)
 
     def add_feedback(self, number: int, body: str, kind="comment", reviewer="alice", path=None):
         fid = f"f{len(self.feedback.setdefault(number, [])) + 1}-{number}"
