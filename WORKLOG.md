@@ -16,8 +16,11 @@ bot → webhook session claim → worker → PR (as issuefleet[bot]) → merge �
 clean teardown. Both echo loops fixed and confirmed gone. New claim
 strategy `agent` (7166658+) disables label/poll triggering per the
 operator's preference: delegation/@-mention is the only claim gesture.
-Remaining before "done": Splanc pointing, homelab compose stack (unrun),
-flake.lock, robustness spot-checks from SMOKE_TEST §6.
+2026-07-31 late: `agentctl idle` verb + two-noop-turn auto-idle backstop
+(cb5e216) after FUG-13 forensics — a finished agent woken by a courtesy
+comment had no way to decline further turns. Agent-side change: recycle
+live workers. Remaining before "done": Splanc pointing, homelab compose
+stack (unrun), flake.lock, robustness spot-checks from SMOKE_TEST §6.
 
 The full system is built and committed — core, agent runtime, real
 Linear/GitHub clients, gitops, tmux runner, doctor/CLI, docs, deploy units.
