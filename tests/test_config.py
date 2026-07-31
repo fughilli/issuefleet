@@ -39,7 +39,7 @@ class ConfigTest(unittest.TestCase):
         cfg = config.parse(MINIMAL)
         self.assertEqual(cfg.poll_interval_s, 60)
         self.assertEqual(cfg.max_workers, 4)
-        self.assertEqual(cfg.max_auto_turns, 40)
+        self.assertEqual(cfg.max_auto_turns, 50)
         p = cfg.project("splanc")
         self.assertEqual(p.base_ref, "main")
         self.assertEqual(p.claim.strategy, "label")

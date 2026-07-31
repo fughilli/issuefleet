@@ -46,7 +46,7 @@ class TurnState:
     turns_taken: int = 0
     auto_turns: int = 0  # consecutive self-driven turns since last human contact
     noop_turns: int = 0  # consecutive continuation turns with no output or commit
-    max_auto_turns: int = 40
+    max_auto_turns: int = 50
     budget_reported: bool = False
     idle_poll_s: int = 15
     claude_args: list[str] = field(default_factory=list)
