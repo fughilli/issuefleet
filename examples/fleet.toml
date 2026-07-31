@@ -33,7 +33,7 @@ github_secret_file = "~/.config/issuefleet/github_webhook.secret"
 linear_secret_file = "~/.config/issuefleet/linear_webhook.secret"
 
 [agent]
-max_auto_turns = 40
+max_auto_turns = 50
 max_restarts = 3
 claude_args = []
 claude_container = "claude-container"

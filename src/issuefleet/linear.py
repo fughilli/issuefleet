@@ -268,6 +268,49 @@ class LinearTracker:
         if not data["agentActivityCreate"]["success"]:
             raise LinearError(f"agentActivityCreate on session {session_id} reported failure")
 
+    def find_agent_session(self, issue_id: str) -> str | None:
+        """Id of THIS app's most-recent still-open agent session on an issue,
+        or None. Recovers the session binding when the `created` webhook was
+        missed (a dead tunnel) and the worker was poll-claimed instead — so
+        the session view is driven from polling too, keeping webhooks an
+        accelerator rather than the sole source of truth. Only the app
+        identity owns sessions; a personal key has none, so we skip the call.
+
+        Linear's `agentSessions` root query takes no issue filter, so we page
+        the app's recent sessions and match client-side. Best-effort: any API
+        hiccup returns None and the caller stays on the comment path."""
+        if not self.app_identity:
+            return None
+        try:
+            me = self.get_viewer_id()
+            data = self.client.graphql(
+                """query($n: Int!) {
+                     agentSessions(first: $n) {
+                       nodes {
+                         id createdAt endedAt archivedAt
+                         issue { id } appUser { id }
+                       }
+                     }
+                   }""",
+                {"n": 100},
+            )
+        except (LinearError, ApiError):
+            log.warning("agent-session discovery for %s failed; staying on the "
+                        "comment path", issue_id, exc_info=True)
+            return None
+        mine = [
+            n
+            for n in data.get("agentSessions", {}).get("nodes", [])
+            if (n.get("issue") or {}).get("id") == issue_id
+            and (n.get("appUser") or {}).get("id") == me
+            and not n.get("endedAt")
+            and not n.get("archivedAt")
+        ]
+        if not mine:
+            return None
+        mine.sort(key=lambda n: n.get("createdAt") or "", reverse=True)
+        return mine[0]["id"]
+
     def resolve_project_id(self, project: ProjectConfig) -> str:
         return self._project_id(project.linear_project)
 

@@ -230,6 +230,54 @@ class AgentSessionTest(unittest.TestCase):
         self.rec.tick()
         self.assertIsNotNone(self.registry.get("issue-2"))
 
+    def test_poll_claimed_worker_binds_session_by_polling(self):
+        # The dead-tunnel case (FUG-28): the `created` webhook never arrives,
+        # so the worker is poll-claimed with no session id and would drive the
+        # issue over comments while the session view hangs. Discovery via
+        # polling must bind the session and switch relays to activities.
+        self.tracker.app_identity = True
+        self.tracker.add_issue(make_issue(1, project_id="proj-splanc"))  # labeled -> poll-claimed
+        self.tracker.sessions["issue-1"] = "sess-poll"
+        self.rec.tick()  # claims via poll (no session event)
+        w = self.registry.get("issue-1")
+        self.assertEqual(w.claim_origin, "poll")
+        self.rec.tick()  # servicing discovers and binds the session
+        w = self.registry.get("issue-1")
+        self.assertEqual(w.agent_session_id, "sess-poll")
+        # A catch-up thought went into the discovered session...
+        self.assertTrue(any(sid == "sess-poll" and c["type"] == "thought"
+                            for sid, c in self.tracker.activities))
+        # ...and subsequent status relays now stream to the session, not comments.
+        self.mailbox().put_outbox("status", {"text": "made progress"})
+        self.rec.tick()
+        self.assertIn(("sess-poll", {"type": "thought", "body": "made progress"}),
+                      self.tracker.activities)
+
+    def test_session_discovery_skipped_for_personal_key(self):
+        # A personal-key tracker owns no sessions: discovery must never fire,
+        # so a poll-claimed worker doesn't even count an attempt.
+        self.tracker.add_issue(make_issue(1, project_id="proj-splanc"))
+        self.rec.tick()  # poll-claim; app_identity False
+        self.rec.tick()
+        w = self.registry.get("issue-1")
+        self.assertIsNone(w.agent_session_id)
+        self.assertEqual(w.session_lookup_attempts, 0)
+
+    def test_session_discovery_bounded_when_no_session_exists(self):
+        # App identity but the issue genuinely has no session (odd race / a
+        # manual assignment): probing must stop after the cap, not hit Linear
+        # every tick forever.
+        from issuefleet.reconcile import _SESSION_LOOKUP_MAX
+
+        self.tracker.app_identity = True
+        self.tracker.add_issue(make_issue(1, project_id="proj-splanc"))  # no sessions[] entry
+        self.rec.tick()  # poll-claim
+        for _ in range(_SESSION_LOOKUP_MAX + 3):
+            self.rec.tick()
+        w = self.registry.get("issue-1")
+        self.assertIsNone(w.agent_session_id)
+        self.assertEqual(w.session_lookup_attempts, _SESSION_LOOKUP_MAX)
+
     def test_session_attaches_to_already_claimed_worker(self):
         self.tracker.add_issue(make_issue(1, project_id="proj-splanc"))  # labeled
         self.rec.tick()

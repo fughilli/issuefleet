@@ -33,6 +33,11 @@ log = logging.getLogger("issuefleet")
 
 _SEEN_IDS_CAP = 1000
 
+# A poll-claimed worker (missed session webhook) probes Linear for its agent
+# session this many ticks before giving up — enough to cover session-creation
+# lag without probing forever when an issue genuinely has no session.
+_SESSION_LOOKUP_MAX = 5
+
 # Activity content types the orchestrator itself emits into sessions; a
 # `prompted` webhook carrying one of these is an echo, never a user prompt.
 _AGENT_EMITTED_ACTIVITY_TYPES = {"thought", "action", "elicitation", "response", "error"}
@@ -352,9 +357,48 @@ class Reconciler:
             rec.touch()
             self.registry.save()
 
+        self._bind_agent_session(rec)
         self._drain_outbox(rec, project, mailbox)
         self._ingest_comments(rec, mailbox)
         self._check_pr(rec, project, mailbox)
+
+    def _bind_agent_session(self, rec: WorkerRecord) -> None:
+        """Recover the Linear agent session for a worker that was poll-claimed
+        because its `created` webhook was lost (dead tunnel). Without this the
+        session id is only ever learned from the webhook, so the session view
+        hangs at "waiting…" then "agent didn't start" while the worker drives
+        the issue over comments. We poll for the session, attach it, and emit a
+        catch-up thought so the view goes live and later updates stream there.
+        Bounded so a truly session-less claim doesn't probe forever."""
+        if rec.agent_session_id or rec.session_lookup_attempts >= _SESSION_LOOKUP_MAX:
+            return
+        # Only the OAuth/agent-app identity owns sessions; a personal key never
+        # does, so skip entirely — no probing, no counter churn.
+        if not getattr(self.tracker, "app_identity", False):
+            return
+        finder = getattr(self.tracker, "find_agent_session", None)
+        if finder is None:
+            return
+        rec.session_lookup_attempts += 1
+        try:
+            session_id = finder(rec.issue_id)
+        except Exception:
+            log.exception("worker %s: agent-session discovery failed", rec.issue_key)
+            session_id = None
+        if not session_id:
+            self.registry.save()  # persist the attempt so restarts don't re-probe forever
+            return
+        log.info("worker %s: bound agent session %s via polling (missed webhook)",
+                 rec.issue_key, session_id)
+        rec.agent_session_id = session_id
+        rec.touch()
+        self.registry.save()
+        self._emit_activity_quietly(
+            session_id,
+            {"type": "thought",
+             "body": "Reconnected to this session (the initial webhook was missed). "
+                     "I'm on it in an isolated worker; progress will stream here."},
+        )
 
     def _unclaim_reason(
         self, project: ProjectConfig, issue: Issue | None, rec: WorkerRecord | None = None
