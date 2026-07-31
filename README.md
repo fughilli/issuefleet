@@ -237,6 +237,7 @@ When the fleet is full, eligible issues wait; `doctor` shows the order.
 | running | taking self-driven turns, committing, posting `status` | asks a question / declares `ready` / budget trips |
 | waiting | asked a question via `agentctl ask`; session idles | a human replies on the Linear issue |
 | ready | declared `ready`; orchestrator pushed branch, opened PR | PR feedback arrives (back to running) or PR merges |
+| idle | declared done via `agentctl idle` (or parked by the loop after two no-progress turns) | any human reply or feedback |
 | budget-idle | `max_auto_turns` without human contact; posted a status and idling | any human reply (resets the budget clock) |
 | crashed (host-side) | session died `max_restarts`+1 times; reported on the issue | operator intervention (worktree kept for inspection) |
 

@@ -28,6 +28,10 @@ credentials**: a host-side orchestrator relays for you.
     declare the issue satisfied. The orchestrator verifies you have commits,
     pushes the branch, and opens (or updates) the pull request. PR review
     feedback comes back to you the same way replies do.
+  - `.agent/bin/agentctl idle` — nothing left to do right now (e.g. you were
+    woken by a message that needs no action, and your work is already
+    submitted). Stops your turns until a human writes again. Never spin
+    doing nothing; idle instead.
 - Do not touch `.agent/` except through `agentctl`. Do not modify the repo's
   config, history, or `.gitignore`. Do not try to reach Linear or GitHub
   directly.

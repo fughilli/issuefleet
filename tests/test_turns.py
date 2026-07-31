@@ -143,6 +143,16 @@ class TurnsTest(unittest.TestCase):
         self.assertEqual(d.exit_code, turns.EXIT_CONTINUE)
         self.assertIn("PR opened at", d.prompt)
 
+    def test_idle_phase_idles_and_wakes_like_ready(self):
+        state = self.reload()
+        state.phase = turns.PHASE_IDLE
+        state.save(self.agent_dir)
+        self.assertEqual(self.decide().exit_code, turns.EXIT_READY)
+        self.mb.put_inbox("reply", {"author": "alice", "text": "one more thing"})
+        d = self.decide()
+        self.assertEqual(d.exit_code, turns.EXIT_CONTINUE)
+        self.assertEqual(d.wake_from_phase, turns.PHASE_IDLE)
+
     def test_commit_consumes_injected_messages(self):
         self.mb.put_inbox("reply", {"author": "alice", "text": "hi"})
         self.decide_and_commit()
@@ -188,6 +198,11 @@ class AgentctlTest(unittest.TestCase):
         [m] = self.mb.pending_outbox()
         self.assertEqual(m.kind, "question")
         self.assertEqual(turns.TurnState.load(self.agent_dir).phase, turns.PHASE_WAITING)
+
+    def test_idle_sets_idle_phase(self):
+        agentctl.main(["idle"])
+        self.assertEqual(turns.TurnState.load(self.agent_dir).phase, turns.PHASE_IDLE)
+        self.assertEqual(self.mb.pending_outbox(), [])  # no message required
 
     def test_ready_sets_ready_phase(self):
         agentctl.main(["ready", "--title", "Fix the thing", "--body", "Does the work."])

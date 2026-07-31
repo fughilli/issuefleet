@@ -53,6 +53,11 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--body")
     g.add_argument("--body-file")
 
+    sub.add_parser(
+        "idle",
+        help="declare there is nothing left to do; stop taking turns until a human writes",
+    )
+
     sub.add_parser("inbox", help="show pending inbound messages (peek; the turn loop consumes)")
 
     args = ap.parse_args(argv)
@@ -74,6 +79,10 @@ def main(argv: list[str] | None = None) -> int:
         state.phase = turns.PHASE_READY
         state.save(agent_dir)
         print("ready queued; the orchestrator will push the branch and open/update the PR")
+    elif args.cmd == "idle":
+        state.phase = turns.PHASE_IDLE
+        state.save(agent_dir)
+        print("standing by; the loop will idle until a human replies or review feedback arrives")
     elif args.cmd == "inbox":
         pending = mb.pending_inbox()
         if not pending:

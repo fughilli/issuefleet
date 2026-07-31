@@ -32,6 +32,7 @@ PHASE_FRESH = "fresh"  # no first turn yet
 PHASE_RUNNING = "running"
 PHASE_WAITING = "waiting"  # asked a question, blocked on a human
 PHASE_READY = "ready"  # submitted; blocked on review/merge
+PHASE_IDLE = "idle"  # declared done / standing by (agentctl idle); wakes like ready
 
 # Inbox kinds that justify waking an idle agent. "info" is context-only: it
 # rides along on the next turn but never triggers one by itself.
@@ -44,6 +45,7 @@ class TurnState:
     phase: str = PHASE_FRESH
     turns_taken: int = 0
     auto_turns: int = 0  # consecutive self-driven turns since last human contact
+    noop_turns: int = 0  # consecutive continuation turns with no output or commit
     max_auto_turns: int = 40
     budget_reported: bool = False
     idle_poll_s: int = 15
@@ -112,7 +114,7 @@ def decide(agent_dir: Path, mailbox: Mailbox, state: TurnState) -> Decision:
 
     if state.phase == PHASE_WAITING:
         return Decision(action="idle", exit_code=EXIT_IDLE)
-    if state.phase == PHASE_READY:
+    if state.phase in (PHASE_READY, PHASE_IDLE):
         return Decision(action="idle_ready", exit_code=EXIT_READY)
 
     if state.auto_turns >= state.max_auto_turns:
@@ -173,7 +175,8 @@ def format_inbound(msgs: list[Message]) -> str:
         blocks.append(f"### {head}\n{p.get('text', p.get('body', ''))}")
     blocks.append(
         "Address these, then continue. Use `agentctl status` to report, "
-        "`agentctl ask` if blocked, `agentctl ready` to (re-)submit."
+        "`agentctl ask` if blocked, `agentctl ready` to (re-)submit — or, if "
+        "these messages need no action from you, `agentctl idle`."
     )
     return "\n\n".join(blocks)
 
@@ -182,5 +185,6 @@ _CONTINUE_PROMPT = (
     "Continue working on the issue described in your original brief. "
     "Commit as you go. When the issue is satisfied, run `agentctl ready` "
     "with a PR title and body; post meaningful progress with `agentctl status`; "
-    "if you are blocked on a decision only a human can make, run `agentctl ask`."
+    "if you are blocked on a decision only a human can make, run `agentctl ask`. "
+    "If there is genuinely nothing left to do, run `agentctl idle` — do not spin."
 )

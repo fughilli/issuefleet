@@ -160,6 +160,30 @@ class ReadyWakeRestoreTest(unittest.TestCase):
         # Next decision idles instead of granting a continuation turn.
         self.assertEqual(turnloop.step(self.agent_dir), turns.EXIT_READY)
 
+    def test_noop_continuation_turns_auto_idle(self):
+        # The FUG-13 grind: agent says "nothing left to do", emits nothing,
+        # commits nothing — and used to get continuation turns until the
+        # budget. Two no-op turns now park it in idle.
+        st = turns.TurnState.load(self.agent_dir)
+        st.phase = turns.PHASE_RUNNING
+        st.turns_taken = 3
+        st.save(self.agent_dir)
+        self.stub_claude()  # does nothing at all
+        self.assertEqual(turnloop.step(self.agent_dir), 0)  # no-op 1
+        self.assertEqual(turns.TurnState.load(self.agent_dir).phase, turns.PHASE_RUNNING)
+        self.assertEqual(turnloop.step(self.agent_dir), 0)  # no-op 2 -> idle
+        self.assertEqual(turns.TurnState.load(self.agent_dir).phase, turns.PHASE_IDLE)
+        self.assertEqual(turnloop.step(self.agent_dir), turns.EXIT_READY)  # parked
+
+    def test_wake_from_idle_restores_idle(self):
+        st = turns.TurnState.load(self.agent_dir)
+        st.phase = turns.PHASE_IDLE
+        st.save(self.agent_dir)
+        self.mb.put_inbox("reply", {"author": "kevin", "text": "please pick this up"})
+        self.stub_claude()
+        self.assertEqual(turnloop.step(self.agent_dir), 0)
+        self.assertEqual(turns.TurnState.load(self.agent_dir).phase, turns.PHASE_IDLE)
+
     def test_responsive_wake_keeps_working(self):
         self.mb.put_inbox("pr_feedback", {"reviewer": "bob", "text": "rename this please"})
         # The agent posts a status during the turn (simulated by the stub

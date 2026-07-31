@@ -25,6 +25,18 @@ from issuefleet.agent_runtime.agentctl import find_agent_dir
 from issuefleet.mailbox import Mailbox
 
 MAX_CLAUDE_RETRIES = 3
+MAX_NOOP_TURNS = 2  # continuation turns with no output/commit before auto-idle
+
+
+def _git_head(workspace: Path) -> str | None:
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=workspace, capture_output=True, text=True, timeout=10,
+        )
+        return proc.stdout.strip() if proc.returncode == 0 else None
+    except OSError:
+        return None
 
 
 def summarize_event(line: str) -> str | None:
@@ -120,22 +132,46 @@ def step(agent_dir: Path) -> int:
     if decision.action != "run":
         return decision.exit_code
 
+    workspace = agent_dir.parent
     pre_turn_seq = mb.last_outbox_seq()
+    pre_head = _git_head(workspace)
     rc = run_claude(decision.prompt, state, agent_dir)
-    # agentctl may have moved phase to waiting/ready during the turn — reload
-    # before recording the completed turn, so we don't clobber it.
+    # agentctl may have moved phase to waiting/ready/idle during the turn —
+    # reload before recording the completed turn, so we don't clobber it.
     state = turns.TurnState.load(agent_dir)
+    emitted = mb.last_outbox_seq() != pre_turn_seq
+    committed = _git_head(workspace) != pre_head
     if (
-        decision.wake_from_phase == turns.PHASE_READY
+        decision.wake_from_phase in (turns.PHASE_READY, turns.PHASE_IDLE)
         and state.phase == turns.PHASE_RUNNING
-        and mb.last_outbox_seq() == pre_turn_seq
+        and not emitted
     ):
-        # Woken out of ready (PR submitted) by a message that needed no
-        # response: the agent emitted nothing, so go back to idling on the
-        # open PR. Without this, the running phase grants endless
+        # Woken out of an idle state by a message that needed no response:
+        # go back to idling. Without this, the running phase grants endless
         # continuation turns to an agent with nothing left to do.
-        print("turnloop: wake produced no response; returning to ready-idle")
-        state.phase = turns.PHASE_READY
+        print("turnloop: wake produced no response; returning to idle")
+        state.phase = decision.wake_from_phase
+        state.noop_turns = 0
+    elif (
+        state.phase == turns.PHASE_RUNNING
+        and decision.wake_from_phase is None
+        and decision.resume
+        and not emitted
+        and not committed
+    ):
+        # Backstop for agents that finish but never say so: consecutive
+        # continuation turns producing neither a message nor a commit are
+        # going nowhere — park the loop instead of grinding the budget.
+        state.noop_turns += 1
+        if state.noop_turns >= MAX_NOOP_TURNS:
+            print(
+                f"turnloop: {state.noop_turns} continuation turns with no output or "
+                "commit; standing by (equivalent to `agentctl idle`)"
+            )
+            state.phase = turns.PHASE_IDLE
+            state.noop_turns = 0
+    else:
+        state.noop_turns = 0
     state.turns_taken += 1
     state.save(agent_dir)
     if rc != 0:
