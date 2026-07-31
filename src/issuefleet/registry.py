@@ -42,6 +42,15 @@ class Registry:
             rec = WorkerRecord.from_dict(d)
             self.workers[rec.issue_id] = rec
 
+    def reload(self) -> None:
+        """Re-read from disk. registry.json is the single source of truth;
+        `run` and a separate `stop`/`once` process both touch it, so the
+        daemon reloads each tick to see external changes (e.g. a worker
+        stopped by hand) rather than servicing a stale in-memory entry
+        whose worktree is already gone."""
+        self.workers = {}
+        self._load()
+
     def save(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".json.tmp")

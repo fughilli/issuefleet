@@ -190,6 +190,10 @@ class Reconciler:
             log.exception("agent activity emit failed (session %s)", session_id)
 
     def tick(self) -> None:
+        # registry.json is the source of truth; a separate `stop`/`once`
+        # process may have changed it since the last tick. Reload so we
+        # never service a worker whose worktree was removed underneath us.
+        self.registry.reload()
         self._drain_session_events()
         for rec in self.registry.all():
             try:
@@ -305,6 +309,14 @@ class Reconciler:
 
     def _service(self, rec: WorkerRecord) -> None:
         project = self.cfg.project(rec.project)
+        # Worktree gone from under us (a hand `stop`, a manual rm): the
+        # worker is unserviceable — drop the registry entry rather than
+        # crash every tick reading files that no longer exist.
+        if not (Path(rec.worktree) / ".agent").is_dir():
+            log.warning("worker %s: worktree %s is gone; dropping the registry entry",
+                        rec.issue_key, rec.worktree)
+            self.registry.remove(rec.issue_id)
+            return
         mailbox = Mailbox(Path(rec.worktree) / ".agent" / "mailbox")
 
         issue = self.tracker.get_issue(rec.issue_id)
@@ -520,14 +532,24 @@ class Reconciler:
         push_url, push_auth = forge.push_spec()
         self.git.push(Path(rec.worktree), rec.branch, url=push_url, auth_header=push_auth)
 
+        # `agentctl ready --new-pr`: the existing PR's identity is tainted
+        # (opened under a wrong premise, messy history). Close it and open a
+        # fresh one instead of updating in place.
+        new_pr = bool(msg.payload.get("new_pr"))
+        if new_pr:
+            for existing in (rec.pr_number, getattr(forge.find_pr(rec.branch), "number", None)):
+                if existing:
+                    forge.close_pr(existing)
+            rec.pr_number = None
+
         pr = None
-        if rec.pr_number is not None:
+        if not new_pr and rec.pr_number is not None:
             pr = forge.get_pr(rec.pr_number)
             if pr.state == "open":
                 forge.update_pr(pr.number, title, body_full)
             else:
                 pr = None
-        if pr is None:
+        if not new_pr and pr is None:
             pr = forge.find_pr(rec.branch)
             if pr is not None:
                 forge.update_pr(pr.number, title, body_full)
@@ -652,9 +674,17 @@ class Reconciler:
                 agent_dir, dest, ignore=shutil.ignore_patterns("bin", "tmp"), dirs_exist_ok=True
             )
 
-        # 3. Stop the container/session, remove the worktree, prune.
-        self.runner.stop(rec)
-        self.git.remove_worktree(Path(rec.repo), Path(rec.worktree), rec.branch)
+        # 3. Stop the container/session, remove the worktree, prune. Each is
+        # best-effort: the registry entry MUST be dropped (step 5) so a
+        # failure here can't leave a worker no `stop` can ever clear.
+        try:
+            self.runner.stop(rec)
+        except Exception:
+            log.exception("worker %s: stopping the session failed", rec.issue_key)
+        try:
+            self.git.remove_worktree(Path(rec.repo), Path(rec.worktree), rec.branch)
+        except Exception:
+            log.exception("worker %s: removing the worktree failed", rec.issue_key)
 
         # 4. Tracker/forge bookkeeping (best-effort; teardown must complete).
         try:

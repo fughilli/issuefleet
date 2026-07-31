@@ -138,17 +138,54 @@ class ConfigTest(unittest.TestCase):
             if saved is not None:
                 os.environ["ISSUEFLEET_ROOT"] = saved
 
+    def test_issuefleet_projects_expands_and_defaults(self):
+        # Same contract as ISSUEFLEET_ROOT, for checkouts the daemon doesn't
+        # own: the compose stack exports it, a laptop falls back to ~/Projects.
+        import os
+        from pathlib import Path
+
+        saved = os.environ.pop("ISSUEFLEET_PROJECTS", None)
+        try:
+            data = {"projects": [dict(MINIMAL["projects"][0],
+                                      repo="${ISSUEFLEET_PROJECTS}/led_mapper")]}
+            self.assertEqual(config.parse(data).projects[0].repo,
+                             Path("~/Projects/led_mapper").expanduser())
+            os.environ["ISSUEFLEET_PROJECTS"] = "/Users/x/code"
+            self.assertEqual(str(config.parse(data).projects[0].repo),
+                             "/Users/x/code/led_mapper")
+        finally:
+            os.environ.pop("ISSUEFLEET_PROJECTS", None)
+            if saved is not None:
+                os.environ["ISSUEFLEET_PROJECTS"] = saved
+
+    def test_claude_config_var_defaults(self):
+        import os
+        from pathlib import Path
+
+        saved = os.environ.pop("ISSUEFLEET_CLAUDE_CONFIG", None)
+        try:
+            data = {"agent": {"container_config_dir": "${ISSUEFLEET_CLAUDE_CONFIG}"},
+                    "projects": MINIMAL["projects"]}
+            cfg = config.parse(data)
+            self.assertEqual(cfg.container_config_dir,
+                             Path("~/.config/claude-container/config").expanduser())
+            os.environ["ISSUEFLEET_CLAUDE_CONFIG"] = "/live/creds"
+            self.assertEqual(str(config.parse(data).container_config_dir), "/live/creds")
+        finally:
+            os.environ.pop("ISSUEFLEET_CLAUDE_CONFIG", None)
+            if saved is not None:
+                os.environ["ISSUEFLEET_CLAUDE_CONFIG"] = saved
+
     def test_git_url_optional(self):
         self.assertIsNone(config.parse(MINIMAL).projects[0].git_url)
         data = {"projects": [dict(MINIMAL["projects"][0], git_url="git@github.com:a/b.git")]}
         self.assertEqual(config.parse(data).projects[0].git_url, "git@github.com:a/b.git")
 
-    def test_local_checkout_optional_and_expanded(self):
-        self.assertIsNone(config.parse(MINIMAL).projects[0].local_checkout)
+    def test_local_checkout_is_rejected(self):
+        # Removed feature: fail loudly rather than silently cloning instead.
         data = {"projects": [dict(MINIMAL["projects"][0], local_checkout="~/Projects/x")]}
-        lc = config.parse(data).projects[0].local_checkout
-        self.assertNotIn("~", str(lc))
-        self.assertTrue(str(lc).endswith("Projects/x"))
+        with self.assertRaisesRegex(config.ConfigError, "local_checkout is no longer supported"):
+            config.parse(data)
 
     def test_launcher_args_default_and_override(self):
         self.assertEqual(config.parse(MINIMAL).launcher_args, ["--skills-ignore-new"])

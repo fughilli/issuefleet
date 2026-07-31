@@ -100,6 +100,30 @@ def _check_launcher_flags(cfg: Config) -> list[Check]:
     return out
 
 
+def _check_worker_runtime(cfg: Config) -> list[Check]:
+    """The two conditions that silently break every worker launch when the
+    daemon itself runs containerized (observed live on the first stack)."""
+    out = []
+    if hasattr(os, "geteuid"):
+        if os.geteuid() == 0:
+            out.append(Check(FAIL, "running as root",
+                             "workers inherit this uid via the launcher, and claude "
+                             "refuses bypassPermissions as root — every turn fails "
+                             "instantly. Run the compose stack via the bazel targets "
+                             "(env.sh exports your uid) or set `user:` yourself"))
+        else:
+            out.append(Check(OK, f"running as uid {os.geteuid()}", "workers inherit a non-root uid"))
+    sock = Path("/var/run/docker.sock")
+    if sock.exists():
+        if os.access(sock, os.W_OK):
+            out.append(Check(OK, "docker socket", "writable"))
+        else:
+            out.append(Check(FAIL, "docker socket", "/var/run/docker.sock exists but is not "
+                             "writable by this uid — worker launches will fail; add the "
+                             "socket's group (env.sh exports ISSUEFLEET_DOCKER_GID)"))
+    return out
+
+
 def _check_container_settings(cfg: Config) -> list[Check]:
     config_dir = cfg.container_config_dir or Path("~/.config/claude-container/config").expanduser()
     settings = config_dir / "settings.json"
@@ -258,30 +282,16 @@ def _check_github(cfg: Config, git: Gitops, forges: dict | None) -> list[Check]:
     for project in cfg.projects:
         name = project.name
         have_clone = git.is_repo(project.repo)
-        checkout = project.local_checkout
-        use_checkout = not have_clone and checkout is not None and git.is_repo(checkout)
         if not have_clone:
-            if use_checkout:
-                out.append(Check(WARN, f"[{name}] repo {project.repo}",
-                                 f"missing — will be symlinked to {checkout} on first run. "
-                                 "NOTE: the target must be visible at the same path where "
-                                 "the daemon runs; containerized deployments should prefer "
-                                 "git_url"))
-            elif project.git_url:
+            if project.git_url:
                 out.append(Check(WARN, f"[{name}] repo {project.repo}",
                                  f"missing — will be cloned from {project.git_url} on first run"))
             else:
                 out.append(Check(FAIL, f"[{name}] repo {project.repo}",
-                                 "does not exist — add git_url (clone) or local_checkout "
-                                 "(symlink) so the daemon can bootstrap it"))
+                                 "does not exist — add git_url so the daemon can clone it"))
                 continue
         try:
-            if have_clone:
-                remote = git.remote_url(project.repo)
-            elif use_checkout:
-                remote = git.remote_url(checkout)
-            else:
-                remote = project.git_url
+            remote = git.remote_url(project.repo) if have_clone else project.git_url
             slug = parse_repo_slug(remote)
             out.append(Check(OK, f"[{name}] origin", f"{remote} -> {slug}"))
         except Exception as e:
@@ -324,6 +334,7 @@ def run_doctor(
 
     git = git or Gitops()
     checks += _check_tools(cfg)
+    checks += _check_worker_runtime(cfg)
     checks += _check_launcher_flags(cfg)
     checks += _check_container_settings(cfg)
     checks += _check_dirs(cfg)

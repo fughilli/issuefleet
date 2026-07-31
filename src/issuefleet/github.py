@@ -97,6 +97,9 @@ class GithubForge:
     def update_pr(self, number: int, title: str, body: str) -> None:
         self._call("PATCH", f"/repos/{self.slug}/pulls/{number}", {"title": title, "body": body})
 
+    def close_pr(self, number: int) -> None:
+        self._call("PATCH", f"/repos/{self.slug}/pulls/{number}", {"state": "closed"})
+
     def get_pr(self, number: int) -> PullRequest:
         return _to_pr(self._call("GET", f"/repos/{self.slug}/pulls/{number}"))
 

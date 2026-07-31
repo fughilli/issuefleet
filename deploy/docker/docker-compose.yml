@@ -1,6 +1,6 @@
 # issuefleet + Tailscale Funnel, autostarting. See README.md in this dir.
 #
-# THE INVARIANT: worktrees/repos/claude-config/state are mounted at
+# THE INVARIANT: worktrees/repos/state (+ the live claude config) are mounted at
 # identical paths on host and in the daemon container, because the launcher
 # passes them to the HOST docker daemon when starting workers. The root is
 # Layout: DATA lives under ISSUEFLEET_ROOT ($HOME/.issuefleet, declared once
@@ -14,7 +14,7 @@
 #   worktree_root = "${ISSUEFLEET_ROOT}/worktrees"
 #   repo          = "${ISSUEFLEET_ROOT}/repos/<name>"
 #   state_dir     = "${ISSUEFLEET_ROOT}/state"
-#   [agent] container_config_dir = "${ISSUEFLEET_ROOT}/claude-config"
+#   [agent] container_config_dir = "${ISSUEFLEET_CLAUDE_CONFIG}"
 
 services:
   tailscale:
@@ -28,6 +28,12 @@ services:
     volumes:
       - ts-state:/var/lib/tailscale
       - ./funnel.json:/config/funnel.json:ro
+    # Host-loopback publish of the webhook listener (which lives in this
+    # netns): lets a HOST-side tunnel (e.g. the laptop's `tailscale funnel
+    # 8787`) keep serving existing webhook URLs during migration. Loopback
+    # only — never exposed off-box; the sidecar's own Funnel needs no port.
+    ports:
+      - "127.0.0.1:8787:8787"
     devices:
       - /dev/net/tun:/dev/net/tun
     cap_add:
@@ -49,21 +55,48 @@ services:
     network_mode: service:tailscale
     depends_on:
       - tailscale
+    # entrypoint.sh starts as root only to make the docker socket usable
+    # (Docker Desktop mounts it root:root 0755 — no group_add can help),
+    # then drops to this uid/gid; workers inherit it via the launcher.
     environment:
+      # Bind beyond container-loopback: docker's port publish forwards to
+      # the container IP (not its 127.0.0.1), and the sidecar's funnel
+      # still works. Exposure = docker bridge + tailnet only; HMAC on top.
+      - ISSUEFLEET_WEBHOOK_BIND=0.0.0.0
+      - ISSUEFLEET_UID=${ISSUEFLEET_UID:?run via bazel or source env.sh}
+      - ISSUEFLEET_GID=${ISSUEFLEET_GID:?run via bazel or source env.sh}
       # Lets config.toml use ${ISSUEFLEET_ROOT}/... paths portably.
       - ISSUEFLEET_ROOT=${ISSUEFLEET_ROOT}
+      - ISSUEFLEET_CLAUDE_CONFIG=${ISSUEFLEET_CLAUDE_CONFIG}
+      # Same, for a `repo` that points at a checkout the daemon doesn't own.
+      # Must be passed: the daemon's fallback is ~/Projects, and ~ is /root
+      # in here — which would miss the same-path mount below.
+      - ISSUEFLEET_PROJECTS=${ISSUEFLEET_PROJECTS}
+      # Those checkouts belong to the host user; this container is root, and
+      # git refuses a repo it doesn't own ("dubious ownership"). Scope the
+      # exemption to that tree rather than using the blanket `*`. NOTE: this
+      # covers the daemon only — see README on worker containers.
+      - GIT_CONFIG_COUNT=1
+      - GIT_CONFIG_KEY_0=safe.directory
+      - GIT_CONFIG_VALUE_0=${ISSUEFLEET_PROJECTS}/*
     volumes:
       # Workers are launched on the HOST docker daemon:
       - /var/run/docker.sock:/var/run/docker.sock
       # Same-path mounts (the invariant above):
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/worktrees:${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/worktrees
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/repos:${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/repos
-      - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/claude-config:${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/claude-config
+      # Worker Claude creds: the LIVE host claude-container config, shared
+      # (same-path, read-WRITE so token refreshes persist) — never a copy,
+      # which the host rotating its OAuth token would revoke.
+      - ${ISSUEFLEET_CLAUDE_CONFIG:?not set - run via bazel or source env.sh}:${ISSUEFLEET_CLAUDE_CONFIG:?not set - run via bazel or source env.sh}
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/state:${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/state
+      # Checkouts outside the data root (a `repo` pointing at your own working
+      # tree). Read-write: the daemon registers worktrees in that repo's .git.
+      - ${ISSUEFLEET_PROJECTS:?not set - run via bazel (defaults to HOME/Projects) or export it}:${ISSUEFLEET_PROJECTS:?not set - run via bazel (defaults to HOME/Projects) or export it}
       # Config + secrets: the SAME ~/.config/issuefleet as a laptop setup,
       # mounted at the container's home path so plain ~/... paths in
       # config.toml resolve identically in both worlds.
-      - ${ISSUEFLEET_CONFIG:?not set - run via bazel (defaults to HOME/.config/issuefleet)}:/root/.config/issuefleet:ro
+      - ${ISSUEFLEET_CONFIG:?not set - run via bazel (defaults to HOME/.config/issuefleet)}:/home/fleet/.config/issuefleet:ro
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/bin/claude-container:/usr/local/bin/claude-container:ro
 
 volumes:

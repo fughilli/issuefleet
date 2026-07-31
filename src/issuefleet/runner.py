@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import shlex
 import subprocess
+import time
 from pathlib import Path
 
 from issuefleet.config import Config
@@ -62,18 +63,27 @@ class TmuxRunner:
         if self.alive(rec):
             return  # idempotent: adopt the live session
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        _tmux(["new-session", "-d", "-s", rec.tmux_session, *self.command(rec, config)])
-        # Capture output without stealing the pty.
-        _tmux(
-            [
-                "pipe-pane",
-                "-o",
-                "-t",
-                f"={rec.tmux_session}",
-                f"cat >> {shlex.quote(str(self.log_path(rec)))}",
-            ],
-            check=False,
-        )
+        cmd = self.command(rec, config)
+        log_path = self.log_path(rec)
+        # Run the launcher under script(1) rather than pipe-pane: script
+        # gives it a real pty (docker run -it needs one) AND flushes all
+        # output to the log file, so even a launcher that dies in <1s is
+        # captured. pipe-pane raced this and lost — the session vanished
+        # before it could attach, leaving an empty log and no diagnosis.
+        wrapped = f"exec script -q -e -c {shlex.quote(shlex.join(cmd))} {shlex.quote(str(log_path))}"
+        _tmux(["new-session", "-d", "-s", rec.tmux_session, "sh", "-c", wrapped])
+        time.sleep(1.0)
+        if not self.alive(rec):
+            tail = ""
+            try:
+                tail = log_path.read_text()[-800:].strip()
+            except OSError:
+                pass
+            log.error(
+                "worker session %s died within 1s of launch. Captured output:\n%s\n"
+                "Reproduce interactively with:\n  %s",
+                rec.tmux_session, tail or "(log empty)", " ".join(cmd),
+            )
 
     def alive(self, rec: WorkerRecord) -> bool:
         return _tmux(["has-session", "-t", f"={rec.tmux_session}"], check=False).returncode == 0

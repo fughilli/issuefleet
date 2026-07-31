@@ -245,6 +245,21 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(len(self.tracker.created), 1)  # filed on retry
         self.assertEqual(self.mailbox().pending_outbox(), [])
 
+    def test_ready_new_pr_closes_old_and_opens_fresh(self):
+        self.claim_one()
+        self.mailbox().put_outbox("ready", {"title": "v1", "body": "wrong premise"})
+        self.rec.tick()
+        old = self.worker().pr_number
+        self.mailbox().put_outbox(
+            "ready", {"title": "v2", "body": "correct", "new_pr": True}
+        )
+        self.rec.tick()
+        # Old PR closed, a genuinely new PR opened (different number).
+        self.assertIn(old, self.forge.closed)
+        self.assertEqual(len(self.forge.opened), 2)
+        self.assertNotEqual(self.worker().pr_number, old)
+        self.assertEqual(self.forge.get_pr(old).state, "closed")
+
     def test_resubmission_updates_existing_pr(self):
         self.claim_one()
         self.mailbox().put_outbox("ready", {"title": "v1", "body": "b1"})
@@ -430,6 +445,46 @@ class ReconcileTest(unittest.TestCase):
             self.assertEqual(len(without_tb), 2)  # then one-liners
         finally:
             self.tracker.eligible_issues = original
+
+    def test_reload_drops_worker_stopped_by_another_process(self):
+        import shutil
+        from issuefleet.registry import Registry
+
+        self.claim_one()
+        w = self.worker()
+        self.tracker.issues["issue-1"].labels = []  # un-eligible: no re-claim
+        # Simulate an external `stop`: remove from the on-disk registry and
+        # delete the worktree, WITHOUT touching this reconciler's memory.
+        Registry(self.cfg.state_dir).remove("issue-1")
+        shutil.rmtree(w.worktree)
+        self.rec.tick()  # stale in-memory entry must not crash the tick
+        self.assertIsNone(self.worker())
+
+    def test_service_drops_worker_whose_worktree_vanished(self):
+        # A worktree removed underfoot (still in the on-disk registry) is
+        # unserviceable and gets dropped rather than crashing every tick.
+        import shutil
+
+        self.claim_one()
+        self.tracker.issues["issue-1"].labels = []  # un-eligible: no re-claim
+        shutil.rmtree(self.worker().worktree)
+        self.rec.tick()
+        self.assertIsNone(self.worker())
+
+    def test_still_delegated_worker_is_reclaimed_after_external_stop(self):
+        # The production case: stop a still-eligible worker and the next
+        # tick re-claims it fresh (new worktree), not a zombie.
+        import shutil
+        from issuefleet.registry import Registry
+
+        self.claim_one()
+        old_wt = self.worker().worktree
+        Registry(self.cfg.state_dir).remove("issue-1")
+        shutil.rmtree(old_wt)  # issue-1 stays labeled/eligible
+        self.rec.tick()
+        w = self.worker()
+        self.assertIsNotNone(w)  # re-claimed
+        self.assertTrue((Path(w.worktree) / ".agent").is_dir())  # fresh worktree
 
     # -- isolation ---------------------------------------------------------
 

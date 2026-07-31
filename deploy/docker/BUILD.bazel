@@ -41,3 +41,39 @@ sh_binary(
         "env.sh",
     ],
 )
+
+sh_binary(
+    name = "status",
+    srcs = ["status.sh"],
+    data = [
+        "docker-compose.yml",
+        "env.sh",
+    ],
+)
+
+sh_binary(
+    name = "logs",
+    srcs = ["logs.sh"],
+    data = [
+        "docker-compose.yml",
+        "env.sh",
+    ],
+)
+
+sh_binary(
+    name = "attach",
+    srcs = ["attach.sh"],
+    data = [
+        "docker-compose.yml",
+        "env.sh",
+    ],
+)
+
+sh_binary(
+    name = "stop",
+    srcs = ["stop.sh"],
+    data = [
+        "docker-compose.yml",
+        "env.sh",
+    ],
+)

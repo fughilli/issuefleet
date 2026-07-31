@@ -58,6 +58,11 @@ class Forge(Protocol):
 
     def update_pr(self, number: int, title: str, body: str) -> None: ...
 
+    def close_pr(self, number: int) -> None:
+        """Close without merging (for `ready --new-pr`: close the tainted PR
+        so a fresh one can be opened from the same branch)."""
+        ...
+
     def get_pr(self, number: int) -> PullRequest: ...
 
     def pr_feedback(self, number: int) -> list[PrFeedback]:

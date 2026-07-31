@@ -209,7 +209,10 @@ class AgentctlTest(unittest.TestCase):
         [m] = self.mb.pending_outbox()
         self.assertEqual(m.kind, "ready")
         self.assertEqual(m.payload["title"], "Fix the thing")
-        self.assertEqual(turns.TurnState.load(self.agent_dir).phase, turns.PHASE_READY)
+        self.assertFalse(m.payload["new_pr"])
+        st = turns.TurnState.load(self.agent_dir)
+        self.assertEqual(st.phase, turns.PHASE_READY)
+        self.assertTrue(st.ever_ready)  # gates the no-op auto-idle backstop
 
     def test_find_agent_dir_walks_up(self):
         import os

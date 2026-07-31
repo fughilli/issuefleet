@@ -163,10 +163,12 @@ class ReadyWakeRestoreTest(unittest.TestCase):
     def test_noop_continuation_turns_auto_idle(self):
         # The FUG-13 grind: agent says "nothing left to do", emits nothing,
         # commits nothing — and used to get continuation turns until the
-        # budget. Two no-op turns now park it in idle.
+        # budget. Two no-op turns now park it in idle — but only AFTER a
+        # first submission (ever_ready).
         st = turns.TurnState.load(self.agent_dir)
         st.phase = turns.PHASE_RUNNING
         st.turns_taken = 3
+        st.ever_ready = True
         st.save(self.agent_dir)
         self.stub_claude()  # does nothing at all
         self.assertEqual(turnloop.step(self.agent_dir), 0)  # no-op 1
@@ -174,6 +176,35 @@ class ReadyWakeRestoreTest(unittest.TestCase):
         self.assertEqual(turnloop.step(self.agent_dir), 0)  # no-op 2 -> idle
         self.assertEqual(turns.TurnState.load(self.agent_dir).phase, turns.PHASE_IDLE)
         self.assertEqual(turnloop.step(self.agent_dir), turns.EXIT_READY)  # parked
+
+    def test_pre_submission_exploration_is_never_parked(self):
+        # Live misfire: a worker exploring the codebase (quiet turns, no
+        # commits yet, nothing submitted) was parked at turn 3. Before
+        # ever_ready, the auto-turn budget is the only brake.
+        st = turns.TurnState.load(self.agent_dir)
+        st.phase = turns.PHASE_RUNNING
+        st.turns_taken = 1
+        st.save(self.agent_dir)  # ever_ready defaults False
+        self.stub_claude()
+        for _ in range(4):  # way past MAX_NOOP_TURNS
+            self.assertEqual(turnloop.step(self.agent_dir), 0)
+        self.assertEqual(turns.TurnState.load(self.agent_dir).phase, turns.PHASE_RUNNING)
+
+    def test_failed_turns_are_never_parked_as_idle(self):
+        # Live incident: every turn failed instantly (root-refused claude);
+        # failures counted as no-ops and the worker parked into an
+        # innocent-looking idle, masking the outage.
+        st = turns.TurnState.load(self.agent_dir)
+        st.phase = turns.PHASE_RUNNING
+        st.turns_taken = 1
+        st.ever_ready = True  # even in the parkable regime
+        st.save(self.agent_dir)
+        stub = self.bin / "claude"
+        stub.write_text("#!/bin/sh\ncat > /dev/null\nexit 1\n")
+        stub.chmod(0o755)
+        for _ in range(4):
+            self.assertEqual(turnloop.step(self.agent_dir), turns.EXIT_ERROR)
+        self.assertEqual(turns.TurnState.load(self.agent_dir).phase, turns.PHASE_RUNNING)
 
     def test_wake_from_idle_restores_idle(self):
         st = turns.TurnState.load(self.agent_dir)

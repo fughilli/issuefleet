@@ -141,7 +141,13 @@ def step(agent_dir: Path) -> int:
     state = turns.TurnState.load(agent_dir)
     emitted = mb.last_outbox_seq() != pre_turn_seq
     committed = _git_head(workspace) != pre_head
-    if (
+    if rc != 0:
+        # A FAILED turn must never adjust phase: counting failures as
+        # "no-op" turns parked a 100%-failing worker into innocent-looking
+        # idle (observed live: root-refused claude, 4 instant failures,
+        # status showed 'idle'). Failures stay on the loud EXIT_ERROR path.
+        state.noop_turns = 0
+    elif (
         decision.wake_from_phase in (turns.PHASE_READY, turns.PHASE_IDLE)
         and state.phase == turns.PHASE_RUNNING
         and not emitted
@@ -154,6 +160,7 @@ def step(agent_dir: Path) -> int:
         state.noop_turns = 0
     elif (
         state.phase == turns.PHASE_RUNNING
+        and state.ever_ready
         and decision.wake_from_phase is None
         and decision.resume
         and not emitted
@@ -162,6 +169,10 @@ def step(agent_dir: Path) -> int:
         # Backstop for agents that finish but never say so: consecutive
         # continuation turns producing neither a message nor a commit are
         # going nowhere — park the loop instead of grinding the budget.
+        # Gated on ever_ready: BEFORE a first submission, quiet turns are
+        # usually legitimate codebase exploration (observed live: a worker
+        # got parked at turn 3 mid-exploration), and the auto-turn budget
+        # is the intended brake for that regime.
         state.noop_turns += 1
         if state.noop_turns >= MAX_NOOP_TURNS:
             print(

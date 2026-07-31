@@ -15,9 +15,16 @@ Workers are therefore *siblings* of the daemon container, and every path
 the launcher bind-mounts into them (worktree, the repo's `.git`, the claude
 config dir) is resolved **by the host**. Hence the invariant:
 
-> `<ROOT>/{worktrees,repos,claude-config,state}` are mounted at identical
+> `<ROOT>/{worktrees,repos,state}` (+ the live claude-container config) are mounted at identical
 > absolute paths on the host and in the daemon container, and the
 > config.toml must use those paths.
+
+The same applies to any checkout the daemon does *not* own — a `repo` that
+points at your own working tree rather than `<ROOT>/repos/...`. Those live
+under `$ISSUEFLEET_PROJECTS` (`~/Projects` by default), which is same-path
+mounted and passed into the daemon's environment for the same reason. Write
+it as `${ISSUEFLEET_PROJECTS}/yourrepo` in config.toml, never `~/yourrepo`:
+`~` is `/root` inside the container and would miss the mount entirely.
 
 The root is declared ONCE, in `deploy/docker/env.sh`, as
 **`$HOME/.issuefleet` on every platform** (inside Docker Desktop's shared
@@ -45,7 +52,9 @@ What you must provide by hand:
 # 2. Claude credentials for workers: seed the shared config dir (same
 #    content as ~/.config/claude-container/config — OAuth credentials +
 #    settings.json with bypassPermissions). Never copied automatically.
-cp -r ~/.config/claude-container/config/* ~/.issuefleet/claude-config/
+# (nothing to copy — the stack shares your LIVE ~/.config/claude-container/config
+#  read-write, so OAuth refreshes stay coherent. Just make sure it exists:
+#  run `claude-container` once on the host if you never have.)
 
 ```
 
@@ -63,7 +72,7 @@ plain `~/...` defaults — no changes needed:
 state_dir = "${ISSUEFLEET_ROOT}/state"
 worktree_root = "${ISSUEFLEET_ROOT}/worktrees"   # same-path invariant
 [agent]
-container_config_dir = "${ISSUEFLEET_ROOT}/claude-config"   # same-path invariant
+container_config_dir = "${ISSUEFLEET_CLAUDE_CONFIG}"   # LIVE shared claude creds
 [webhooks]
 enabled = true                                    # bind stays 127.0.0.1
 [[projects]]
@@ -97,6 +106,13 @@ docker compose up -d
 docker compose exec tailscale tailscale funnel status
 ```
 
+The listener binds loopback INSIDE the shared network namespace — the
+sidecar's Funnel reaches it via 127.0.0.1 directly (no 0.0.0.0, no port
+exposure). The `127.0.0.1:8787:8787` publish on the tailscale service is
+for migration only: it lets a host-side tunnel with already-registered
+webhook URLs keep working until you repoint them at this stack's funnel
+host.
+
 Funnel must be allowed for your tailnet (the admin console prompts once).
 Your public webhook base is `https://issuefleet.<tailnet>.ts.net` — put
 `…/webhook/github` in the GitHub App's webhook settings and
@@ -106,9 +122,11 @@ Your public webhook base is `https://issuefleet.<tailnet>.ts.net` — put
 ## Operating it
 
 ```sh
-bazel run //deploy/docker:doctor    # or the exec/status forms below
-docker compose exec issuefleet bin/issuefleet --config /etc/issuefleet/config.toml status
-docker compose exec -it issuefleet tmux attach -t issuefleet-<proj>-<KEY>   # watch a worker
+bazel run //deploy/docker:status    # fleet: phase, turns, PR, liveness, last activity
+bazel run //deploy/docker:logs      # follow the reconcile-loop log (ticks/claims/relays)
+bazel run //deploy/docker:doctor    # health checks
+bazel run //deploy/docker:attach -- FUG-14   # a worker's live tmux (detach: Ctrl-b d)
+bazel run //deploy/docker:stop -- FUG-14     # wind one worker down by hand
 docker compose logs -f issuefleet                                           # daemon log
 ```
 
@@ -118,12 +136,17 @@ workers' *containers* — but note the tmux caveat below.
 
 ## Known edges (read before relying on it)
 
-- **UNPROVEN as a whole**: this compose stack was authored, not yet run.
-  The individually risky seams: claude-container running *inside* a
-  container (it needs bash + docker CLI, both provided; it computes
-  USER_UID from `id -u` — root in this image, so workers run as root and
-  write root-owned files into the worktrees), and Funnel serve-config
-  templating. Run `doctor` first; it validates most of the chain.
+- **HOME must be writable by the operator uid.** The config bind-mount
+  makes `/home/fleet/.config` root-owned; the entrypoint chowns HOME +
+  .config to the runtime uid so the launcher can write its own state
+  (`~/.config/claude-container`). Found live: the launcher failed with
+  'mkdir: cannot create /home/fleet/.config/claude-container'.
+- **The daemon must not run as root** (found live: the launcher
+  propagates the daemon's uid to workers, and claude refuses
+  bypassPermissions as root — every turn fails instantly). The compose
+  file therefore runs the service as your uid (`user:` fed by env.sh,
+  which also grants the docker socket's group). `doctor` fails loudly on
+  both conditions; always run it after changing the stack.
 - **tmux lives inside the daemon container**, so unlike the laptop setup,
   restarting the *daemon container* kills worker sessions (their docker
   containers die with the pty). The crash-restart path re-adopts and
@@ -131,8 +154,29 @@ workers' *containers* — but note the tmux caveat below.
   broken — but prefer `docker compose restart tailscale` / config reloads
   over restarting the issuefleet service while workers are mid-task.
 - The launcher's linked-worktree `.git` mount only works because repos and
-  worktrees share the ROOT prefix visible to the host daemon. Don't
-  relocate one without the other.
+  worktrees are visible at the same path to both the daemon container and
+  the host daemon — under ROOT, or under `$ISSUEFLEET_PROJECTS`. Don't
+  relocate one without the other. The failure is quiet: the launcher
+  resolves the worktree's `.git` pointer in the daemon container and, if it
+  doesn't resolve, prints "git won't work in the container" and starts the
+  worker anyway, without the mount.
+- **Git ownership: the mount SHAPE matters, not just the path.** A checkout
+  under `$ISSUEFLEET_PROJECTS` belongs to the host user, while both this
+  container and the workers it launches run as root — normally git's
+  "dubious ownership" refusal. What saves the workers is that Docker
+  Desktop presents a bind-mount *root* as root-owned, and the launcher
+  mounts the worktree as its own mount root (`-v $WORKSPACE_DIR:/workspace`):
+  git checks the directory it starts from, passes, then follows the gitdir
+  pointer into the host-owned `.git` without re-checking. The daemon has no
+  such luck — it reaches the checkout through the *parent* tree mount, where
+  the repo dir keeps its real uid — hence the `safe.directory` entry in
+  `GIT_CONFIG_*` in docker-compose.yml. Measured, not assumed: same repo,
+  parent-tree mount `rc=128`, launcher-shaped mount `rc=0`.
+  Two corollaries. Running this container as the host uid (to "fix" the
+  mismatch) makes it *worse*: uid 501 can't connect to the root-owned
+  docker socket, and it turns the root-owned `/workspace` into the dubious
+  one. And this rests on Docker Desktop's ownership synthesis — on a Linux
+  host the uids are real, so re-test rather than assume it carries over.
 - **Don't run the laptop-mode daemon and this stack against the same
   Linear projects simultaneously** — they have separate registries and
   will double-claim issues. Stop `bin/issuefleet run` before `:up`.

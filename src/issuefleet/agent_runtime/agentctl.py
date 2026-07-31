@@ -52,6 +52,9 @@ def main(argv: list[str] | None = None) -> int:
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--body")
     g.add_argument("--body-file")
+    p.add_argument("--new-pr", action="store_true",
+                   help="close the existing PR and open a fresh one instead of updating it "
+                        "(use when the current PR's premise/history is wrong)")
 
     sub.add_parser(
         "idle",
@@ -91,8 +94,9 @@ def main(argv: list[str] | None = None) -> int:
         print("question queued; the loop will idle after this turn until a human replies")
     elif args.cmd == "ready":
         body = args.body if args.body is not None else Path(args.body_file).read_text()
-        mb.put_outbox("ready", {"title": args.title, "body": body})
+        mb.put_outbox("ready", {"title": args.title, "body": body, "new_pr": args.new_pr})
         state.phase = turns.PHASE_READY
+        state.ever_ready = True
         state.save(agent_dir)
         print("ready queued; the orchestrator will push the branch and open/update the PR")
     elif args.cmd == "idle":

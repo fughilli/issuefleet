@@ -147,6 +147,72 @@ class LauncherFlagCheckTest(unittest.TestCase):
         self.assertEqual(_check_launcher_flags(self.cfg), [])
 
 
+class CliParserTest(unittest.TestCase):
+    """Global flags must parse in EITHER position — a trailing -v after the
+    subcommand bootlooped the container (usage error -> restart loop)."""
+
+    def parse(self, argv):
+        from issuefleet.cli import build_parser
+
+        return build_parser().parse_args(argv)
+
+    def test_verbose_both_positions(self):
+        self.assertTrue(getattr(self.parse(["run", "-v"]), "verbose", False))
+        self.assertTrue(getattr(self.parse(["-v", "run"]), "verbose", False))
+        self.assertFalse(getattr(self.parse(["run"]), "verbose", False))
+
+    def test_config_both_positions_no_default_clobber(self):
+        # SUPPRESS semantics: a pre-subcommand value must survive the
+        # subparser (argparse parents pitfall).
+        a = self.parse(["--config", "/x.toml", "status"])
+        self.assertEqual(getattr(a, "config"), "/x.toml")
+        a = self.parse(["status", "--config", "/y.toml"])
+        self.assertEqual(getattr(a, "config"), "/y.toml")
+        self.assertFalse(hasattr(self.parse(["status"]), "config"))
+
+    def test_subcommand_own_flags_still_work(self):
+        a = self.parse(["once", "--dry-run", "-v"])
+        self.assertTrue(a.dry_run)
+        self.assertTrue(getattr(a, "verbose", False))
+        a = self.parse(["logs", "FUG-1", "-f"])
+        self.assertTrue(a.follow)
+
+
+class WorkerRuntimeCheckTest(unittest.TestCase):
+    def test_root_euid_fails_with_guidance(self):
+        from unittest import mock
+
+        from issuefleet.doctor import _check_worker_runtime
+
+        cfg = config.parse({"projects": [{"name": "x", "linear_project": "X",
+                                          "repo": "/tmp/x",
+                                          "claim": {"strategy": "agent"}}]})
+        with mock.patch("os.geteuid", return_value=0):
+            checks = _check_worker_runtime(cfg)
+        root_check = [c for c in checks if "root" in c.label][0]
+        self.assertEqual(root_check.status, "fail")
+        self.assertIn("bypassPermissions", root_check.detail)
+        with mock.patch("os.geteuid", return_value=501):
+            checks = _check_worker_runtime(cfg)
+        self.assertEqual([c.status for c in checks if "uid 501" in c.label], ["ok"])
+
+
+class WebhookBindTest(unittest.TestCase):
+    def test_env_overrides_config_bind(self):
+        import os
+
+        from issuefleet.cli import _webhook_bind
+        from issuefleet.config import WebhookConfig
+
+        w = WebhookConfig()
+        self.assertEqual(_webhook_bind(w), "127.0.0.1")
+        os.environ["ISSUEFLEET_WEBHOOK_BIND"] = "0.0.0.0"
+        try:
+            self.assertEqual(_webhook_bind(w), "0.0.0.0")
+        finally:
+            del os.environ["ISSUEFLEET_WEBHOOK_BIND"]
+
+
 class DoctorTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
