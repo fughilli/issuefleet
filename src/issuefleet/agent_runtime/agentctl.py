@@ -93,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
         body = args.body if args.body is not None else Path(args.body_file).read_text()
         mb.put_outbox("ready", {"title": args.title, "body": body})
         state.phase = turns.PHASE_READY
+        state.ever_ready = True
         state.save(agent_dir)
         print("ready queued; the orchestrator will push the branch and open/update the PR")
     elif args.cmd == "idle":

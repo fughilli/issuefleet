@@ -154,6 +154,7 @@ def step(agent_dir: Path) -> int:
         state.noop_turns = 0
     elif (
         state.phase == turns.PHASE_RUNNING
+        and state.ever_ready
         and decision.wake_from_phase is None
         and decision.resume
         and not emitted
@@ -162,6 +163,10 @@ def step(agent_dir: Path) -> int:
         # Backstop for agents that finish but never say so: consecutive
         # continuation turns producing neither a message nor a commit are
         # going nowhere — park the loop instead of grinding the budget.
+        # Gated on ever_ready: BEFORE a first submission, quiet turns are
+        # usually legitimate codebase exploration (observed live: a worker
+        # got parked at turn 3 mid-exploration), and the auto-turn budget
+        # is the intended brake for that regime.
         state.noop_turns += 1
         if state.noop_turns >= MAX_NOOP_TURNS:
             print(

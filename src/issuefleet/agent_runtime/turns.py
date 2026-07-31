@@ -46,6 +46,7 @@ class TurnState:
     turns_taken: int = 0
     auto_turns: int = 0  # consecutive self-driven turns since last human contact
     noop_turns: int = 0  # consecutive continuation turns with no output or commit
+    ever_ready: bool = False  # has this worker ever submitted? (gates auto-idle)
     max_auto_turns: int = 40
     budget_reported: bool = False
     idle_poll_s: int = 15

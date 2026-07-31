@@ -276,7 +276,8 @@ def cmd_status(cfg: Config) -> int:
             f"    branch {rec.branch}; outbox pending {len(mb.pending_outbox())}, "
             f"inbox pending {len(mb.pending_inbox())}"
         )
-        print(f"    watch: tmux attach -t {rec.tmux_session}   log: {runner.log_path(rec)}")
+        print(f"    watch: tmux attach -t {rec.tmux_session}")
+        print(f"    turn logs: {agent_dir / 'logs'}   pane log: {runner.log_path(rec)}")
     return 0
 
 

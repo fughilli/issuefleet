@@ -64,7 +64,7 @@ class TmuxRunner:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         _tmux(["new-session", "-d", "-s", rec.tmux_session, *self.command(rec, config)])
         # Capture output without stealing the pty.
-        _tmux(
+        proc = _tmux(
             [
                 "pipe-pane",
                 "-o",
@@ -74,6 +74,12 @@ class TmuxRunner:
             ],
             check=False,
         )
+        if proc.returncode != 0:
+            # Not fatal (the worker runs fine unlogged; turn logs still land
+            # in the worktree) but silently missing pane logs cost real
+            # debugging time — say so.
+            log.warning("pipe-pane for %s failed (%s); pane log %s will be empty",
+                        rec.tmux_session, proc.stderr.strip(), self.log_path(rec))
 
     def alive(self, rec: WorkerRecord) -> bool:
         return _tmux(["has-session", "-t", f"={rec.tmux_session}"], check=False).returncode == 0
