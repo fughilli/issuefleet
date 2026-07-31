@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import shlex
 import subprocess
+import time
 from pathlib import Path
 
 from issuefleet.config import Config
@@ -62,7 +63,12 @@ class TmuxRunner:
         if self.alive(rec):
             return  # idempotent: adopt the live session
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        _tmux(["new-session", "-d", "-s", rec.tmux_session, *self.command(rec, config)])
+        # A brief exec prelude so pipe-pane attaches before the command can
+        # die: a launcher that exits instantly used to vanish before its
+        # output was ever captured (observed live — the only evidence was
+        # "can't find pane"). exec keeps the pty; no pipes involved.
+        wrapped = f"sleep 0.3; exec {shlex.join(self.command(rec, config))}"
+        _tmux(["new-session", "-d", "-s", rec.tmux_session, "sh", "-c", wrapped])
         # Capture output without stealing the pty.
         proc = _tmux(
             [
@@ -80,6 +86,15 @@ class TmuxRunner:
             # debugging time — say so.
             log.warning("pipe-pane for %s failed (%s); pane log %s will be empty",
                         rec.tmux_session, proc.stderr.strip(), self.log_path(rec))
+        time.sleep(1.0)
+        if not self.alive(rec):
+            log.error(
+                "worker session %s died within 1s of launch — the launcher itself is "
+                "failing. Its dying words are in %s; reproduce interactively with:\n"
+                "  %s",
+                rec.tmux_session, self.log_path(rec),
+                " ".join(self.command(rec, config)),
+            )
 
     def alive(self, rec: WorkerRecord) -> bool:
         return _tmux(["has-session", "-t", f"={rec.tmux_session}"], check=False).returncode == 0

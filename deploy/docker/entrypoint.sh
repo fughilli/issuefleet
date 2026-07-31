@@ -5,6 +5,14 @@
 # can't help on Docker Desktop, which mounts the socket root:root 0755 —
 # no group has write until we chmod it.
 set -eu
+# A real passwd/group entry for the target uid: without one, whoami/id -un/
+# $USER-dependent tools (shell scripts included) fail in confusing ways.
+if ! getent passwd "${ISSUEFLEET_UID:?set by env.sh via compose}" >/dev/null 2>&1; then
+  echo "fleet:x:${ISSUEFLEET_UID}:${ISSUEFLEET_GID:?set by env.sh via compose}::/home/fleet:/bin/bash" >> /etc/passwd
+fi
+if ! getent group "${ISSUEFLEET_GID}" >/dev/null 2>&1; then
+  echo "fleet:x:${ISSUEFLEET_GID}:" >> /etc/group
+fi
 SOCK=/var/run/docker.sock
 sock_gid=0
 if [ -S "$SOCK" ]; then
@@ -12,7 +20,7 @@ if [ -S "$SOCK" ]; then
   chmod g+rw "$SOCK" 2>/dev/null || true
 fi
 exec setpriv \
-  --reuid "${ISSUEFLEET_UID:?set by env.sh via compose}" \
-  --regid "${ISSUEFLEET_GID:?set by env.sh via compose}" \
+  --reuid "${ISSUEFLEET_UID}" \
+  --regid "${ISSUEFLEET_GID}" \
   --groups "$sock_gid" \
-  "$@"
+  env USER=fleet LOGNAME=fleet "$@"
