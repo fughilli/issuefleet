@@ -36,7 +36,7 @@ PHASE_IDLE = "idle"  # declared done / standing by (agentctl idle); wakes like r
 
 # Inbox kinds that justify waking an idle agent. "info" is context-only: it
 # rides along on the next turn but never triggers one by itself.
-_WAKING_KINDS = ("reply", "pr_feedback", "pr_closed")
+_WAKING_KINDS = ("reply", "pr_feedback", "pr_closed", "merge_conflict")
 
 
 @dataclass
@@ -172,6 +172,8 @@ def format_inbound(msgs: list[Message]) -> str:
                 head += f" on `{p['path']}`"
         elif m.kind == "pr_closed":
             head = "Your PR was closed without merging"
+        elif m.kind == "merge_conflict":
+            head = "Your PR no longer merges cleanly (rebase needed)"
         else:
             head = "Notice from the orchestrator"
         blocks.append(f"### {head}\n{p.get('text', p.get('body', ''))}")

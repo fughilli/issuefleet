@@ -41,6 +41,11 @@ def _to_pr(d: dict) -> PullRequest:
         merged=bool(d.get("merged")) or d.get("merged_at") is not None,
         head=d["head"]["ref"],
         base=d["base"]["ref"],
+        # Present only on the single-PR GET; absent (-> None) from the list
+        # endpoint find_pr() uses, which is fine — conflict detection reads
+        # the PR fetched by get_pr().
+        mergeable=d.get("mergeable"),
+        mergeable_state=d.get("mergeable_state"),
     )
 
 

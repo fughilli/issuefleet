@@ -358,6 +358,12 @@ class Reconciler:
                 lines.append(f"{rec.issue_key}: PR #{pr.number} merged; would tear down")
             elif pr.state == "closed" and f"closed-{pr.number}" not in rec.seen_feedback_ids:
                 lines.append(f"{rec.issue_key}: PR #{pr.number} closed unmerged; would notify agent")
+            elif pr.state == "open" and (pr.mergeable is False or pr.mergeable_state == "dirty") \
+                    and not rec.conflict_notified:
+                lines.append(
+                    f"{rec.issue_key}: PR #{pr.number} has merge conflicts; would fetch "
+                    f"origin/{rec.base_ref} and ask the agent to rebase"
+                )
         return lines or [f"{rec.issue_key}: up to date; no action"]
 
     # ------------------------------------------------------------- servicing
@@ -721,6 +727,69 @@ class Reconciler:
                 rec.seen_feedback_ids.append(sentinel)
                 rec.touch()
                 self.registry.save()
+        else:
+            self._check_merge_conflict(rec, project, mailbox, pr)
+
+    def _check_merge_conflict(self, rec: WorkerRecord, project: ProjectConfig, mailbox: Mailbox, pr):
+        """Drive an open PR that has stopped merging cleanly (other work landed
+        on the base) back to a rebased, mergeable state. The worker container
+        has no forge credential, so the fetch of the latest base has to happen
+        here: we refresh ``origin/<base_ref>`` in the shared clone — which the
+        worktree sees with no network — then wake the agent with instructions
+        to rebase onto it and re-submit.
+
+        ``pr.mergeable`` is None until GitHub finishes computing it; we act only
+        on a definitive verdict. The notify is armed once per conflict episode
+        (``conflict_notified``) and re-armed when the PR reads mergeable again,
+        so a stuck-dirty PR isn't nagged every tick but a fresh conflict after a
+        resolution is caught."""
+        conflicted = pr.mergeable is False or pr.mergeable_state == "dirty"
+        if not conflicted:
+            if pr.mergeable is True and rec.conflict_notified:
+                rec.conflict_notified = False
+                rec.touch()
+                self.registry.save()
+            return
+        if rec.conflict_notified:
+            return
+
+        # Refresh origin/<base_ref> so the worktree can rebase offline. If the
+        # fetch fails we stay un-notified and retry next tick, rather than send
+        # the agent to rebase onto a stale base.
+        fetch_url, fetch_auth = self.forges[project.name].push_spec()
+        try:
+            self.git.fetch(project.repo, url=fetch_url, auth_header=fetch_auth)
+        except gitops.GitError as e:
+            log.warning("worker %s: pre-conflict fetch failed (%s); will retry next tick",
+                        rec.issue_key, e)
+            return
+
+        log.info("worker %s: PR #%d has merge conflicts with %s; asking the agent to rebase",
+                 rec.issue_key, pr.number, rec.base_ref)
+        mailbox.ensure().put_inbox(
+            "merge_conflict",
+            {
+                "pr_number": pr.number,
+                "pr_url": pr.url,
+                "base_ref": rec.base_ref,
+                "text": (
+                    f"PR #{pr.number} can no longer be merged cleanly — other changes have "
+                    f"landed on `{rec.base_ref}` and now conflict with your branch. The latest "
+                    f"`{rec.base_ref}` has been fetched host-side into `origin/{rec.base_ref}` "
+                    "(you have no network of your own, so the fetch was done for you). Rebase "
+                    f"onto it and resolve the conflicts:\n\n"
+                    f"    git rebase origin/{rec.base_ref}\n"
+                    "    # fix each conflicted file, then:\n"
+                    "    git add -A && git rebase --continue\n\n"
+                    "Then re-run `agentctl ready` to update the PR. (A "
+                    f"`git merge origin/{rec.base_ref}` is acceptable too if a rebase is "
+                    "awkward.) If the conflicts need a human decision, use `agentctl ask`."
+                ),
+            },
+        )
+        rec.conflict_notified = True
+        rec.touch()
+        self.registry.save()
 
     # -------------------------------------------------------------- teardown
 

@@ -201,6 +201,16 @@ class FakeForge:
         self.prs[number].state = "closed"
         self.closed.append(number)
 
+    def set_mergeable(self, number: int, mergeable, state=None) -> None:
+        """Test helper: mimic GitHub's async mergeability verdict on an open PR.
+        `mergeable=False` (state 'dirty') is a merge conflict; None is 'not
+        computed yet'."""
+        pr = self.prs[number]
+        pr.mergeable = mergeable
+        pr.mergeable_state = state if state is not None else (
+            "clean" if mergeable else "dirty" if mergeable is False else "unknown"
+        )
+
     def add_feedback(self, number: int, body: str, kind="comment", reviewer="alice", path=None):
         fid = f"f{len(self.feedback.setdefault(number, [])) + 1}-{number}"
         self.feedback[number].append(

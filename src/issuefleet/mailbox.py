@@ -15,7 +15,7 @@ never deleted here — consumed/archived files are the durable audit trail and
 get archived wholesale at teardown.
 
 Outbox kinds: status, question, ready, file_issue, ack.
-Inbox kinds:  reply, pr_feedback, pr_closed, info, shutdown, unclaimed.
+Inbox kinds:  reply, pr_feedback, pr_closed, merge_conflict, info, shutdown, unclaimed.
 """
 
 from __future__ import annotations
@@ -35,7 +35,9 @@ _NAME_RE = re.compile(r"^(\d{6})-([a-z_]+)-([0-9a-f]+)\.json$")
 # `ack` carries a UX acknowledgment emoji (⚙️/✅) the worker emits to close
 # the 👀→⚙️→✅ loop; relayed only into agent sessions, never as a comment.
 OUTBOX_KINDS = ("status", "question", "ready", "file_issue", "ack")
-INBOX_KINDS = ("reply", "pr_feedback", "pr_closed", "info", "shutdown", "unclaimed")
+INBOX_KINDS = (
+    "reply", "pr_feedback", "pr_closed", "merge_conflict", "info", "shutdown", "unclaimed"
+)
 
 
 @dataclass
