@@ -20,7 +20,7 @@ import threading
 import time
 from pathlib import Path
 
-from issuefleet.agent_runtime import turns
+from issuefleet.agent_runtime import tailnet, turns
 from issuefleet.agent_runtime.agentctl import find_agent_dir
 from issuefleet.mailbox import Mailbox
 
@@ -210,7 +210,24 @@ def step(agent_dir: Path) -> int:
     return turns.EXIT_CONTINUE
 
 
+def _bring_up_tailnet(agent_dir: Path) -> None:
+    """Opt-in tailnet bring-up (FUG-40), once at container start. Best-effort:
+    a failure prints a line and the worker runs its turns normally."""
+    try:
+        status = tailnet.ensure_up(agent_dir)
+    except Exception as e:  # never let tailnet take down the loop
+        print(f"turnloop: tailnet bring-up errored ({e}); continuing without it")
+        return
+    if status is None:
+        return  # not requested for this worker
+    if status.ok:
+        print(f"turnloop: tailnet up (proxy {status.proxy}, ip {status.ip or '?'})")
+    else:
+        print(f"turnloop: tailnet not available: {status.reason}")
+
+
 def run(agent_dir: Path) -> int:
+    _bring_up_tailnet(agent_dir)
     failures = 0
     while True:
         code = step(agent_dir)

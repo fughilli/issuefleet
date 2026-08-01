@@ -58,6 +58,29 @@ end-to-end flow — `docs/SMOKE_TEST.md` is the step-by-step procedure.
 
 ## Recent additions
 
+- **FUG-40 — tailnet access inside workers** (branch
+  `agent/fug-40-…`): opt-in, off by default. `[agent.tailscale]` (+ per-project
+  `tailscale = true|false`) turns it on; the daemon resolves an ephemeral,
+  ACL-tagged auth key (env-then-chmod-600-file; a literal `authkey` in the
+  config is rejected) and `worker.stage_tailscale` writes it +
+  `params.json` into the worker's git-excluded `.agent/tailscale/` at claim
+  time — so no `claude-container` env/mount support is needed. New
+  `agent_runtime/tailnet.ensure_up` (called once from `turnloop.run`) brings
+  Tailscale up in **userspace-networking** mode (no TUN, no NET_ADMIN),
+  exposing a loopback SOCKS5/HTTP proxy the agent opts into per command
+  (`.agent/tailscale/env`; the brief explains it) — the worker's own
+  claude/git traffic is never rerouted. Best-effort: failures log to
+  `.agent/tailscale/bringup.log` and never break the turn loop. `doctor` gains
+  a check that verifies the key resolves and — the actual blocker observed live
+  (exit 144, pre-exec, string-keyed) — warns if the shared worker
+  `settings.json` has a `permissions.deny`/hook matching `tailscale`, since a
+  deny can't be overridden by an allow. Operator prerequisites (documented, not
+  auto-provisioned): the `tailscale` binary in the worker image + egress
+  UDP/443 to DERP/coordination. Offline-tested (config/creds/worker/tailnet/
+  doctor; tailnet happy-path uses stub tailscale/tailscaled binaries).
+  **Unverified against a real tailnet + rig** — needs a live worker with the
+  binary installed and a key set.
+
 - **FUG-32 — outer deploy loop** (branch `agent/fug-32-…`):
   `deploy/docker/watch.sh` (+ `//deploy/docker:watch`,
   `deploy/issuefleet-watch.service`) supervises the compose stack and keeps

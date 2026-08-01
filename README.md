@@ -271,6 +271,20 @@ copy_from_repo = [".claude", ".claude-container-overlay"]
 launcher_args = ["--skills-ignore-new"]
 # container_config_dir = "~/.config/claude-container/config"  # default: launcher's shared dir
 
+# Opt-in tailnet access inside worker containers (off by default). When on, the
+# daemon delivers the auth key into each worker's .agent/ and the in-container
+# runtime brings Tailscale up in userspace-networking mode — no TUN device, no
+# NET_ADMIN, nothing changes about how claude-container launches the worker. See
+# "Tailnet access for workers" below.
+# [agent.tailscale]
+# enabled = true                              # fleet default (per-project override: tailscale = true|false)
+# authkey_env = "ISSUEFLEET_TS_AUTHKEY"       # secret: env first…
+# authkey_file = "~/.config/issuefleet/tailscale.authkey"   # …then this chmod-600 file
+# tags = ["tag:issuefleet-worker"]            # ACL tag the ephemeral key authorizes
+# hostname_template = "issuefleet-{key}"      # {key} = issue key, lowercased
+# up_args = []                                # extra `tailscale up` flags (e.g. --accept-dns=false)
+# proxy_port = 1055                            # loopback SOCKS5/HTTP proxy the agent opts into
+
 [[projects]]                 # one block per (Linear project -> GitHub repo) pair
 name = "splanc"              # short handle used in paths, sessions, logs
 linear_project = "Splanc"    # Linear project name (or UUID if names collide)
@@ -301,6 +315,47 @@ accidentally trigger a worker.
 
 Queue order is Linear priority (Urgent → Low, "no priority" last), then age.
 When the fleet is full, eligible issues wait; `doctor` shows the order.
+
+## Tailnet access for workers
+
+Agents sometimes need to reach shared resources over the operator's tailnet —
+a HITL rig, a device on a lab LAN — to do real local development. This is
+off by default (an unconfigured fleet is unchanged) and opt-in per fleet or
+per project. It deliberately does **not** weaken the "credentials never enter
+the agents" rule: the tailnet only routes to tailnet peers, and the worker's
+own control-plane traffic (claude, git) is never rerouted.
+
+How it works when enabled:
+
+1. **Auth key delivery.** The daemon resolves an auth key (env-then-chmod-600
+   file, like every other secret — never the config) and writes it, with the
+   bring-up params, into the worker's `.agent/tailscale/` at claim time.
+   `.agent/` is git-excluded and daemon-owned, so the key never rides into a
+   commit and needs no support from `claude-container` (no `-e`, no extra
+   mounts). Use an **ephemeral, ACL-tagged** key so dead workers self-clean and
+   can only reach what the tag allows.
+2. **Userspace bring-up.** At container start the in-container runtime starts
+   `tailscaled --tun=userspace-networking` (no `/dev/net/tun`, no `NET_ADMIN`)
+   and runs `tailscale up`. Best-effort: if it fails, the worker still runs its
+   turns; the reason is in `.agent/tailscale/bringup.log`.
+3. **Opt-in routing.** Rather than a global `ALL_PROXY` (which would push the
+   worker's own traffic through the tailnet), the local SOCKS5/HTTP proxy is
+   exposed at `socks5://127.0.0.1:<proxy_port>` and written to
+   `.agent/tailscale/env`. The agent's brief tells it to opt a command in:
+   `source .agent/tailscale/env && ssh user@rig`, or
+   `ALL_PROXY=socks5://127.0.0.1:1055 curl http://rig/…`.
+
+Prerequisites the operator owns (checked or flagged by `issuefleet doctor`):
+
+- **The `tailscale`/`tailscaled` binaries must be in the worker image.** Bake
+  them into your `claude-container` base image or its overlay; issuefleet does
+  not install them. If absent, bring-up is a logged no-op.
+- **Egress to the tailnet control plane.** Outbound UDP/443 to Tailscale's
+  coordination server and DERP relays must be reachable from the worker.
+- **No `tailscale` deny in the shared worker settings.** A `permissions.deny`
+  rule or hook matching `tailscale` in the launcher's shared `settings.json`
+  blocks the binary *pre-exec*, and a deny can't be overridden by an allow —
+  `doctor` warns if it finds one.
 
 ## Worker lifecycle
 

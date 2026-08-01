@@ -142,6 +142,47 @@ def _check_container_settings(cfg: Config) -> list[Check]:
                   "permission prompt; expected 'bypassPermissions'")]
 
 
+def _check_tailscale(cfg: Config) -> list[Check]:
+    """Worker tailnet (FUG-40). Silent unless at least one project opts in; then
+    it verifies the auth key resolves and warns about the one thing that
+    silently defeats the feature: a `permissions.deny`/hook in the shared worker
+    settings that matches 'tailscale'. That is a pre-exec command block a worker
+    can't work around — a deny always wins over an allow in Claude Code."""
+    if not any(cfg.tailscale_enabled_for(p) for p in cfg.projects):
+        return []
+    out = []
+    key = creds.resolve_tailscale_authkey(cfg)
+    if key:
+        detail = f"resolves (env ${cfg.tailscale.authkey_env} or {cfg.tailscale.authkey_file})"
+        if not creds.file_permissions_ok(cfg.tailscale.authkey_file):
+            out.append(Check(WARN, "tailnet auth key",
+                             f"{cfg.tailscale.authkey_file} is group/world-readable — chmod 600"))
+        else:
+            out.append(Check(OK, "tailnet auth key", detail))
+    else:
+        out.append(Check(WARN, "tailnet auth key",
+                         f"tailscale enabled but no key: set ${cfg.tailscale.authkey_env} or write "
+                         f"an ephemeral, tagged key to {cfg.tailscale.authkey_file} (chmod 600). "
+                         "Workers won't join the tailnet until then"))
+
+    config_dir = cfg.container_config_dir or Path("~/.config/claude-container/config").expanduser()
+    settings = config_dir / "settings.json"
+    try:
+        data = json.loads(settings.read_text())
+    except (OSError, json.JSONDecodeError):
+        return out  # covered by _check_container_settings
+    perms = data.get("permissions", {}) if isinstance(data, dict) else {}
+    denyblob = json.dumps(perms.get("deny", [])) + json.dumps(data.get("hooks", {}))
+    if "tailscale" in denyblob.lower():
+        out.append(Check(WARN, "tailnet not blocked",
+                         f"{settings} has a deny rule or hook matching 'tailscale' — that blocks "
+                         "the binary pre-exec, and a deny can't be overridden by an allow. Remove "
+                         "it or workers can't bring the tailnet up"))
+    else:
+        out.append(Check(OK, "tailnet not blocked", "no tailscale deny in the shared worker settings"))
+    return out
+
+
 def _check_dirs(cfg: Config) -> list[Check]:
     out = []
     for name, path in (("state_dir", cfg.state_dir), ("worktree_root", cfg.worktree_root)):
@@ -357,6 +398,7 @@ def run_doctor(
     checks += _check_worker_runtime(cfg)
     checks += _check_launcher_flags(cfg)
     checks += _check_container_settings(cfg)
+    checks += _check_tailscale(cfg)
     checks += _check_dirs(cfg)
     checks += _check_webhooks(cfg)
     checks += _check_dashboard(cfg)

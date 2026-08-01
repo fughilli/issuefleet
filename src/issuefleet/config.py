@@ -22,6 +22,7 @@ _FORBIDDEN_SECRET_KEYS = (
     "gh_token",
     "token",
     "api_key",
+    "authkey",  # Tailscale auth key — env or chmod-600 file, never the config
 )
 
 
@@ -64,6 +65,9 @@ class ProjectConfig:
     state_done: str = "Done"
     delete_remote_branch: bool = True
     max_workers: int | None = None  # per-project cap; None = only global cap
+    # Tri-state override of [agent.tailscale].enabled: None inherits the fleet
+    # default, True/False force tailnet access on/off for this project's workers.
+    tailscale: bool | None = None
 
 
 @dataclass
@@ -87,6 +91,30 @@ class DashboardConfig:
     enabled: bool = True
     bind: str = "127.0.0.1"
     port: int = 8788
+
+
+@dataclass
+class TailscaleConfig:
+    """Opt-in tailnet access inside worker containers (FUG-40). Off by default:
+    an unconfigured fleet behaves exactly as before. When enabled, the daemon
+    delivers an auth key into each worker's ``.agent/`` and the in-container
+    runtime brings Tailscale up in userspace-networking mode (no TUN device or
+    NET_ADMIN), exposing a local SOCKS5/HTTP proxy the agent opts into per
+    command — the worker's own control-plane traffic (claude, git) is never
+    rerouted. The auth key is a secret: it comes from the environment or a
+    chmod-600 file, never the config (the literal ``authkey`` key is rejected)."""
+
+    enabled: bool = False
+    # Prefer an ephemeral, ACL-tagged key so dead workers self-clean and can
+    # only reach what the tag's ACL allows.
+    authkey_env: str = "ISSUEFLEET_TS_AUTHKEY"
+    authkey_file: Path = Path("~/.config/issuefleet/tailscale.authkey").expanduser()
+    tags: list[str] = field(default_factory=list)  # e.g. ["tag:issuefleet-worker"]
+    hostname_template: str = "issuefleet-{key}"  # {key} = issue key, lowercased
+    # Extra flags appended to `tailscale up` verbatim (e.g. --accept-routes).
+    up_args: list[str] = field(default_factory=list)
+    # SOCKS5 + HTTP proxy the in-container tailscaled listens on (loopback).
+    proxy_port: int = 1055
 
 
 @dataclass
@@ -146,12 +174,19 @@ class Config:
     linear_oauth_redirect_port: int = 9779
     webhooks: WebhookConfig = field(default_factory=WebhookConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
+    tailscale: TailscaleConfig = field(default_factory=TailscaleConfig)
 
     def project(self, name: str) -> ProjectConfig:
         for p in self.projects:
             if p.name == name:
                 return p
         raise ConfigError(f"no [[projects]] entry named {name!r}")
+
+    def tailscale_enabled_for(self, project: ProjectConfig) -> bool:
+        """Per-project override wins over the fleet default; None inherits."""
+        if project.tailscale is not None:
+            return project.tailscale
+        return self.tailscale.enabled
 
 
 def _reject_secrets(table: dict, where: str) -> None:
@@ -260,6 +295,7 @@ def parse(data: dict, source: str = "<config>") -> Config:
                 state_done=p.get("state_done", "Done"),
                 delete_remote_branch=p.get("delete_remote_branch", True),
                 max_workers=p.get("max_workers"),
+                tailscale=p.get("tailscale"),
             )
         )
     names = [p.name for p in projects]
@@ -336,6 +372,22 @@ def parse(data: dict, source: str = "<config>") -> Config:
         bind=dash.get("bind", "127.0.0.1"),
         port=int(dash.get("port", 8788)),
     )
+
+    ts = agent.get("tailscale", {})
+    if not isinstance(ts, dict):
+        raise ConfigError(f"{source}: [agent.tailscale] must be a table")
+    _reject_secrets(ts, f"{source} [agent.tailscale]")
+    cfg.tailscale = TailscaleConfig(
+        enabled=bool(ts.get("enabled", False)),
+        tags=list(ts.get("tags", [])),
+        hostname_template=ts.get("hostname_template", "issuefleet-{key}"),
+        up_args=list(ts.get("up_args", [])),
+        proxy_port=int(ts.get("proxy_port", 1055)),
+    )
+    if "authkey_env" in ts:
+        cfg.tailscale.authkey_env = ts["authkey_env"]
+    if "authkey_file" in ts:
+        cfg.tailscale.authkey_file = _path(ts["authkey_file"])
 
     if cfg.poll_interval_s < 5:
         raise ConfigError(f"{source}: poll_interval_s must be >= 5")
