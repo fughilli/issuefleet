@@ -116,8 +116,14 @@ class Config:
     github_app_id: str = ""  # numeric App ID (not secret)
     github_app_key_file: Path = Path("~/.config/issuefleet/github_app.pem").expanduser()
     github_app_installation_id: int | None = None  # None = discover per repo owner
-    # Linear auth mode: "auto" infers from the token prefix (lin_api_ = raw
-    # personal key, lin_oauth_ = Bearer OAuth/agent token); or force one.
+    # Linear auth mode:
+    #   "auto"  — infer from a static token's prefix (lin_api_ = raw personal
+    #             key, lin_oauth_ = Bearer OAuth/agent token)
+    #   "api_key" / "oauth" — force one of the above for a static token
+    #   "client_credentials" — the daemon mints its OWN app-actor token from
+    #             linear_oauth_client_id + the client secret (30-day, no
+    #             browser, auto-refetched on expiry/401). Preferred for the
+    #             long-running daemon: no daily re-auth. Needs no linear.key.
     linear_auth: str = "auto"
     # Linear OAuth app (for the agents platform). Client id is not a secret;
     # the client secret follows the usual env-then-file rules.
@@ -284,8 +290,10 @@ def parse(data: dict, source: str = "<config>") -> Config:
     if "github_app_installation_id" in creds:
         cfg.github_app_installation_id = int(creds["github_app_installation_id"])
     if "linear_auth" in creds:
-        if creds["linear_auth"] not in ("auto", "api_key", "oauth"):
-            raise ConfigError(f"{source}: linear_auth must be auto, api_key, or oauth")
+        if creds["linear_auth"] not in ("auto", "api_key", "oauth", "client_credentials"):
+            raise ConfigError(
+                f"{source}: linear_auth must be auto, api_key, oauth, or client_credentials"
+            )
         cfg.linear_auth = creds["linear_auth"]
     cfg.linear_oauth_client_id = creds.get("linear_oauth_client_id", "")
     if "linear_oauth_client_secret_env" in creds:

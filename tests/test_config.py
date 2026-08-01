@@ -86,6 +86,17 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "chmod-600"):
             config.parse(data)
 
+    def test_linear_auth_client_credentials_accepted(self):
+        data = dict(MINIMAL)
+        data["credentials"] = {"linear_auth": "client_credentials"}
+        self.assertEqual(config.parse(data).linear_auth, "client_credentials")
+
+    def test_linear_auth_invalid_rejected(self):
+        data = dict(MINIMAL)
+        data["credentials"] = {"linear_auth": "bogus"}
+        with self.assertRaisesRegex(ConfigError, "linear_auth must be"):
+            config.parse(data)
+
     def test_duplicate_project_names_rejected(self):
         data = {"projects": [MINIMAL["projects"][0], dict(MINIMAL["projects"][0])]}
         with self.assertRaisesRegex(ConfigError, "duplicate"):

@@ -56,6 +56,33 @@ def resolve_linear_key(cfg: Config) -> tuple[str, str]:
     )
 
 
+def linear_uses_app_token(cfg: Config) -> bool:
+    """True when the daemon should mint its own Linear token via the
+    client_credentials grant (30-day app-actor token, auto-refetched) rather
+    than reading a static personal/OAuth key from env-or-file."""
+    return cfg.linear_auth == "client_credentials"
+
+
+def resolve_linear_oauth_client(cfg: Config) -> tuple[str, str]:
+    """(client_id, client_secret) for the client_credentials grant. The id is
+    not a secret (lives in config); the secret follows the env-then-file rule.
+    Raises CredentialError if either is missing."""
+    if not cfg.linear_oauth_client_id:
+        raise CredentialError(
+            "linear_auth = 'client_credentials' needs [credentials] "
+            "linear_oauth_client_id (the OAuth app's client id)"
+        )
+    secret = resolve_optional(
+        cfg.linear_oauth_client_secret_env, cfg.linear_oauth_client_secret_file
+    )
+    if not secret:
+        raise CredentialError(
+            f"no Linear OAuth client secret: set ${cfg.linear_oauth_client_secret_env} "
+            f"or write it to {cfg.linear_oauth_client_secret_file} (chmod 600)"
+        )
+    return cfg.linear_oauth_client_id, secret
+
+
 def github_auth_mode(cfg: Config) -> str:
     """'app' or 'token'. auto = app when the App ID is configured and its
     private key file exists, else fall back to a PAT."""

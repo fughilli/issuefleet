@@ -68,6 +68,26 @@ end-to-end flow — `docs/SMOKE_TEST.md` is the step-by-step procedure.
   best-effort — degrades to at-least-once if the backend rejects the content
   filter). Offline-tested (mailbox/clients/reconcile/fakes).
 
+- **Linear `client_credentials` app tokens** (branch
+  `linear-client-credentials`): the daemon can now mint its OWN Linear
+  app-actor token instead of relying on the authorization-code token
+  `linear-oauth` wrote to `linear.key` — that token expires in ~24h with no
+  refresh token stored, so the daemon went dark daily (observed: HTTP 401
+  "not authenticated" crash-loop). New `oauth.fetch_app_token`
+  (client_credentials grant, 30-day token), `linear.AppTokenProvider`
+  (caches + refetches near expiry / on forced refresh), `LinearClient`
+  gained a `token_provider` path that sends Bearer and, on a 401, refetches
+  once and retries (Linear's prescribed 401 handling; static keys still
+  propagate their 401 unchanged). `linear.client_from_config` +
+  `creds.linear_uses_app_token` / `resolve_linear_oauth_client` centralize
+  the choice; wired through `cli.build_stack` and `doctor`. Enable with
+  `[credentials] linear_auth = "client_credentials"` (client id/secret must
+  be set; `linear-oauth` install still needed once to create the app user).
+  Offline-tested (clients/creds/provider/401-retry). **Unproven on the
+  operator's Mac:** that a client_credentials app token actually carries the
+  agent (mentionable/assignable/session) identity — Linear's docs don't say;
+  verify with `bin/issuefleet doctor` (viewer identity) after switching.
+
 ## Don't retry (dead ends)
 
 - Bazel 7.x with rules_python 2.x — py_binary bootstrap breaks; stay on

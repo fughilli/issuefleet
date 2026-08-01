@@ -136,10 +136,19 @@ status/question/PR updates render as native agent-session activities
 2. Configure `[credentials] linear_oauth_client_id`, put the client secret
    in `linear_oauth_client_secret_file`, the signing secret in
    `[webhooks] linear_secret_file`, and set `[webhooks] enabled = true`.
-3. Run `bin/issuefleet linear-oauth` as a workspace admin — it walks the
-   `actor=app` OAuth flow on localhost and writes the agent token to
-   `linear_api_key_file`. The daemon then authenticates as the agent
-   (Bearer; auto-detected from the `lin_oauth_` prefix).
+3. Run `bin/issuefleet linear-oauth` **once** as a workspace admin to install
+   the agent app into the workspace (the `actor=app` OAuth flow on localhost).
+4. Set `[credentials] linear_auth = "client_credentials"`. The daemon then
+   mints its own **app-actor token** via the client_credentials grant from the
+   client id/secret — valid ~30 days, no browser, and automatically refetched
+   when it nears expiry or a call returns 401 (Linear's app tokens carry no
+   refresh token, so re-minting *is* the refresh). No `linear.key` to rotate.
+
+   > The older path — `linear-oauth` writing a token to `linear_api_key_file`
+   > and `linear_auth = "auto"` picking it up by its `lin_oauth_` prefix —
+   > still works, but that authorization-code token expires in **~24 hours**
+   > and issuefleet keeps no refresh token, so the daemon would go dark daily.
+   > Use `client_credentials` for anything long-running.
 
 Webhooks are **strongly recommended** for the agent platform: Linear wants
 an activity within 10 seconds of a delegation, and issuefleet acks
