@@ -378,9 +378,10 @@ def render_index(snaps: list[dict], stopped: str | None = None) -> str:
     )
     note = "<p class='muted' style='margin-top:16px'>Auto-refreshing every 5s.</p>"
     # Meta-refresh keeps the list live without JS; individual pages don't refresh
-    # so reading a transcript is never yanked out from under you.
+    # so reading a transcript is never yanked out from under you. Refresh to a
+    # clean "/" so a one-shot ?stopped= banner doesn't stick on every reload.
     return _page("issuefleet", banner + table + note).replace(
-        "<head>", "<head><meta http-equiv='refresh' content='5'>", 1
+        "<head>", "<head><meta http-equiv='refresh' content='5; url=/'>", 1
     )
 
 
