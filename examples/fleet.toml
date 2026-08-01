@@ -39,6 +39,16 @@ port = 8787
 github_secret_file = "~/.config/issuefleet/github_webhook.secret"
 linear_secret_file = "~/.config/issuefleet/linear_webhook.secret"
 
+# Introspection web UI served by the running daemon: lists every worker, shows
+# each one's live transcript + mailbox, and can wind a worker down (POST +
+# confirm dialog). Read-mostly control plane — bind loopback and put a PRIVATE
+# tunnel (Tailscale serve, not a public Funnel) in front. Disable with
+# enabled = false.
+[dashboard]
+enabled = true
+bind = "127.0.0.1"
+port = 8788
+
 [agent]
 max_auto_turns = 50
 max_restarts = 3

@@ -180,6 +180,14 @@ def _check_webhooks(cfg: Config) -> list[Check]:
     return out
 
 
+def _check_dashboard(cfg: Config) -> list[Check]:
+    d = cfg.dashboard
+    if not d.enabled:
+        return [Check(OK, "dashboard", "disabled")]
+    return [Check(OK, "dashboard", f"will bind {d.bind}:{d.port} — introspection web UI; "
+                  "loopback + a private tunnel (it can stop workers)")]
+
+
 def _check_linear(cfg: Config, tracker) -> list[Check]:
     out = []
     if creds.linear_uses_app_token(cfg):
@@ -351,6 +359,7 @@ def run_doctor(
     checks += _check_container_settings(cfg)
     checks += _check_dirs(cfg)
     checks += _check_webhooks(cfg)
+    checks += _check_dashboard(cfg)
     linear_checks = _check_linear(cfg, tracker)
     checks += linear_checks
     checks += _check_github(cfg, git, forges)
