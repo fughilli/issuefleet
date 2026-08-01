@@ -39,6 +39,14 @@ are written to the worker's inbox and injected into its next turn. Agents
 commit freely — a linked worktree's objects land in the shared `.git` on the
 host — but nothing leaves the machine until the orchestrator pushes it.
 
+**Acknowledging input.** Every piece of user input is acknowledged so the
+sender is never left wondering whether it landed: the orchestrator drops a
+👀 into the agent session the instant it routes a prompt or comment to a
+worker (before any turn runs, so busy/restarting workers still ack
+immediately), the worker emits ⚙️ when it starts taking turns on it, and ✅
+when it settles. In personal-key/comment mode the 👀 falls back to a deduped
+comment; the ⚙️/✅ are session-only to avoid thread spam.
+
 **Authoring issues.** Delegate (or @-mention) the bot on an issue such as
 "turn the WORKLOG backlog into tickets"; the worker reads the source, then
 calls `agentctl file-issue --title … --description-file …` once per ticket.

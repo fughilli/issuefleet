@@ -121,6 +121,52 @@ class AgentSessionTest(unittest.TestCase):
         self.assertEqual(len(replies), 1)
         self.assertIn("update the docs", replies[0].payload["text"])
 
+    def test_prompt_is_acknowledged_with_eyes(self):
+        # 👀: routing a genuine user prompt to the worker emits an immediate
+        # "seen it" thought into the session, before any worker turn runs.
+        self.add_issue()
+        self.rec.enqueue_session(created())
+        self.rec.tick()
+        self.rec.enqueue_session(prompted())
+        self.rec.tick()
+        eyes = [c for _, c in self.tracker.activities
+                if c["type"] == "thought" and c["body"].startswith("👀")]
+        self.assertEqual(len(eyes), 1)
+
+    def test_polled_comment_acknowledged_once_per_batch(self):
+        # 👀 also covers the comment-poll path, once per ingest batch (not once
+        # per comment), and lands in the session when one is bound.
+        self.add_issue()
+        self.rec.enqueue_session(created())
+        self.rec.tick()
+        self.tracker.human_comment("issue-1", "first thought")
+        self.tracker.human_comment("issue-1", "and another")
+        self.rec.tick()
+        eyes = [c for _, c in self.tracker.activities
+                if c["type"] == "thought" and c["body"].startswith("👀")]
+        self.assertEqual(len(eyes), 1)
+
+    def test_ack_outbox_relays_to_session_only(self):
+        # ⚙️/✅ acks render in the session; in comment mode they're dropped so
+        # they never spam the issue thread. Either way the message is archived.
+        self.add_issue()
+        self.rec.enqueue_session(created())
+        self.rec.tick()
+        self.mailbox().put_outbox("ack", {"text": "⚙️ On it."})
+        self.rec.tick()
+        self.assertIn(("sess-1", {"type": "thought", "body": "⚙️ On it."}),
+                      self.tracker.activities)
+        self.assertEqual(self.tracker.posted, [])
+        self.assertEqual(self.mailbox().pending_outbox(), [])
+
+        # Unbind the session: the next ack is dropped, not posted.
+        self.registry.get("issue-1").agent_session_id = None
+        self.registry.save()
+        self.mailbox().put_outbox("ack", {"text": "✅ Done for now."})
+        self.rec.tick()
+        self.assertEqual(self.tracker.posted, [])
+        self.assertEqual(self.mailbox().pending_outbox(), [])
+
     def test_echoed_agent_activities_do_not_wake_the_worker(self):
         # Live-observed loop (2026-07-30): our own thought/response activity
         # emissions come back as `prompted` webhooks; routing them to the
