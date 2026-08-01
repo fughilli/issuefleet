@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import argparse
 import fcntl
-import json
 import logging
 import os
 import signal
 import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
 
 from issuefleet import config as config_mod
@@ -180,6 +178,31 @@ def _start_webhooks(cfg: Config, reconciler: Reconciler, wake: threading.Event):
     return server
 
 
+def _dashboard_bind(dcfg) -> str:
+    # Same story as the webhook listener: the containerized stack must bind
+    # beyond loopback (docker publishes to the container IP), so an env
+    # override lets the compose file open it up while a laptop stays on
+    # loopback. Never expose it publicly — Stop is a real control.
+    return os.environ.get("ISSUEFLEET_DASHBOARD_BIND", dcfg.bind)
+
+
+def _start_dashboard(cfg: Config, reconciler: Reconciler, wake: threading.Event):
+    from issuefleet.dashboard import DashboardServer, FleetView
+
+    dcfg = cfg.dashboard
+
+    def stop_cb(issue_key: str) -> None:
+        reconciler.enqueue_stop(issue_key)
+        wake.set()
+
+    view = FleetView(cfg.state_dir, stop_cb=stop_cb)
+    bind = _dashboard_bind(dcfg)
+    server = DashboardServer(bind=bind, port=dcfg.port, view=view).start()
+    log.info("dashboard on http://%s:%d (introspection web UI; put a private tunnel in front)",
+             bind, server.port)
+    return server
+
+
 def cmd_run(cfg: Config) -> int:
     stop = {"flag": False}
     wake = threading.Event()
@@ -195,9 +218,11 @@ def cmd_run(cfg: Config) -> int:
     with DaemonLock(cfg.state_dir):
         reconciler = build_stack(cfg)
         server = _start_webhooks(cfg, reconciler, wake) if cfg.webhooks.enabled else None
-        log.info("daemon up: %d project(s), poll every %ds%s",
+        dashboard = _start_dashboard(cfg, reconciler, wake) if cfg.dashboard.enabled else None
+        log.info("daemon up: %d project(s), poll every %ds%s%s",
                  len(cfg.projects), cfg.poll_interval_s,
-                 " + webhook wake-ups" if server else "")
+                 " + webhook wake-ups" if server else "",
+                 " + dashboard" if dashboard else "")
         from issuefleet.model import PHASE_CRASHED
 
         crashed = [w.issue_key for w in reconciler.registry.all() if w.phase == PHASE_CRASHED]
@@ -220,6 +245,8 @@ def cmd_run(cfg: Config) -> int:
         finally:
             if server:
                 server.stop()
+            if dashboard:
+                dashboard.stop()
     return 0
 
 
@@ -261,6 +288,8 @@ def cmd_linear_oauth(cfg: Config) -> int:
 
 
 def cmd_status(cfg: Config) -> int:
+    from issuefleet.dashboard import worker_snapshot
+
     registry = Registry(cfg.state_dir)
     runner = TmuxRunner(log_dir=cfg.state_dir / "logs")
     workers = registry.all()
@@ -268,31 +297,27 @@ def cmd_status(cfg: Config) -> int:
         print("fleet empty")
         return 0
     for rec in workers:
+        s = worker_snapshot(rec, runner)
         agent_dir = Path(rec.worktree) / ".agent"
-        turn_info = "no state"
-        try:
-            state = json.loads((agent_dir / "state.json").read_text())
-            turn_info = (
-                f"{state.get('phase')}, turn {state.get('turns_taken', 0)}, "
-                f"auto {state.get('auto_turns', 0)}/{state.get('max_auto_turns', '?')}"
-            )
-        except (OSError, json.JSONDecodeError):
-            pass
-        mb = Mailbox(agent_dir / "mailbox")
-        alive = "alive" if runner.alive(rec) else "DEAD"
-        pr = f"PR #{rec.pr_number}" if rec.pr_number else "no PR"
+        turn_info = (
+            f"{s['turn_phase']}, turn {s['turns_taken']}, "
+            f"auto {s['auto_turns']}/{s['max_auto_turns'] or '?'}"
+            if s["turn_phase"] else "no state"
+        )
+        alive = "alive" if s["alive"] else "DEAD"
+        pr = f"PR #{s['pr_number']}" if s["pr_number"] else "no PR"
         # Turn-log mtime distinguishes "mid-turn, streaming" from "wedged".
-        newest = max(
-            (f.stat().st_mtime for f in (agent_dir / "logs").glob("turn-*")), default=None
+        activity = (
+            f"last activity {s['last_activity_s']}s ago"
+            if s["last_activity_s"] is not None else "no turns yet"
         )
-        activity = f"last activity {int(time.time() - newest)}s ago" if newest else "no turns yet"
-        print(f"{rec.issue_key} [{rec.project}] {rec.phase}/{alive} — {rec.issue_title}")
-        print(f"    agent: {turn_info}; {pr}; restarts {rec.restarts}; {activity}")
+        print(f"{s['issue_key']} [{s['project']}] {s['phase']}/{alive} — {s['issue_title']}")
+        print(f"    agent: {turn_info}; {pr}; restarts {s['restarts']}; {activity}")
         print(
-            f"    branch {rec.branch}; outbox pending {len(mb.pending_outbox())}, "
-            f"inbox pending {len(mb.pending_inbox())}"
+            f"    branch {s['branch']}; outbox pending {s['outbox_pending']}, "
+            f"inbox pending {s['inbox_pending']}"
         )
-        print(f"    watch: tmux attach -t {rec.tmux_session}")
+        print(f"    watch: tmux attach -t {s['tmux_session']}")
         print(f"    turn logs: {agent_dir / 'logs'}   pane log: {runner.log_path(rec)}")
     return 0
 

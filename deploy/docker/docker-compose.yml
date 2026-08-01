@@ -28,12 +28,17 @@ services:
     volumes:
       - ts-state:/var/lib/tailscale
       - ./funnel.json:/config/funnel.json:ro
-    # Host-loopback publish of the webhook listener (which lives in this
-    # netns): lets a HOST-side tunnel (e.g. the laptop's `tailscale funnel
-    # 8787`) keep serving existing webhook URLs during migration. Loopback
-    # only — never exposed off-box; the sidecar's own Funnel needs no port.
+    # Host-loopback publish of the daemon's HTTP services (webhook listener +
+    # introspection dashboard, both in this netns): lets a HOST-side tunnel
+    # (e.g. the laptop's `tailscale funnel 8787`) keep serving existing webhook
+    # URLs during migration, and lets you reach the dashboard on the host at
+    # http://127.0.0.1:8788/. Loopback only — never exposed off-box; the
+    # sidecar's own Funnel needs no port. The dashboard is a control plane
+    # (it can stop workers): reach it over the tailnet with `tailscale serve`,
+    # never a public Funnel.
     ports:
       - "127.0.0.1:8787:8787"
+      - "127.0.0.1:8788:8788"
     devices:
       - /dev/net/tun:/dev/net/tun
     cap_add:
@@ -63,6 +68,10 @@ services:
       # the container IP (not its 127.0.0.1), and the sidecar's funnel
       # still works. Exposure = docker bridge + tailnet only; HMAC on top.
       - ISSUEFLEET_WEBHOOK_BIND=0.0.0.0
+      # Same reason for the dashboard: publish forwards to the container IP,
+      # so it must bind beyond container-loopback. Exposure stays docker
+      # bridge + tailnet only (the ports above publish it to host loopback).
+      - ISSUEFLEET_DASHBOARD_BIND=0.0.0.0
       - ISSUEFLEET_UID=${ISSUEFLEET_UID:?run via bazel or source env.sh}
       - ISSUEFLEET_GID=${ISSUEFLEET_GID:?run via bazel or source env.sh}
       # Lets config.toml use ${ISSUEFLEET_ROOT}/... paths portably.

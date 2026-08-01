@@ -91,6 +91,10 @@ class Reconciler:
         self._session_events: list = []
         self.pending_session_claims: dict[str, object] = {}  # issue_id -> SessionEvent
         self._poll_errors: dict[str, str] = {}  # project -> last error (log-spam collapse)
+        # Dashboard-requested wind-downs: fed by the web thread, drained at
+        # tick so all git/registry mutation stays on the single tick thread.
+        self._stop_lock = threading.Lock()
+        self._stop_requests: list[str] = []  # issue keys
 
     # ------------------------------------------------------------------ tick
 
@@ -100,6 +104,34 @@ class Reconciler:
         """Thread-safe intake for webhooks.SessionEvent; processed next tick."""
         with self._session_lock:
             self._session_events.append(evt)
+
+    # ---------------------------------------------- dashboard stop requests
+
+    def enqueue_stop(self, issue_key: str) -> None:
+        """Thread-safe intake for a dashboard 'stop this worker' click. The web
+        thread never mutates the fleet itself (registry writes, git, tmux all
+        belong to the tick thread); it queues the key and wakes the loop, and
+        `_drain_stop_requests` does the real wind-down next tick."""
+        with self._stop_lock:
+            self._stop_requests.append(issue_key)
+
+    def _drain_stop_requests(self) -> None:
+        with self._stop_lock:
+            keys, self._stop_requests = self._stop_requests, []
+        for key in keys:
+            rec = next(
+                (w for w in self.registry.all() if w.issue_key.lower() == key.lower()), None
+            )
+            if rec is None:
+                log.info("dashboard stop for %s: no such worker (already gone)", key)
+                continue
+            try:
+                project = self.cfg.project(rec.project)
+                mailbox = Mailbox(Path(rec.worktree) / ".agent" / "mailbox")
+                log.info("dashboard: winding down %s on operator request", rec.issue_key)
+                self._wind_down(rec, project, mailbox, reason="stopped from dashboard", done=False)
+            except Exception:
+                log.exception("dashboard stop of %s failed; will not retry", key)
 
     def _drain_session_events(self) -> None:
         with self._session_lock:
@@ -196,6 +228,10 @@ class Reconciler:
         # never service a worker whose worktree was removed underneath us.
         self.registry.reload()
         self._drain_session_events()
+        # Operator wind-downs before servicing: a worker stopped from the
+        # dashboard this tick must not also be serviced (or re-adopted) off
+        # the pre-stop snapshot.
+        self._drain_stop_requests()
         for rec in self.registry.all():
             try:
                 self._service(rec)
