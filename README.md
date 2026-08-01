@@ -191,6 +191,35 @@ Tailscale Funnel (or ngrok for experiments) at `localhost:8787` and give
 that HTTPS URL to GitHub/Linear. The listener binds loopback by default and
 answers GET with a health probe for tunnel checks.
 
+## Introspection dashboard (web UI)
+
+With `[dashboard] enabled = true` (the default), the running daemon also
+serves a web UI at `http://127.0.0.1:8788/` — the same information as
+`issuefleet status`, but browsable:
+
+- **Fleet list** (`/`): every worker with its session liveness, agent phase,
+  turn/auto-turn counters, PR link, last activity, and pending mailbox
+  counts. Auto-refreshes every 5s.
+- **Worker detail** (`/worker/<KEY>`): full status, the pending inbox/outbox,
+  the list of turns, and a tail of the captured pane log.
+- **Transcript** (`/worker/<KEY>/turn/<N>`): the turn's stream-json log
+  rendered as assistant text, tool calls, tool results, and the cost/duration
+  summary (raw JSONL one click away).
+- **JSON API**: `/api/workers` for scripting.
+
+**Stopping a worker** is the one mutating action. It is `POST`-only and
+gated behind a browser confirmation dialog. Clicking Stop doesn't touch the
+fleet from the web thread — it enqueues the wind-down for the reconcile loop
+(the single writer), which stops the container, removes the worktree, and
+keeps the branch + an archived transcript, exactly like `issuefleet stop`.
+(For a poll-claimed issue whose claim rule still matches, the next tick will
+re-claim it — remove the label / advance the state to make a stop stick, same
+as the CLI.)
+
+The dashboard is a **control plane**, so treat it like one: it binds loopback
+by default; reach it remotely over the tailnet with `tailscale serve`, never
+a public Funnel. Disable it entirely with `[dashboard] enabled = false`.
+
 ## Configuration
 
 ```toml
@@ -220,6 +249,11 @@ bind = "127.0.0.1"                         # keep loopback; tunnel in front
 port = 8787
 github_secret_file = "~/.config/issuefleet/github_webhook.secret"
 linear_secret_file = "~/.config/issuefleet/linear_webhook.secret"
+
+[dashboard]
+enabled = true                             # introspection web UI (below)
+bind = "127.0.0.1"                         # keep loopback; private tunnel in front
+port = 8788
 
 [agent]
 max_auto_turns = 50          # self-driven turns without human contact (the runaway brake)
@@ -297,6 +331,10 @@ bin/issuefleet stop FUG-12       # wind one worker down by hand
 bin/issuefleet once              # single reconcile tick (cron-friendly)
 bin/issuefleet once --dry-run    # print every action a tick would take; mutate nothing
 ```
+
+Or point a browser at the daemon's **introspection dashboard**
+(`http://127.0.0.1:8788/`) for the same view plus per-turn transcripts and a
+confirm-gated Stop button — see [Introspection dashboard](#introspection-dashboard-web-ui).
 
 Two log layers per worker:
 

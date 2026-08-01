@@ -318,6 +318,28 @@ class ReconcileTest(unittest.TestCase):
         self.assertTrue((archive / "brief.md").is_file())
         self.assertTrue((archive / "mailbox").is_dir())
 
+    # -- dashboard stop request --------------------------------------------
+
+    def test_dashboard_stop_request_winds_down(self):
+        w = self.claim_one()
+        # The web thread only enqueues; the tick thread drains and winds down.
+        # (A poll-eligible issue whose claim rule still matches is re-claimed
+        # on the same tick, exactly like the CLI `stop` — so exercise the drain
+        # directly to assert the wind-down itself.)
+        self.rec.enqueue_stop("fug-1")  # case-insensitive on the issue key
+        self.assertIsNotNone(self.worker())  # queued only; nothing yet
+        self.rec._drain_stop_requests()
+        self.assertIsNone(self.worker())  # registry entry dropped
+        self.assertEqual(self.runner.stopped, [w.tmux_session])
+        self.assertEqual(self.git.removed, [w.worktree])
+        self.assertEqual(self.git.deleted_remote, [])  # not done: branch kept
+
+    def test_dashboard_stop_of_unknown_worker_is_a_noop(self):
+        self.claim_one()
+        self.rec.enqueue_stop("FUG-404")
+        self.rec._drain_stop_requests()  # must not raise
+        self.assertIsNotNone(self.worker())
+
     def test_pr_closed_without_merge_notifies_agent_once(self):
         self.claim_one()
         self.mailbox().put_outbox("ready", {"title": "T", "body": "B"})

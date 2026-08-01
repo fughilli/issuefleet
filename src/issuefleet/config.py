@@ -79,6 +79,17 @@ class WebhookConfig:
 
 
 @dataclass
+class DashboardConfig:
+    """The introspection web UI. Read-mostly control plane: bind loopback and
+    put a private tunnel (Tailscale serve) in front — never expose it, and
+    never point a public Funnel at it, since it can wind down workers."""
+
+    enabled: bool = True
+    bind: str = "127.0.0.1"
+    port: int = 8788
+
+
+@dataclass
 class Config:
     projects: list[ProjectConfig]
     poll_interval_s: int = 60
@@ -134,6 +145,7 @@ class Config:
     ).expanduser()
     linear_oauth_redirect_port: int = 9779
     webhooks: WebhookConfig = field(default_factory=WebhookConfig)
+    dashboard: DashboardConfig = field(default_factory=DashboardConfig)
 
     def project(self, name: str) -> ProjectConfig:
         for p in self.projects:
@@ -196,11 +208,13 @@ def parse(data: dict, source: str = "<config>") -> Config:
     creds = data.get("credentials", {})
     agent = data.get("agent", {})
     hooks = data.get("webhooks", {})
+    dash = data.get("dashboard", {})
     for name, table in (
         ("daemon", daemon),
         ("credentials", creds),
         ("agent", agent),
         ("webhooks", hooks),
+        ("dashboard", dash),
     ):
         if not isinstance(table, dict):
             raise ConfigError(f"{source}: [{name}] must be a table")
@@ -316,6 +330,12 @@ def parse(data: dict, source: str = "<config>") -> Config:
         cfg.webhooks.linear_secret_env = hooks["linear_secret_env"]
     if "linear_secret_file" in hooks:
         cfg.webhooks.linear_secret_file = _path(hooks["linear_secret_file"])
+
+    cfg.dashboard = DashboardConfig(
+        enabled=bool(dash.get("enabled", True)),
+        bind=dash.get("bind", "127.0.0.1"),
+        port=int(dash.get("port", 8788)),
+    )
 
     if cfg.poll_interval_s < 5:
         raise ConfigError(f"{source}: poll_interval_s must be >= 5")
