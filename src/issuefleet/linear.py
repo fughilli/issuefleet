@@ -8,8 +8,9 @@ recent comments per issue (threads driven by this tool are short-lived).
 from __future__ import annotations
 
 import logging
+import time
 
-from issuefleet import MARKER_PREFIX
+from issuefleet import MARKER_PREFIX, oauth
 from issuefleet.config import ProjectConfig
 from issuefleet.httpx import ApiError, urllib_transport
 from issuefleet.model import Comment, Issue
@@ -17,6 +18,10 @@ from issuefleet.model import Comment, Issue
 log = logging.getLogger("issuefleet.linear")
 
 API_URL = "https://api.linear.app/graphql"
+
+# Refetch an app token this many seconds before it actually expires, so a
+# request never rides an about-to-die token across the boundary.
+_TOKEN_REFRESH_SKEW_S = 300
 
 _ISSUE_FIELDS = """
     id
@@ -56,33 +61,115 @@ def _to_issue(node: dict) -> Issue:
     )
 
 
+class AppTokenProvider:
+    """Caches a Linear app-actor token minted via client_credentials and
+    refetches it when it nears expiry (or is forced after a 401). App tokens
+    last ~30 days with no refresh token, so "just ask for another" IS the
+    refresh mechanism — Linear's documented pattern. Thread-safety isn't
+    needed: only the reconcile loop calls the client, one tick at a time."""
+
+    def __init__(
+        self,
+        client_id: str,
+        client_secret: str,
+        scopes: list[str] | None = None,
+        *,
+        fetch=oauth.fetch_app_token,
+        clock=time.monotonic,
+    ):
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._scopes = scopes
+        self._fetch = fetch
+        self._clock = clock
+        self._token: str | None = None
+        self._expires_at = 0.0
+
+    def token(self, *, force_refresh: bool = False) -> str:
+        if force_refresh or self._token is None or self._clock() >= self._expires_at:
+            token, ttl = self._fetch(self._client_id, self._client_secret, self._scopes)
+            self._token = token
+            # A tiny/zero ttl (unexpected) still yields forward progress: the
+            # token is used at least once before we ask again.
+            self._expires_at = self._clock() + max(ttl - _TOKEN_REFRESH_SKEW_S, 0)
+            log.info("minted Linear app token (valid ~%ds)", ttl)
+        return self._token
+
+
 class LinearClient:
-    def __init__(self, api_key: str, transport=urllib_transport, auth: str = "auto"):
-        """auth: 'api_key' (raw Authorization header, personal keys),
-        'oauth' (Bearer, OAuth/agent tokens), or 'auto' (infer from the
-        token prefix: lin_oauth_* is Bearer, everything else raw)."""
+    def __init__(
+        self,
+        api_key: str | None = None,
+        transport=urllib_transport,
+        auth: str = "auto",
+        token_provider: AppTokenProvider | None = None,
+    ):
+        """Supply exactly one credential source:
+          - api_key: a static personal/OAuth token. auth selects how it's
+            sent: 'api_key' (raw Authorization header, personal keys),
+            'oauth' (Bearer, OAuth/agent tokens), or 'auto' (infer from the
+            token prefix: lin_oauth_* is Bearer, everything else raw).
+          - token_provider: an AppTokenProvider that mints/rotates a Bearer
+            app-actor token (client_credentials); a 401 triggers a forced
+            refetch and one retry."""
+        if (api_key is None) == (token_provider is None):
+            raise ValueError("LinearClient needs exactly one of api_key or token_provider")
         self.api_key = api_key
+        self.token_provider = token_provider
         self.transport = transport
-        if auth == "auto":
+        if token_provider is not None:
+            auth = "oauth"  # app-actor tokens are Bearer
+        elif auth == "auto":
             auth = "oauth" if api_key.startswith("lin_oauth_") else "api_key"
         self.auth = auth
 
+    def _token(self) -> str:
+        return self.token_provider.token() if self.token_provider else self.api_key
+
     def auth_header(self) -> str:
-        return f"Bearer {self.api_key}" if self.auth == "oauth" else self.api_key
+        token = self._token()
+        return f"Bearer {token}" if self.auth == "oauth" else token
 
     def graphql(self, query: str, variables: dict | None = None) -> dict:
-        resp = self.transport(
-            "POST",
-            API_URL,
-            {
-                "Authorization": self.auth_header(),
-                "Content-Type": "application/json",
-            },
-            {"query": query, "variables": variables or {}},
-        )
+        resp = self._transport(query, variables)
         if resp.get("errors"):
             raise LinearError(f"GraphQL errors: {resp['errors']}")
         return resp.get("data", {})
+
+    def _transport(self, query: str, variables: dict | None, _retried: bool = False) -> dict:
+        try:
+            return self.transport(
+                "POST",
+                API_URL,
+                {
+                    "Authorization": self.auth_header(),
+                    "Content-Type": "application/json",
+                },
+                {"query": query, "variables": variables or {}},
+            )
+        except ApiError as e:
+            # An app token can be revoked or expire mid-life; refetch once and
+            # retry (Linear's prescribed 401 handling). Static keys can't be
+            # rotated from here, so let their 401 propagate unchanged.
+            if e.status == 401 and self.token_provider is not None and not _retried:
+                log.warning("Linear returned 401; refetching app token and retrying once")
+                self.token_provider.token(force_refresh=True)
+                return self._transport(query, variables, _retried=True)
+            raise
+
+
+def client_from_config(cfg, transport=urllib_transport) -> LinearClient:
+    """Build a LinearClient from config: a client_credentials app-token
+    provider when linear_auth = 'client_credentials', otherwise a static
+    personal/OAuth key resolved from env-or-file."""
+    from issuefleet import creds
+
+    if creds.linear_uses_app_token(cfg):
+        client_id, client_secret = creds.resolve_linear_oauth_client(cfg)
+        provider = AppTokenProvider(client_id, client_secret)
+        return LinearClient(token_provider=provider, transport=transport)
+    key, _ = creds.resolve_linear_key(cfg)
+    return LinearClient(key, auth=cfg.linear_auth, transport=transport)
 
 
 class LinearTracker:

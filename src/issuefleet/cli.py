@@ -21,7 +21,7 @@ from issuefleet.doctor import run_doctor
 from issuefleet.github import GithubForge, parse_repo_slug
 from issuefleet import gitops as gitops_mod
 from issuefleet.gitops import Gitops
-from issuefleet.linear import LinearClient, LinearTracker
+from issuefleet.linear import LinearClient, LinearTracker, client_from_config
 from issuefleet.mailbox import Mailbox
 from issuefleet.model import WorkerRecord
 from issuefleet.reconcile import Reconciler
@@ -34,8 +34,7 @@ log = logging.getLogger("issuefleet")
 
 
 def build_stack(cfg: Config) -> Reconciler:
-    linear_key, _ = creds.resolve_linear_key(cfg)
-    tracker = LinearTracker(LinearClient(linear_key, auth=cfg.linear_auth))
+    tracker = LinearTracker(client_from_config(cfg))
     git = Gitops()
     if creds.github_auth_mode(cfg) == "app":
         from issuefleet.githubapp import AppTokenProvider

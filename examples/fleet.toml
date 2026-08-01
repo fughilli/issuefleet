@@ -18,8 +18,15 @@ github_token_file = "~/.config/issuefleet/github.key"
 github_auth = "auto"
 github_app_id = ""
 github_app_key_file = "~/.config/issuefleet/github_app.pem"
-linear_auth = "auto"                # personal key (raw) vs agent token (Bearer)
-# For the Linear agent install (issuefleet linear-oauth):
+# linear_auth: auto (infer from a static key's prefix) | api_key (raw) |
+# oauth (Bearer) | client_credentials. Prefer "client_credentials" for the
+# daemon: it mints its own 30-day app-actor token from the client id/secret
+# below (no browser, auto-refetched on expiry/401), so there's no linear.key
+# to rotate and no daily re-auth.
+linear_auth = "client_credentials"
+# OAuth app (client id is not a secret; secret follows env-then-file rules).
+# Used both by `issuefleet linear-oauth` (one-time workspace install) and,
+# under client_credentials, as the daemon's runtime credential.
 linear_oauth_client_id = ""
 linear_oauth_client_secret_file = "~/.config/issuefleet/linear_oauth_client.secret"
 

@@ -6,9 +6,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from issuefleet import config, creds
+from issuefleet import config, creds, oauth
 from issuefleet.github import GithubForge, parse_repo_slug
-from issuefleet.linear import LinearClient, LinearTracker
+from issuefleet.httpx import ApiError
+from issuefleet.linear import (
+    AppTokenProvider,
+    LinearClient,
+    LinearTracker,
+    client_from_config,
+)
 
 MINIMAL = {
     "projects": [
@@ -269,6 +275,115 @@ class GithubForgeTest(unittest.TestCase):
         self.assertEqual(fb[2].path, "src/x.py")
 
 
+class FakeClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+class AppTokenTest(unittest.TestCase):
+    def test_fetch_app_token_sends_client_credentials(self):
+        seen = {}
+
+        def post_form(url, fields):
+            seen["url"] = url
+            seen["fields"] = fields
+            return {"access_token": "app_tok", "token_type": "Bearer", "expires_in": 2591999}
+
+        token, ttl = oauth.fetch_app_token("cid", "csecret", post_form=post_form)
+        self.assertEqual((token, ttl), ("app_tok", 2591999))
+        self.assertEqual(seen["url"], oauth.TOKEN_URL)
+        self.assertEqual(seen["fields"]["grant_type"], "client_credentials")
+        self.assertEqual(seen["fields"]["client_id"], "cid")
+        self.assertEqual(seen["fields"]["client_secret"], "csecret")
+        # default agent scopes, comma-joined
+        self.assertEqual(seen["fields"]["scope"], ",".join(oauth.AGENT_SCOPES))
+
+    def test_fetch_app_token_raises_without_access_token(self):
+        with self.assertRaises(oauth.OAuthError):
+            oauth.fetch_app_token("c", "s", post_form=lambda u, f: {"error": "nope"})
+
+    def test_provider_caches_then_refetches_on_expiry(self):
+        calls = []
+        clock = FakeClock()
+
+        def fetch(cid, csecret, scopes):
+            calls.append((cid, csecret))
+            return f"tok{len(calls)}", 1000  # skew is 300 -> good for ~700s
+
+        p = AppTokenProvider("c", "s", fetch=fetch, clock=clock)
+        self.assertEqual(p.token(), "tok1")
+        clock.t = 699
+        self.assertEqual(p.token(), "tok1")  # still cached (expires_at = 700)
+        clock.t = 700
+        self.assertEqual(p.token(), "tok2")  # refetched at the skew boundary
+        self.assertEqual(len(calls), 2)
+
+    def test_provider_force_refresh(self):
+        calls = []
+
+        def fetch(cid, csecret, scopes):
+            calls.append(1)
+            return f"tok{len(calls)}", 1000
+
+        p = AppTokenProvider("c", "s", fetch=fetch, clock=FakeClock())
+        self.assertEqual(p.token(), "tok1")
+        self.assertEqual(p.token(force_refresh=True), "tok2")
+
+    def test_client_uses_bearer_from_provider(self):
+        t = RecordingTransport([{"data": {"viewer": {"id": "u1", "name": "n", "email": "e"}}}])
+        p = AppTokenProvider("c", "s", fetch=lambda *a: ("app_tok", 1000), clock=FakeClock())
+        LinearTracker(LinearClient(token_provider=p, transport=t)).get_viewer_id()
+        self.assertEqual(t.calls[0]["headers"]["Authorization"], "Bearer app_tok")
+
+    def test_client_refetches_and_retries_once_on_401(self):
+        fetched = []
+
+        def fetch(cid, csecret, scopes):
+            fetched.append(1)
+            return f"tok{len(fetched)}", 1000
+
+        class Flaky:
+            def __init__(self):
+                self.n = 0
+                self.auths = []
+
+            def __call__(self, method, url, headers, payload):
+                self.auths.append(headers["Authorization"])
+                self.n += 1
+                if self.n == 1:
+                    raise ApiError(401, url, "not authenticated")
+                return {"data": {"viewer": {"id": "u1", "name": "n", "email": "e"}}}
+
+        flaky = Flaky()
+        p = AppTokenProvider("c", "s", fetch=fetch, clock=FakeClock())
+        LinearTracker(LinearClient(token_provider=p, transport=flaky)).get_viewer_id()
+        self.assertEqual(flaky.n, 2)  # failed once, retried once
+        self.assertEqual(flaky.auths, ["Bearer tok1", "Bearer tok2"])  # fresh token on retry
+
+    def test_static_key_401_is_not_retried(self):
+        class Always401:
+            def __init__(self):
+                self.n = 0
+
+            def __call__(self, *a):
+                self.n += 1
+                raise ApiError(401, "u", "not authenticated")
+
+        t = Always401()
+        with self.assertRaises(ApiError):
+            LinearTracker(LinearClient("lin_api_x", transport=t)).get_viewer_id()
+        self.assertEqual(t.n, 1)  # no retry for a static key
+
+    def test_client_requires_exactly_one_credential(self):
+        with self.assertRaises(ValueError):
+            LinearClient()
+        with self.assertRaises(ValueError):
+            LinearClient("k", token_provider=AppTokenProvider("c", "s", fetch=lambda *a: ("t", 1)))
+
+
 class CredsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -318,6 +433,36 @@ class CredsTest(unittest.TestCase):
         self.assertTrue(creds.file_permissions_ok(f))
         f.chmod(0o644)
         self.assertFalse(creds.file_permissions_ok(f))
+
+    def test_uses_app_token_only_for_client_credentials(self):
+        self.assertFalse(creds.linear_uses_app_token(self.cfg))  # default "auto"
+        self.cfg.linear_auth = "client_credentials"
+        self.assertTrue(creds.linear_uses_app_token(self.cfg))
+
+    def test_resolve_oauth_client_needs_id_and_secret(self):
+        self.cfg.linear_oauth_client_secret_file = Path(self.tmp.name) / "client.secret"
+        with self.assertRaisesRegex(creds.CredentialError, "linear_oauth_client_id"):
+            creds.resolve_linear_oauth_client(self.cfg)
+        self.cfg.linear_oauth_client_id = "cid"
+        with self.assertRaisesRegex(creds.CredentialError, "client secret"):
+            creds.resolve_linear_oauth_client(self.cfg)
+        self.cfg.linear_oauth_client_secret_file.write_text("shhh\n")
+        self.assertEqual(creds.resolve_linear_oauth_client(self.cfg), ("cid", "shhh"))
+
+    def test_client_from_config_picks_app_token_path(self):
+        self.cfg.linear_auth = "client_credentials"
+        self.cfg.linear_oauth_client_id = "cid"
+        self.cfg.linear_oauth_client_secret_file = Path(self.tmp.name) / "client.secret"
+        self.cfg.linear_oauth_client_secret_file.write_text("shhh")
+        client = client_from_config(self.cfg)
+        self.assertIsNotNone(client.token_provider)
+        self.assertEqual(client.auth, "oauth")
+
+    def test_client_from_config_static_key_path(self):
+        self.cfg.linear_api_key_file.write_text("lin_api_static")
+        client = client_from_config(self.cfg)
+        self.assertIsNone(client.token_provider)
+        self.assertEqual(client.api_key, "lin_api_static")
 
 
 if __name__ == "__main__":

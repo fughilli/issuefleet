@@ -19,7 +19,7 @@ from issuefleet import creds
 from issuefleet.config import Config, ConfigError
 from issuefleet.github import GithubForge, parse_repo_slug
 from issuefleet.gitops import Gitops
-from issuefleet.linear import LinearClient, LinearTracker
+from issuefleet.linear import LinearClient, LinearTracker, client_from_config
 from issuefleet.reconcile import Reconciler
 from issuefleet.registry import Registry
 
@@ -182,18 +182,30 @@ def _check_webhooks(cfg: Config) -> list[Check]:
 
 def _check_linear(cfg: Config, tracker) -> list[Check]:
     out = []
-    try:
-        key, source = creds.resolve_linear_key(cfg)
-    except creds.CredentialError as e:
-        return [Check(FAIL, "Linear API key", str(e))]
-    mode = LinearClient(key, auth=cfg.linear_auth).auth
-    out.append(Check(OK, "Linear API key",
-                     f"from {source} ({'agent/OAuth token, Bearer' if mode == 'oauth' else 'personal key, raw header'})"))
-    if not creds.file_permissions_ok(cfg.linear_api_key_file):
-        out.append(Check(WARN, f"{cfg.linear_api_key_file}",
-                         "readable by group/other — chmod 600 it"))
+    if creds.linear_uses_app_token(cfg):
+        try:
+            client_id, _ = creds.resolve_linear_oauth_client(cfg)
+        except creds.CredentialError as e:
+            return [Check(FAIL, "Linear app credentials", str(e))]
+        out.append(Check(OK, "Linear app credentials",
+                         f"client_credentials grant (client id {client_id}); "
+                         "30-day app token, auto-refetched"))
+        if not creds.file_permissions_ok(cfg.linear_oauth_client_secret_file):
+            out.append(Check(WARN, f"{cfg.linear_oauth_client_secret_file}",
+                             "readable by group/other — chmod 600 it"))
+    else:
+        try:
+            key, source = creds.resolve_linear_key(cfg)
+        except creds.CredentialError as e:
+            return [Check(FAIL, "Linear API key", str(e))]
+        mode = LinearClient(key, auth=cfg.linear_auth).auth
+        out.append(Check(OK, "Linear API key",
+                         f"from {source} ({'agent/OAuth token, Bearer' if mode == 'oauth' else 'personal key, raw header'})"))
+        if not creds.file_permissions_ok(cfg.linear_api_key_file):
+            out.append(Check(WARN, f"{cfg.linear_api_key_file}",
+                             "readable by group/other — chmod 600 it"))
     if tracker is None:
-        tracker = LinearTracker(LinearClient(key, auth=cfg.linear_auth))
+        tracker = LinearTracker(client_from_config(cfg))
     try:
         viewer = tracker.viewer()
         out.append(Check(OK, "Linear API", f"authenticated as {viewer.get('name')} "
@@ -351,8 +363,7 @@ def run_doctor(
         try:
             registry = Registry(cfg.state_dir)
             if tracker is None:
-                key, _ = creds.resolve_linear_key(cfg)
-                tracker = LinearTracker(LinearClient(key, auth=cfg.linear_auth))
+                tracker = LinearTracker(client_from_config(cfg))
             rec = Reconciler(cfg, registry, tracker, forges or {}, git, runner or _NullRunner())
             eligible = {p.name: tracker.eligible_issues(p) for p in cfg.projects}
             claim_now, waiting = rec.claim_queue(eligible)

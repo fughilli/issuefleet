@@ -70,6 +70,30 @@ def exchange_code(
     return token
 
 
+def fetch_app_token(
+    client_id: str, client_secret: str, scopes: list[str] | None = None, post_form=_post_form
+) -> tuple[str, int]:
+    """Mint an app-actor token via the client_credentials grant. Unlike the
+    authorization_code flow this needs no browser and no admin present: the
+    app authenticates as itself. Linear app tokens last ~30 days and come
+    with NO refresh token — the documented pattern is to request a fresh one
+    when the current one nears expiry or a call returns 401. Returns
+    (access_token, expires_in_seconds)."""
+    resp = post_form(
+        TOKEN_URL,
+        {
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "scope": ",".join(scopes or AGENT_SCOPES),
+        },
+    )
+    token = resp.get("access_token")
+    if not token:
+        raise OAuthError(f"client_credentials token request failed: {resp}")
+    return token, int(resp.get("expires_in") or 0)
+
+
 def wait_for_code(port: int, timeout_s: int = 300) -> str:
     """One-shot localhost listener for the OAuth redirect."""
     captured: dict = {}
