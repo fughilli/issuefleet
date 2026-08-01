@@ -79,6 +79,23 @@ class ReconcileTest(unittest.TestCase):
         self.assertIn("tmux attach", body)
         self.assertIn(MARKER_PREFIX + "claim-issue-1", body)
 
+    def test_claim_prefetches_origin_with_forge_token(self):
+        w = self.claim_one()
+        # Exactly one fetch, on the project repo, carrying the forge's auth so
+        # a private repo's refs land in the shared clone for the container.
+        self.assertEqual(len(self.git.fetched), 1)
+        repo, url, auth = self.git.fetched[0]
+        self.assertEqual(repo, str(self.cfg.projects[0].repo))
+        self.assertEqual((url, auth), ("https://github.example/o/r.git", "basic fake-token"))
+        # Refs are refreshed BEFORE the worktree is cut off them.
+        self.assertIsNotNone(w)
+
+    def test_claim_tolerates_fetch_failure(self):
+        self.git.fail_next_fetch = 1
+        w = self.claim_one()  # must still claim from whatever refs are local
+        self.assertIsNotNone(w)
+        self.assertEqual(self.runner.started, [w.tmux_session])
+
     def test_claim_inherits_launcher_state_from_parent_repo(self):
         # The claude-container skill-approval prompt wedges headless
         # launches; the approval state from the main checkout must land in

@@ -77,6 +77,13 @@ class Forge(Protocol):
 
 
 class Git(Protocol):
+    def fetch(self, repo: Path, url=None, auth_header=None) -> None:
+        """Refresh origin/* in the daemon's clone (with the forge's scoped
+        token) so freshly-cut worktrees — and the containers sharing the
+        clone's object store — see up-to-date branches without their own
+        credential."""
+        ...
+
     def create_worktree(self, repo: Path, branch: str, base_ref: str, path: Path) -> None:
         """Idempotent: adopt an existing worktree/branch rather than failing."""
         ...

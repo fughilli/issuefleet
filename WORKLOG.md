@@ -58,6 +58,25 @@ end-to-end flow — `docs/SMOKE_TEST.md` is the step-by-step procedure.
 
 ## Recent additions
 
+- **Fresh base + reachable branches for workers** (branch
+  `worker-prefetch-branches`): the daemon clones a repo once and never
+  fetched, so every worker branched from the local `main` frozen at clone
+  time, and the container (no forge credential of its own) couldn't reach any
+  branch pushed since. Now `_claim_one` runs `Gitops.fetch` (prune,
+  `+refs/heads/*:refs/remotes/origin/*`, with the forge token via one-shot
+  http.extraheader) before cutting the worktree — best-effort, a fetch blip
+  still claims from local refs. `create_worktree` now cuts new branches from
+  `origin/<base_ref>` (via `_base`, falling back to the bare ref when there's
+  no origin/<ref> — offline/local-only), so workers start from latest main;
+  existing-branch adoption is unchanged. Because a linked worktree shares the
+  clone's object store, the refreshed `origin/*` refs are checkout-able inside
+  the container with no network — the worker brief now points at
+  `git switch --detach origin/<name>` for reproducing on another branch, and
+  says to return to the work branch before committing (the daemon still
+  assumes HEAD stays on the assigned branch across restarts). Offline-tested:
+  real-git origin-base + fallback, prefetch-with-token, fetch-failure
+  tolerance.
+
 - **FUG-13 — bot authors Linear issues** (branch `agent/fug-13-…`): new
   `agentctl file-issue` outbox verb → `Reconciler._handle_file_issue` →
   `LinearTracker.create_issue` (`issueCreate`). New tickets inherit the

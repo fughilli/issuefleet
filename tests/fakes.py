@@ -261,6 +261,16 @@ class FakeGit:
         self.push_specs: list[tuple] = []  # (url, auth_header) per push
         self.excludes: list[tuple[str, str]] = []  # (worktree, pattern)
         self.fail_next_push = 0
+        self.fetched: list[tuple] = []  # (repo, url, auth_header) per fetch
+        self.fail_next_fetch = 0
+
+    def fetch(self, repo: Path, url=None, auth_header=None) -> None:
+        if self.fail_next_fetch > 0:
+            self.fail_next_fetch -= 1
+            from issuefleet.gitops import GitError
+
+            raise GitError("fake git fetch failure")
+        self.fetched.append((str(repo), url, auth_header))
 
     def create_worktree(self, repo: Path, branch: str, base_ref: str, path: Path) -> None:
         Path(path).mkdir(parents=True, exist_ok=True)
