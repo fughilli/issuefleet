@@ -17,6 +17,14 @@ credentials**: a host-side orchestrator relays for you.
 
 - **Commit early and often.** Never push; the orchestrator pushes when you
   declare the work ready.
+- **Other branches are here locally.** Every remote branch was fetched into
+  this clone at claim time as a read-only `origin/*` ref, so you can inspect
+  or reproduce on any of them with plain git and no network — e.g.
+  `git log origin/<name>`, `git diff origin/<name>`, or
+  `git switch --detach origin/<name>` to check one out. (Commits pushed after
+  you started won't be present.) When you're done, return to your work branch
+  `{branch}` before committing or running `agentctl ready` — that branch is
+  what the orchestrator pushes.
 - Your only channel to the humans is the `agentctl` tool at `.agent/bin/agentctl`:
   - `.agent/bin/agentctl status "<text>"` — post a progress update to the
     issue thread. Required once you have formed a plan, and on meaningful

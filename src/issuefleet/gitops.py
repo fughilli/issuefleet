@@ -82,6 +82,27 @@ class Gitops:
         path.parent.mkdir(parents=True, exist_ok=True)
         _git([*_auth_args(auth_header), "clone", url, str(path)])
 
+    def fetch(self, repo: Path, url: str | None = None, auth_header: str | None = None) -> None:
+        """Refresh the clone's remote-tracking refs (``origin/*``) before a
+        worker is cut. A linked worktree shares this clone's object store, so
+        this is also what lets the worker CONTAINER check out any branch —
+        e.g. ``git switch origin/some-branch`` to reproduce a report there —
+        with no network access or credential of its own: the daemon pulls the
+        refs here, once, with its scoped forge token. Fetches from the forge
+        URL (token via one-shot http.extraheader, never persisted) into the
+        origin/* namespace, and prunes deleted branches so a stale
+        remote-tracking ref can't shadow a real one."""
+        _git(
+            [
+                *_auth_args(auth_header),
+                "fetch",
+                "--prune",
+                url or "origin",
+                "+refs/heads/*:refs/remotes/origin/*",
+            ],
+            cwd=repo,
+        )
+
     def create_worktree(self, repo: Path, branch: str, base_ref: str, path: Path) -> None:
         path = Path(path)
         if (path / ".git").exists():
@@ -95,15 +116,28 @@ class Gitops:
         if self._branch_exists(repo, branch):
             _git(["worktree", "add", str(path), branch], cwd=repo)
         else:
-            _git(["worktree", "add", "-b", branch, str(path), base_ref], cwd=repo)
+            _git(["worktree", "add", "-b", branch, str(path), self._base(repo, base_ref)], cwd=repo)
 
     def _branch_exists(self, repo: Path, branch: str) -> bool:
+        return self._ref_exists(repo, f"refs/heads/{branch}")
+
+    def _ref_exists(self, repo: Path, ref: str) -> bool:
         proc = subprocess.run(
-            ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+            ["git", "rev-parse", "--verify", "--quiet", ref],
             cwd=repo,
             capture_output=True,
         )
         return proc.returncode == 0
+
+    def _base(self, repo: Path, base_ref: str) -> str:
+        """Cut new worker branches from the freshly-fetched remote-tracking
+        ref (``origin/<base_ref>``) so they start from the latest base, not
+        the daemon's local base branch — which git won't fast-forward while
+        it's checked out in the primary worktree, so it stays pinned at clone
+        time. Falls back to the bare ref when there's no ``origin/<base_ref>``
+        (offline bootstrap, or a local-only base)."""
+        remote = f"origin/{base_ref}"
+        return remote if self._ref_exists(repo, f"refs/remotes/{remote}") else base_ref
 
     def add_worktree_exclude(self, repo: Path, path: Path, pattern: str) -> None:
         common = Path(_git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=path))

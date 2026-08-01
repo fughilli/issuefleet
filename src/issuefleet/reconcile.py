@@ -18,6 +18,7 @@ import threading
 from pathlib import Path
 
 from issuefleet import marker, MARKER_PREFIX
+from issuefleet import gitops
 from issuefleet import worker as worker_mod
 from issuefleet.config import Config, ProjectConfig
 from issuefleet.mailbox import Mailbox
@@ -754,6 +755,20 @@ class Reconciler:
         tmux_session = f"issuefleet-{project.name}-{issue.key}"
         log.info("claiming %s -> %s (%s)%s", issue.key, branch, worktree,
                  " [agent session]" if session else "")
+
+        # Refresh origin/* before cutting the worktree so the worker sees
+        # current branches (and can check any of them out from inside its
+        # container, which shares this clone's objects but has no forge
+        # credential of its own). Best-effort: a transient fetch failure must
+        # not block the claim — we branch from whatever refs are already local
+        # and the worker still runs.
+        forge = self.forges.get(project.name)
+        if forge is not None:
+            fetch_url, fetch_auth = forge.push_spec()
+            try:
+                self.git.fetch(project.repo, url=fetch_url, auth_header=fetch_auth)
+            except gitops.GitError as e:
+                log.warning("[%s] pre-claim fetch failed (%s); using local refs", issue.key, e)
 
         self.git.create_worktree(project.repo, branch, project.base_ref, worktree)
         self.git.add_worktree_exclude(project.repo, worktree, ".agent/")

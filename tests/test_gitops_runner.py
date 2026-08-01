@@ -53,6 +53,36 @@ class GitopsTest(unittest.TestCase):
         with self.assertRaisesRegex(GitError, "expected"):
             self.git.create_worktree(self.repo, "agent/other", "main", self.wt)
 
+    def test_new_worktree_starts_from_origin_base_not_stale_local(self):
+        # Advance origin/main past the daemon clone's local main via a second
+        # clone, then fetch: the clone's local `main` stays pinned (it's
+        # checked out), only origin/main moves.
+        other = Path(self.tmp.name) / "other"
+        run(["git", "clone", str(self.origin), str(other)])
+        (other / "NEW.txt").write_text("fresh\n")
+        run(["git", "add", "."], cwd=other)
+        run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "advance"],
+            cwd=other)
+        run(["git", "push", "origin", "main"], cwd=other)
+        self.git.fetch(self.repo, url=str(self.origin))
+
+        def sha(ref, cwd):
+            return subprocess.run(["git", "rev-parse", ref], cwd=cwd,
+                                  capture_output=True, text=True).stdout.strip()
+
+        self.assertNotEqual(sha("main", self.repo), sha("origin/main", self.repo))
+        # A fresh worker branch is cut from origin/main (the fetched base),
+        # not the stale local main.
+        self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
+        self.assertTrue((self.wt / "NEW.txt").is_file())
+        self.assertEqual(sha("HEAD", self.wt), sha("origin/main", self.repo))
+
+    def test_worktree_base_falls_back_to_local_ref_without_origin(self):
+        # A local-only base (no origin/<ref>) still works — bootstrap/offline.
+        run(["git", "branch", "local-only", "main"], cwd=self.repo)
+        self.git.create_worktree(self.repo, "agent/fug-2-y", "local-only", self.wt)
+        self.assertTrue((self.wt / "README.md").is_file())
+
     def test_create_worktree_recovers_from_deleted_dir(self):
         self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
         shutil.rmtree(self.wt)
