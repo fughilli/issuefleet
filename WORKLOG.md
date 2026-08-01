@@ -58,6 +58,19 @@ end-to-end flow — `docs/SMOKE_TEST.md` is the step-by-step procedure.
 
 ## Recent additions
 
+- **FUG-32 — outer deploy loop** (branch `agent/fug-32-…`):
+  `deploy/docker/watch.sh` (+ `//deploy/docker:watch`,
+  `deploy/issuefleet-watch.service`) supervises the compose stack and keeps
+  it on the newest build of `main` with no human in the loop. IMAGE mode
+  (default): `docker compose pull issuefleet`, and if `:latest` resolves to a
+  new image id, recreate the daemon onto exactly the image CI published to
+  ghcr.io — no source tree, no build. SOURCE mode (fallback): fast-forward
+  `origin/main` and `up -d --build`. Only the `issuefleet` service is
+  recreated per update; tailscale stays up and sibling workers survive, so a
+  deploy never interrupts an in-flight worker. Poll interval / mode / branch
+  via `ISSUEFLEET_WATCH_{INTERVAL,MODE,BRANCH}`; clean SIGTERM exit leaves
+  the stack running.
+
 - **Fresh base + reachable branches for workers** (branch
   `worker-prefetch-branches`): the daemon clones a repo once and never
   fetched, so every worker branched from the local `main` frozen at clone

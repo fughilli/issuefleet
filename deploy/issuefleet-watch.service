@@ -1,0 +1,40 @@
+# systemd user unit for the OUTER DEPLOY LOOP (deploy/docker/watch.sh).
+#
+# Unlike deploy/issuefleet.service (which runs the laptop-mode daemon
+# directly), this supervises the docker-compose stack and keeps it on the
+# newest build of main: it brings the stack up on boot, then polls
+# ghcr.io/fughilli/issuefleet:latest and recreates the daemon whenever CI
+# publishes a new image. Workers survive each swap (they're host siblings).
+#
+#   cp deploy/issuefleet-watch.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now issuefleet-watch
+#   loginctl enable-linger "$USER"   # so it runs without an active login
+#
+# Adjust WorkingDirectory to your checkout. Source mode (build on the box
+# instead of pulling images): add Environment=ISSUEFLEET_WATCH_MODE=source.
+
+[Unit]
+Description=issuefleet outer deploy loop (docker-compose + auto-update)
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Projects/issuefleet
+# Run the loop directly (no bazel needed at runtime); it cd's to deploy/docker
+# and sources env.sh itself. BUILD_WORKSPACE_DIRECTORY is what bazel would set.
+Environment=BUILD_WORKSPACE_DIRECTORY=%h/Projects/issuefleet
+# Poll interval in seconds (default 300) and mode (image|source):
+Environment=ISSUEFLEET_WATCH_INTERVAL=300
+Environment=ISSUEFLEET_WATCH_MODE=image
+ExecStart=%h/Projects/issuefleet/deploy/docker/watch.sh
+# The loop exits cleanly on SIGTERM (leaving the stack up); let it finish.
+Restart=on-failure
+RestartSec=30
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin
+StandardOutput=append:%h/.local/state/issuefleet/watch.log
+StandardError=append:%h/.local/state/issuefleet/watch.log
+
+[Install]
+WantedBy=default.target
