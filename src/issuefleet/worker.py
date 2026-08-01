@@ -8,12 +8,14 @@ orchestrator by construction (brief §5.4, option 1).
 
 from __future__ import annotations
 
+import json
 import shutil
 import stat
 import uuid
 from pathlib import Path
 
 import issuefleet
+from issuefleet import creds
 from issuefleet.agent_runtime.turns import TurnState
 from issuefleet.mailbox import Mailbox
 from issuefleet.prompts import render_brief
@@ -80,6 +82,67 @@ def inherit_repo_files(repo: Path, worktree: Path, rel_paths: list[str]) -> list
                 shutil.copy2(src, dst)
             inherited.append(rel)
     return inherited
+
+
+def stage_tailscale(worktree: Path, issue, project, config) -> bool:
+    """Deliver the worker's tailnet auth key + bring-up params into
+    ``.agent/tailscale/`` (FUG-40), when tailscale is enabled for this project
+    and a key resolves. Returns True if tailnet material was staged.
+
+    A no-op that also *clears* any stale material otherwise, so toggling the
+    feature off (or dropping a project's opt-in) between claims never leaves a
+    live key sitting in a worktree. ``.agent/`` is git-excluded and owned by the
+    daemon, so the key never rides into a commit and the container reads it at
+    the same absolute path it is written (the worktree is bind-mounted)."""
+    ts_dir = Path(worktree) / ".agent" / "tailscale"
+    if not config.tailscale_enabled_for(project):
+        shutil.rmtree(ts_dir, ignore_errors=True)
+        return False
+    authkey = creds.resolve_tailscale_authkey(config)
+    if not authkey:
+        shutil.rmtree(ts_dir, ignore_errors=True)
+        return False
+    ts_dir.mkdir(parents=True, exist_ok=True)
+    params = {
+        "hostname": config.tailscale.hostname_template.format(key=issue.key.lower()),
+        "tags": list(config.tailscale.tags),
+        "up_args": list(config.tailscale.up_args),
+        "proxy_port": config.tailscale.proxy_port,
+    }
+    (ts_dir / "params.json").write_text(json.dumps(params, indent=2))
+    keyfile = ts_dir / "authkey"
+    # Write restricted from the start: create at 0600 rather than write-then-chmod
+    # so the key is never briefly world-readable.
+    keyfile.touch(mode=0o600, exist_ok=True)
+    keyfile.chmod(0o600)
+    keyfile.write_text(authkey)
+
+    # Teach the agent how to use the tailnet, in its first-turn context. Safe
+    # to append: provision() rewrites brief.md fresh on every (re)provision, so
+    # this never accumulates.
+    brief = Path(worktree) / ".agent" / "brief.md"
+    if brief.exists():
+        with open(brief, "a") as f:
+            f.write(_TAILNET_BRIEF.format(port=config.tailscale.proxy_port))
+    return True
+
+
+_TAILNET_BRIEF = """\
+
+## Tailnet access (shared rigs)
+
+This worker is on the operator's tailnet, so you can reach shared resources (a
+HITL rig, a device on a lab LAN). This does **not** override the "no network
+credentials" rule above — it only routes to tailnet peers, and only when you
+opt a command in. Your normal traffic is unaffected:
+
+    source .agent/tailscale/env && ssh user@rig-host        # per-shell opt-in
+    ALL_PROXY=socks5://127.0.0.1:{port} curl http://rig-host/  # per-command
+
+`.agent/tailscale/env` exports ALL_PROXY/HTTP(S)_PROXY pointing at the local
+Tailscale proxy. Run `tailscale status` to list reachable peers. If the tailnet
+isn't up, see `.agent/tailscale/bringup.log`.
+"""
 
 
 def provision(worktree: Path, issue, branch: str, base_ref: str, config) -> str:

@@ -237,5 +237,49 @@ class ConfigTest(unittest.TestCase):
             config.parse(data)
 
 
+class TailscaleConfigTest(unittest.TestCase):
+    def test_disabled_by_default(self):
+        cfg = config.parse(MINIMAL)
+        self.assertFalse(cfg.tailscale.enabled)
+        self.assertFalse(cfg.tailscale_enabled_for(cfg.projects[0]))
+
+    def test_parses_agent_tailscale_table(self):
+        data = dict(MINIMAL)
+        data["agent"] = {
+            "tailscale": {
+                "enabled": True,
+                "tags": ["tag:issuefleet-worker"],
+                "hostname_template": "wk-{key}",
+                "authkey_env": "MY_TS_KEY",
+                "authkey_file": "~/keys/ts",
+                "up_args": ["--accept-dns=false"],
+                "proxy_port": 1099,
+            }
+        }
+        cfg = config.parse(data)
+        self.assertTrue(cfg.tailscale.enabled)
+        self.assertEqual(cfg.tailscale.tags, ["tag:issuefleet-worker"])
+        self.assertEqual(cfg.tailscale.hostname_template, "wk-{key}")
+        self.assertEqual(cfg.tailscale.authkey_env, "MY_TS_KEY")
+        self.assertEqual(cfg.tailscale.up_args, ["--accept-dns=false"])
+        self.assertEqual(cfg.tailscale.proxy_port, 1099)
+        self.assertTrue(cfg.tailscale_enabled_for(cfg.projects[0]))
+
+    def test_per_project_override(self):
+        data = dict(MINIMAL)
+        data["agent"] = {"tailscale": {"enabled": True}}
+        data["projects"] = [dict(p) for p in MINIMAL["projects"]]
+        data["projects"][0]["tailscale"] = False
+        cfg = config.parse(data)
+        self.assertTrue(cfg.tailscale.enabled)  # fleet default on
+        self.assertFalse(cfg.tailscale_enabled_for(cfg.projects[0]))  # project forces off
+
+    def test_literal_authkey_rejected(self):
+        data = dict(MINIMAL)
+        data["agent"] = {"tailscale": {"authkey": "tskey-auth-secret"}}
+        with self.assertRaisesRegex(config.ConfigError, "authkey"):
+            config.parse(data)
+
+
 if __name__ == "__main__":
     unittest.main()

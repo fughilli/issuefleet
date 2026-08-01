@@ -41,6 +41,13 @@ def resolve_optional(env_name: str, file_path: Path) -> str | None:
     return _read_key_file(Path(file_path))
 
 
+def resolve_tailscale_authkey(cfg: Config) -> str | None:
+    """The worker tailnet auth key (FUG-40), env-then-chmod-600-file. Optional:
+    returns None when neither source is present, so a fleet with tailscale
+    enabled but no key yet degrades to 'no tailnet' rather than crashing."""
+    return resolve_optional(cfg.tailscale.authkey_env, cfg.tailscale.authkey_file)
+
+
 def resolve_linear_key(cfg: Config) -> tuple[str, str]:
     """Returns (key, source-description). Raises CredentialError if absent."""
     v = os.environ.get(cfg.linear_api_key_env)

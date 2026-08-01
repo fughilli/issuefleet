@@ -1,14 +1,17 @@
 """Doctor and dry-run plan, offline via injected fakes."""
 
 import io
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from fakes import FakeForge, FakeGit, FakeRunner, FakeTracker, make_issue
 
 from issuefleet import config
-from issuefleet.doctor import run_doctor
+from issuefleet.doctor import _check_tailscale, run_doctor
 from issuefleet.mailbox import Mailbox
 from issuefleet.reconcile import Reconciler
 from issuefleet.registry import Registry
@@ -339,6 +342,55 @@ claim = {{ strategy = "label", value = "agent" }}
             for k, v in saved.items():
                 if v is not None:
                     os.environ[k] = v
+
+
+class TailscaleCheckTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _cfg(self, enabled=True, settings=None):
+        data = {
+            "projects": [{
+                "name": "x", "linear_project": "X", "repo": str(self.root),
+                "claim": {"strategy": "agent"},
+            }],
+            "agent": {"tailscale": {"enabled": enabled, "authkey_env": "TEST_TS_KEY"}},
+        }
+        cfg = config.parse(data)
+        cfg.container_config_dir = self.root
+        if settings is not None:
+            (self.root / "settings.json").write_text(json.dumps(settings))
+        return cfg
+
+    def test_silent_when_disabled(self):
+        self.assertEqual(_check_tailscale(self._cfg(enabled=False)), [])
+
+    def test_warns_when_enabled_but_no_key(self):
+        cfg = self._cfg(enabled=True, settings={"permissions": {"defaultMode": "bypassPermissions"}})
+        with mock.patch.dict(os.environ, {}, clear=True):
+            checks = _check_tailscale(cfg)
+        key_check = next(c for c in checks if c.label == "tailnet auth key")
+        self.assertEqual(key_check.status, "warn")
+
+    def test_flags_a_tailscale_deny_rule(self):
+        cfg = self._cfg(enabled=True, settings={"permissions": {"deny": ["Bash(tailscale:*)"]}})
+        with mock.patch.dict(os.environ, {"TEST_TS_KEY": "tskey-abc"}):
+            checks = _check_tailscale(cfg)
+        block = next(c for c in checks if c.label == "tailnet not blocked")
+        self.assertEqual(block.status, "warn")
+        self.assertIn("deny", block.detail)
+
+    def test_ok_when_key_present_and_no_deny(self):
+        cfg = self._cfg(enabled=True, settings={"permissions": {"defaultMode": "bypassPermissions"}})
+        with mock.patch.dict(os.environ, {"TEST_TS_KEY": "tskey-abc"}):
+            checks = _check_tailscale(cfg)
+        by_label = {c.label: c.status for c in checks}
+        self.assertEqual(by_label["tailnet auth key"], "ok")
+        self.assertEqual(by_label["tailnet not blocked"], "ok")
 
 
 if __name__ == "__main__":

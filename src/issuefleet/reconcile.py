@@ -919,6 +919,10 @@ class Reconciler:
         for rel in worker_mod.inherit_repo_files(project.repo, worktree, self.cfg.copy_from_repo):
             self.git.add_worktree_exclude(project.repo, worktree, rel)
         session_uuid = worker_mod.provision(worktree, issue, branch, project.base_ref, self.cfg)
+        # Deliver the tailnet auth key into .agent/ when tailscale is enabled
+        # for this project (FUG-40); a safe no-op otherwise.
+        if worker_mod.stage_tailscale(worktree, issue, project, self.cfg):
+            log.info("[%s] tailnet enabled for worker (userspace)", issue.key)
 
         rec = WorkerRecord(
             issue_id=issue.id,
