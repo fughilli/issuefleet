@@ -24,6 +24,18 @@ sh_binary(
     ],
 )
 
+# The outer deploy loop: keep the stack up AND current. Polls ghcr.io (or, in
+# source mode, origin/main) and recreates the daemon onto each new build.
+sh_binary(
+    name = "watch",
+    srcs = ["watch.sh"],
+    data = [
+        "docker-compose.yml",
+        "env.sh",
+        "funnel.json",
+    ],
+)
+
 sh_binary(
     name = "down",
     srcs = ["down.sh"],

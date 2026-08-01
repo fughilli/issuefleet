@@ -97,6 +97,51 @@ builds entirely: `docker compose pull issuefleet && docker compose up -d`.
 The GHCR package may need to be made public once (repo → Packages →
 settings) for an anonymous homelab pull, or `docker login ghcr.io` there.
 
+## Keeping it current (the outer deploy loop)
+
+`docker compose pull issuefleet && docker compose up -d` is the manual
+update. The **outer deploy loop** (`deploy/docker/watch.sh`) does it for you,
+forever: it brings the stack up, then on an interval promotes the daemon to
+the newest build of `main` with no human in the loop.
+
+```sh
+bazel run //deploy/docker:watch                      # image mode, 5-min poll
+ISSUEFLEET_WATCH_INTERVAL=60 bazel run //deploy/docker:watch
+ISSUEFLEET_WATCH_MODE=source bazel run //deploy/docker:watch   # build on the box
+```
+
+Two ways to get "newest", chosen by `ISSUEFLEET_WATCH_MODE`:
+
+- **`image`** (default, the optimal path): `docker compose pull issuefleet`,
+  and if the local `:latest` now resolves to a new image id, recreate the
+  daemon onto it. The box runs exactly the image CI published to ghcr.io — no
+  source tree, no build. A steady state is a cheap manifest check; layers
+  download only when the digest actually moved.
+- **`source`** (fallback for a box that can't pull the image — private
+  registry, air-gapped, or you want it to build): `git fetch`, and if
+  `origin/$ISSUEFLEET_WATCH_BRANCH` (default `main`) moved, fast-forward the
+  checkout and `up -d --build issuefleet`. Fast-forward only — it refuses to
+  clobber a diverged/dirty checkout and logs instead.
+
+Only the `issuefleet` service is recreated on an update: the tailscale
+sidecar keeps the tailnet/funnel up, and worker containers are host siblings
+of the daemon, so a deploy never interrupts an in-flight worker. The loop
+exits cleanly on SIGTERM/SIGINT, leaving the stack running.
+
+Autostart it on boot with the systemd user unit:
+
+```sh
+cp deploy/issuefleet-watch.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now issuefleet-watch
+loginctl enable-linger "$USER"        # run without an active login
+journalctl --user -u issuefleet-watch -f    # or ~/.local/state/issuefleet/watch.log
+```
+
+Use this **instead of** running `:up` by hand — it calls `up -d` for you on
+start. Don't also enable `deploy/issuefleet.service` (that's the laptop-mode
+daemon, not the containerized stack); the two would double-claim issues.
+
 ## Tailscale / Funnel
 
 ```sh
