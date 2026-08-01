@@ -206,6 +206,31 @@ class ReadyWakeRestoreTest(unittest.TestCase):
             self.assertEqual(turnloop.step(self.agent_dir), turns.EXIT_ERROR)
         self.assertEqual(turns.TurnState.load(self.agent_dir).phase, turns.PHASE_RUNNING)
 
+    def test_wake_emits_gear_ack_and_settling_emits_check(self):
+        # 👀 (orchestrator, elsewhere) → ⚙️ when the agent starts a turn on the
+        # wake → ✅ when it settles. A silent wake from ready still brackets
+        # with ⚙️/✅ so the sender never sees a dangling gear.
+        self.mb.put_inbox("reply", {"author": "kevin", "text": "one more tweak"})
+        self.stub_claude()  # agent emits nothing, so the wake returns to ready
+        self.assertEqual(turnloop.step(self.agent_dir), 0)
+        acks = [m.payload["text"] for m in self.mb.pending_outbox() if m.kind == "ack"]
+        self.assertEqual(len(acks), 2)
+        self.assertTrue(acks[0].startswith("⚙️"))
+        self.assertTrue(acks[1].startswith("✅"))
+        # The cycle is closed: working_acked cleared, ready to fire again next time.
+        self.assertFalse(turns.TurnState.load(self.agent_dir).working_acked)
+
+    def test_continuation_turns_do_not_re_ack(self):
+        # ⚙️ fires once per work cycle, not on every self-driven turn.
+        st = turns.TurnState.load(self.agent_dir)
+        st.phase = turns.PHASE_RUNNING
+        st.working_acked = True  # mid-cycle already
+        st.turns_taken = 2
+        st.save(self.agent_dir)
+        self.stub_claude()
+        self.assertEqual(turnloop.step(self.agent_dir), 0)
+        self.assertEqual([m for m in self.mb.pending_outbox() if m.kind == "ack"], [])
+
     def test_wake_from_idle_restores_idle(self):
         st = turns.TurnState.load(self.agent_dir)
         st.phase = turns.PHASE_IDLE
@@ -218,14 +243,20 @@ class ReadyWakeRestoreTest(unittest.TestCase):
     def test_responsive_wake_keeps_working(self):
         self.mb.put_inbox("pr_feedback", {"reviewer": "bob", "text": "rename this please"})
         # The agent posts a status during the turn (simulated by the stub
-        # dropping a validly-named message into the outbox).
-        outbox_file = self.mb.outbox / "000001-status-aaaaaaaaaaaa.json"
+        # dropping a validly-named message into the outbox). Seq 2: the wake's
+        # ⚙️ acknowledgment already took seq 1 before the turn ran.
+        outbox_file = self.mb.outbox / "000002-status-aaaaaaaaaaaa.json"
         self.stub_claude(
-            extra=f"printf '%s' '{json.dumps({'seq': 1, 'kind': 'status', 'id': 'aaaaaaaaaaaa', 'ts': 't', 'payload': {'text': 'on it'}})}' > {outbox_file}"
+            extra=f"printf '%s' '{json.dumps({'seq': 2, 'kind': 'status', 'id': 'aaaaaaaaaaaa', 'ts': 't', 'payload': {'text': 'on it'}})}' > {outbox_file}"
         )
         code = turnloop.step(self.agent_dir)
         self.assertEqual(code, 0)
         self.assertEqual(turns.TurnState.load(self.agent_dir).phase, turns.PHASE_RUNNING)
+        # The ⚙️ ack was emitted, and the responsive turn left it awaiting ✅.
+        acks = [m.payload["text"] for m in self.mb.pending_outbox() if m.kind == "ack"]
+        self.assertEqual(len(acks), 1)
+        self.assertTrue(acks[0].startswith("⚙️"))
+        self.assertTrue(turns.TurnState.load(self.agent_dir).working_acked)
 
 
 if __name__ == "__main__":

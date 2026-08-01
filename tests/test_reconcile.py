@@ -388,6 +388,22 @@ class ReconcileTest(unittest.TestCase):
         replies = [m for m in self.mailbox().pending_inbox() if m.kind == "reply"]
         self.assertEqual(len(replies), 1)
 
+    def test_comment_mode_acknowledges_with_a_deduped_eyes_comment(self):
+        # No agent session (personal-key / poll claim): the 👀 acknowledgment
+        # falls back to a comment, posted once and deduped by the source
+        # comment id so a crash-retry can't double-post it.
+        self.claim_one()
+        self.tracker.human_comment("issue-1", "please also add a test")
+        self.rec.tick()
+        eyes = [b for _, b in self.tracker.posted if b.startswith("👀")]
+        self.assertEqual(len(eyes), 1)
+        # A retry of the same ingest doesn't post a second 👀 (marker dedupe).
+        self.worker().comment_cursor = None  # force re-ingest of the same comment
+        self.registry.save()
+        self.rec.tick()
+        eyes = [b for _, b in self.tracker.posted if b.startswith("👀")]
+        self.assertEqual(len(eyes), 1)
+
     def test_operator_reply_from_api_key_account_is_ingested(self):
         # With a personal (non-bot) Linear key, the operator's replies come
         # from the same user as the orchestrator's posts. Only the marker

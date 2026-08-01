@@ -133,6 +133,16 @@ def step(agent_dir: Path) -> int:
         return decision.exit_code
 
     workspace = agent_dir.parent
+    # ⚙️: acknowledge that the agent is actively taking turns on the user's
+    # input — once per work cycle (a wake or the fresh first turn, not every
+    # continuation turn). Emitted BEFORE pre_turn_seq so a silent turn's
+    # ready/idle-restore logic below still sees "no output from the turn".
+    starting_cycle = decision.wake_from_phase is not None or not decision.resume
+    if starting_cycle and not state.working_acked:
+        mb.put_outbox("ack", {"text": "⚙️ On it — the agent is taking turns."})
+        state.working_acked = True
+        state.save(agent_dir)
+
     pre_turn_seq = mb.last_outbox_seq()
     pre_head = _git_head(workspace)
     rc = run_claude(decision.prompt, state, agent_dir)
@@ -183,6 +193,15 @@ def step(agent_dir: Path) -> int:
             state.noop_turns = 0
     else:
         state.noop_turns = 0
+    # ✅: close the acknowledgment loop once the agent settles after working.
+    # ready/idle are completions; a pending question (waiting) is itself the
+    # response, so it ends the cycle silently. Never on a failed turn.
+    if state.working_acked and rc == 0:
+        if state.phase in (turns.PHASE_READY, turns.PHASE_IDLE):
+            mb.put_outbox("ack", {"text": "✅ Done for now."})
+            state.working_acked = False
+        elif state.phase == turns.PHASE_WAITING:
+            state.working_acked = False
     state.turns_taken += 1
     state.save(agent_dir)
     if rc != 0:

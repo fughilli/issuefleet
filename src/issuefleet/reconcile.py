@@ -130,6 +130,11 @@ class Reconciler:
                     "reply",
                     {"author": "agent-session", "text": evt.body or "", "source": "linear"},
                 )
+                self._ack_seen(
+                    rec.agent_session_id or evt.session_id,
+                    rec.issue_id,
+                    dedupe_id=f"seen-{rec.issue_id}-{rec.comment_cursor or 'session'}",
+                )
             elif evt.action == "created":
                 if rec is not None:
                     rec.agent_session_id = evt.session_id
@@ -189,6 +194,19 @@ class Reconciler:
             self.tracker.emit_activity(session_id, content)
         except Exception:
             log.exception("agent activity emit failed (session %s)", session_id)
+
+    _ACK_SEEN = "👀 Got it — dispatching to the worker."
+
+    def _ack_seen(self, session_id: str | None, issue_id: str, dedupe_id: str) -> None:
+        """👀: acknowledge, the instant genuine user input is routed to a
+        worker, that it has been seen and is being dispatched — so the sender
+        gets an immediate signal even while the worker is busy, mid-turn, or
+        restarting (the ⚙️/✅ that bracket the actual work follow from the
+        worker). Session-bound → a thought; comment mode → a deduped comment."""
+        if session_id:
+            self._emit_activity_quietly(session_id, {"type": "thought", "body": self._ACK_SEEN})
+        else:
+            self._post_once(issue_id, dedupe_id, self._ACK_SEEN)
 
     def tick(self) -> None:
         # registry.json is the source of truth; a separate `stop`/`once`
@@ -464,6 +482,19 @@ class Reconciler:
                             f"\n\n{marker(msg.id)}",
                         )
                         mailbox.archive_outbox(msg, receipt={"relayed": "linear"})
+                elif msg.kind == "ack":
+                    # A UX acknowledgment emoji (⚙️/✅). It only makes sense in
+                    # the agent-session stream; in comment mode the substantive
+                    # status/ready relays already signal progress, so drop it
+                    # rather than spam the thread. Archived either way.
+                    if rec.agent_session_id:
+                        self.tracker.emit_activity(
+                            rec.agent_session_id,
+                            {"type": "thought", "body": msg.payload["text"]},
+                        )
+                        mailbox.archive_outbox(msg, receipt={"relayed": "agent-session"})
+                    else:
+                        mailbox.archive_outbox(msg, receipt={"dropped": "no session"})
                 elif msg.kind == "file_issue":
                     self._handle_file_issue(rec, mailbox, msg)
                 elif msg.kind == "ready":
@@ -591,6 +622,7 @@ class Reconciler:
             self.tracker.get_viewer_id() if getattr(self.tracker, "app_identity", False) else None
         )
         advanced = False
+        last_user_comment: str | None = None
         for c in comments:
             if rec.comment_cursor is None or c.created_at > rec.comment_cursor:
                 rec.comment_cursor = c.created_at
@@ -599,6 +631,13 @@ class Reconciler:
                 continue
             mailbox.ensure().put_inbox(
                 "reply", {"author": c.author_name, "text": c.body, "source": "linear"}
+            )
+            last_user_comment = c.id
+        if last_user_comment is not None:
+            # 👀 once per ingest batch that carried real user input (not once
+            # per comment — a burst of replies gets a single acknowledgment).
+            self._ack_seen(
+                rec.agent_session_id, rec.issue_id, dedupe_id=f"seen-{last_user_comment}"
             )
         if advanced:
             rec.touch()
