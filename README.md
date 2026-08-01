@@ -272,6 +272,16 @@ When the fleet is full, eligible issues wait; `doctor` shows the order.
 | budget-idle | `max_auto_turns` without human contact; posted a status and idling | any human reply (resets the budget clock) |
 | crashed (host-side) | session died `max_restarts`+1 times; reported on the issue | operator intervention (worktree kept for inspection) |
 
+**Merge conflicts** are watched on the same PR poll. When a submitted PR
+stops merging cleanly (GitHub reports `mergeable: false` because other work
+landed on the base), the daemon does the one thing the credential-less worker
+container cannot — a host-side `fetch` refreshing `origin/<base_ref>` in the
+shared clone — then wakes the agent with a `merge_conflict` message telling it
+to `git rebase origin/<base_ref>`, resolve, and re-run `agentctl ready`. The
+worker rebases with no network of its own. The nudge fires once per conflict
+episode (re-armed when the PR next reads mergeable), so a stuck-dirty PR isn't
+nagged every tick, but a fresh conflict after a resolution is caught.
+
 Teardown (merge, un-claim, or `stop`): signal the agent via a `shutdown`
 mailbox message → archive the mailbox + turn transcripts to
 `<state_dir>/archive/<project>-<KEY>-<timestamp>/` (the transcript outlives
@@ -339,8 +349,6 @@ read `deploy/docker/README.md` before using it.
 
 ## Known edges (honestly)
 
-- **No auto-rebase.** Agents branch off the base ref at claim time.
-  Overlapping issues produce conflicting PRs; a human resolves them.
 - **Merge detection lags** by up to `poll_interval_s`, as does everything
   else the loop observes.
 - **Cost.** N agents running continuously is real money; `max_auto_turns`

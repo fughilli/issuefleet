@@ -15,7 +15,7 @@ never deleted here — consumed/archived files are the durable audit trail and
 get archived wholesale at teardown.
 
 Outbox kinds: status, question, ready, file_issue.
-Inbox kinds:  reply, pr_feedback, pr_closed, info, shutdown, unclaimed.
+Inbox kinds:  reply, pr_feedback, pr_closed, merge_conflict, info, shutdown, unclaimed.
 """
 
 from __future__ import annotations
@@ -33,7 +33,9 @@ from issuefleet.model import now_iso
 _NAME_RE = re.compile(r"^(\d{6})-([a-z_]+)-([0-9a-f]+)\.json$")
 
 OUTBOX_KINDS = ("status", "question", "ready", "file_issue")
-INBOX_KINDS = ("reply", "pr_feedback", "pr_closed", "info", "shutdown", "unclaimed")
+INBOX_KINDS = (
+    "reply", "pr_feedback", "pr_closed", "merge_conflict", "info", "shutdown", "unclaimed"
+)
 
 
 @dataclass

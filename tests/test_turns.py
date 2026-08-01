@@ -131,6 +131,15 @@ class TurnsTest(unittest.TestCase):
         self.assertEqual(d.exit_code, turns.EXIT_CONTINUE)
         self.assertIn("closed without merging", d.prompt)
 
+    def test_merge_conflict_wakes_the_agent(self):
+        state = self.reload()
+        state.phase = turns.PHASE_READY  # sitting on a submitted PR
+        state.save(self.agent_dir)
+        self.mb.put_inbox("merge_conflict", {"text": "rebase onto origin/main"})
+        d = self.decide()
+        self.assertEqual(d.exit_code, turns.EXIT_CONTINUE)
+        self.assertIn("rebase needed", d.prompt)
+
     def test_info_alone_does_not_wake(self):
         state = self.reload()
         state.phase = turns.PHASE_READY

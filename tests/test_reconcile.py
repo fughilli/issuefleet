@@ -329,6 +329,60 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(len(closed), 1)
         self.assertIsNotNone(self.worker())  # not silently dead
 
+    # -- merge conflicts ---------------------------------------------------
+
+    def _open_pr(self):
+        self.claim_one()
+        self.mailbox().put_outbox("ready", {"title": "T", "body": "B"})
+        self.rec.tick()
+        return self.worker().pr_number
+
+    def test_merge_conflict_fetches_base_and_wakes_agent_once(self):
+        n = self._open_pr()
+        self.git.fetched.clear()  # ignore the claim-time prefetch
+        self.forge.set_mergeable(n, False)  # base advanced under the PR -> dirty
+        self.rec.tick()
+        self.rec.tick()  # dirty persists; must not nag again
+        conflicts = [m for m in self.mailbox().pending_inbox() if m.kind == "merge_conflict"]
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(conflicts[0].payload["pr_number"], n)
+        self.assertEqual(conflicts[0].payload["base_ref"], "main")
+        self.assertIn("origin/main", conflicts[0].payload["text"])
+        # The credentialed fetch was done host-side (the container can't).
+        self.assertEqual(len(self.git.fetched), 1)
+        self.assertEqual(self.git.fetched[0][1], "https://github.example/o/r.git")
+        self.assertTrue(self.worker().conflict_notified)
+
+    def test_merge_conflict_rearms_after_pr_reads_mergeable(self):
+        n = self._open_pr()
+        self.forge.set_mergeable(n, False)
+        self.rec.tick()
+        self.forge.set_mergeable(n, True)  # agent rebased; PR clean again
+        self.rec.tick()
+        self.assertFalse(self.worker().conflict_notified)
+        self.forge.set_mergeable(n, False)  # a fresh conflict later on
+        self.rec.tick()
+        conflicts = [m for m in self.mailbox().pending_inbox() if m.kind == "merge_conflict"]
+        self.assertEqual(len(conflicts), 2)  # notified again
+
+    def test_mergeable_unknown_does_not_notify(self):
+        n = self._open_pr()
+        self.forge.set_mergeable(n, None)  # GitHub hasn't computed it yet
+        self.rec.tick()
+        conflicts = [m for m in self.mailbox().pending_inbox() if m.kind == "merge_conflict"]
+        self.assertEqual(conflicts, [])
+        self.assertFalse(self.worker().conflict_notified)
+
+    def test_merge_conflict_not_notified_when_fetch_fails(self):
+        n = self._open_pr()
+        self.forge.set_mergeable(n, False)
+        self.git.fail_next_fetch = 1
+        self.rec.tick()  # fetch fails: stay un-notified, retry next tick
+        self.assertFalse(self.worker().conflict_notified)
+        self.assertEqual([m for m in self.mailbox().pending_inbox() if m.kind == "merge_conflict"], [])
+        self.rec.tick()  # retry succeeds
+        self.assertTrue(self.worker().conflict_notified)
+
     # -- un-claim ----------------------------------------------------------
 
     def test_label_removed_unclaims_cleanly(self):

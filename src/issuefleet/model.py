@@ -56,6 +56,12 @@ class PullRequest:
     merged: bool
     head: str
     base: str
+    # GitHub computes these asynchronously and only returns them on the
+    # single-PR GET (never the list endpoint), so both are None until a
+    # verdict lands: `mergeable` is False and `mergeable_state` == "dirty"
+    # exactly when the branch conflicts with its base.
+    mergeable: bool | None = None
+    mergeable_state: str | None = None
 
 
 @dataclass
@@ -97,6 +103,9 @@ class WorkerRecord:
     session_lookup_attempts: int = 0  # poll-side session discovery tries (bounded)
     pr_number: int | None = None
     pr_url: str | None = None
+    # True once we've told the agent its PR conflicts; re-armed to False when
+    # the PR reads mergeable again, so each conflict episode notifies once.
+    conflict_notified: bool = False
     restarts: int = 0
     comment_cursor: str | None = None  # ISO timestamp of newest ingested Linear comment
     seen_feedback_ids: list[str] = field(default_factory=list)
