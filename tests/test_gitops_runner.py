@@ -126,6 +126,25 @@ class GitopsTest(unittest.TestCase):
         self.commit_in_worktree()
         self.assertTrue(self.git.has_commits_ahead(self.wt, "main"))
 
+    def test_has_commits_ahead_resolves_non_origin_remote(self):
+        # An adopted operator clone may not name its remote `origin`. Reshape
+        # the clone so the base resolves ONLY via a differently-named remote:
+        # detach the primary so local `main` can be dropped, delete it, then
+        # rename origin -> upstream. Neither `origin/main` nor a local `main`
+        # exists now — only `upstream/main` does.
+        self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
+        run(["git", "checkout", "--detach"], cwd=self.repo)
+        run(["git", "branch", "-D", "main"], cwd=self.repo)
+        run(["git", "remote", "rename", "origin", "upstream"], cwd=self.repo)
+        self.assertFalse(self.git.has_commits_ahead(self.wt, "main"))
+        self.commit_in_worktree()
+        self.assertTrue(self.git.has_commits_ahead(self.wt, "main"))
+
+    def test_has_commits_ahead_unresolvable_base_reports_candidates(self):
+        self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
+        with self.assertRaisesRegex(GitError, "cannot resolve base ref 'nope'"):
+            self.git.has_commits_ahead(self.wt, "nope")
+
     def test_push_and_delete_remote_branch(self):
         self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
         self.commit_in_worktree()

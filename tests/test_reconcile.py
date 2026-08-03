@@ -193,6 +193,24 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(w.pr_number, opened["number"])
         self.assertTrue(any("Pull request ready" in b for _, b in self.tracker.posted))
 
+    def test_ready_fetches_base_before_gate(self):
+        self.claim_one()
+        self.git.fetched.clear()  # ignore the claim-time prefetch
+        self.mailbox().put_outbox("ready", {"title": "T", "body": "B"})
+        self.rec.tick()
+        # The base is refreshed on the ready path with the forge's token, so a
+        # clone that never fetched the base can still resolve the gate rather
+        # than wedge the outbox forever.
+        self.assertEqual(len(self.git.fetched), 1)
+        self.assertEqual(self.git.fetched[0][1], "https://github.example/o/r.git")
+
+    def test_ready_tolerates_fetch_failure(self):
+        self.claim_one()
+        self.git.fail_next_fetch = 1
+        self.mailbox().put_outbox("ready", {"title": "T", "body": "B"})
+        self.rec.tick()  # fetch fails, but the ready still proceeds off local refs
+        self.assertEqual(self.git.pushed, [self.worker().branch])
+
     def test_ready_without_commits_is_rejected_and_wakes_agent(self):
         self.claim_one()
         self.git.ahead = False
