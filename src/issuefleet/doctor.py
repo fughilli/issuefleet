@@ -100,6 +100,26 @@ def _check_launcher_flags(cfg: Config) -> list[Check]:
     return out
 
 
+def _check_worker_env(cfg: Config) -> list[Check]:
+    """Each [agent.env] entry must actually resolve. A missing one is a WARN,
+    not a FAIL: workers still launch, they just start without the variable —
+    which for TS_AUTHKEY means no tailnet, and every HITL reservation failing
+    much further downstream, where the cause is far from obvious."""
+    out = []
+    for name, src in sorted(cfg.worker_env.items()):
+        if src.resolve() is None:
+            out.append(
+                Check(
+                    WARN,
+                    f"worker env {name}",
+                    f"no value at {src.describe()} — workers start without {name}",
+                )
+            )
+        else:
+            out.append(Check(OK, f"worker env {name}", f"from {src.describe()}"))
+    return out
+
+
 def _check_worker_runtime(cfg: Config) -> list[Check]:
     """The two conditions that silently break every worker launch when the
     daemon itself runs containerized (observed live on the first stack)."""
@@ -356,6 +376,7 @@ def run_doctor(
     checks += _check_tools(cfg)
     checks += _check_worker_runtime(cfg)
     checks += _check_launcher_flags(cfg)
+    checks += _check_worker_env(cfg)
     checks += _check_container_settings(cfg)
     checks += _check_dirs(cfg)
     checks += _check_webhooks(cfg)

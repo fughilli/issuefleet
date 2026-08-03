@@ -8,6 +8,7 @@ literal key in the config is rejected outright.
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +28,42 @@ _FORBIDDEN_SECRET_KEYS = (
 
 class ConfigError(Exception):
     pass
+
+
+@dataclass
+class EnvSource:
+    """Where a worker environment variable's value comes from.
+
+    Exactly one field is set. ``file`` and ``env`` name a location and keep the
+    secret out of the config file (and out of git); ``value`` is a literal, for
+    non-secrets only — ``parse`` rejects a literal that looks like a key.
+    """
+
+    file: Path | None = None
+    env: str | None = None
+    value: str | None = None
+
+    def resolve(self) -> str | None:
+        """The value, or None when the source isn't there. Never raises: a
+        missing key must degrade the worker (the overlay it feeds decides how),
+        not take the daemon down."""
+        if self.value is not None:
+            return self.value
+        if self.env is not None:
+            return os.environ.get(self.env)
+        if self.file is not None:
+            try:
+                return self.file.read_text().strip()
+            except OSError:
+                return None
+        return None
+
+    def describe(self) -> str:
+        if self.value is not None:
+            return "literal"
+        if self.env is not None:
+            return f"${self.env}"
+        return str(self.file)
 
 
 @dataclass
@@ -116,6 +153,14 @@ class Config:
     launcher_args: list[str] = field(default_factory=lambda: ["--skills-ignore-new"])
     container_config_dir: Path | None = None  # None = launcher's shared default
     claude_container: str = "claude-container"
+    # Environment handed to the launcher process for each worker, name -> where
+    # to read the value ([agent.env] in the config file; values are file paths
+    # or env var names, never secrets). A worker's container sees a variable
+    # only if its workspace overlay also declares it in overlay.json "env" —
+    # the launcher forwards by name, so nothing leaks into a container that
+    # didn't ask. The motivating case is TS_AUTHKEY: led_mapper's overlay joins
+    # the tailnet at container start so workers can reach the HITL rigs.
+    worker_env: dict[str, EnvSource] = field(default_factory=dict)
     # credential lookup (values are env var names / file paths, never secrets)
     linear_api_key_env: str = "LINEAR_API_KEY"
     linear_api_key_file: Path = Path("~/.config/issuefleet/linear.key").expanduser()
@@ -178,6 +223,55 @@ _PATH_VARS = {
     # rotates its own.
     "ISSUEFLEET_CLAUDE_CONFIG": "~/.config/claude-container/config",
 }
+
+
+def _parse_worker_env(table: object, source: str) -> dict[str, EnvSource]:
+    """Parse [agent.env]: NAME = { file | env | value = ... }.
+
+    Requiring the table form (rather than a bare string) keeps "where does this
+    come from" explicit at the callsite — a bare path and a bare env var name
+    are indistinguishable, and guessing wrong would silently hand a worker the
+    literal string "/path/to/key"."""
+    if not isinstance(table, dict):
+        raise ConfigError(f"{source}: [agent.env] must be a table of NAME = {{ ... }}")
+    out: dict[str, EnvSource] = {}
+    for name, spec in table.items():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise ConfigError(f"{source}: [agent.env] '{name}' is not a valid variable name")
+        if not isinstance(spec, dict) or len(spec) != 1:
+            raise ConfigError(
+                f"{source}: [agent.env] {name} must set exactly one of "
+                "file, env, or value (e.g. {name} = {{ file = \"~/.config/issuefleet/ts.key\" }})"
+            )
+        kind, raw = next(iter(spec.items()))
+        if kind == "file":
+            out[name] = EnvSource(file=_path(str(raw)))
+        elif kind == "env":
+            out[name] = EnvSource(env=str(raw))
+        elif kind == "value":
+            # A literal is fine for a hostname or a pool list, but a config
+            # file is the one place a credential must never be.
+            if _looks_secret(str(raw)):
+                raise ConfigError(
+                    f"{source}: [agent.env] {name} looks like a secret — "
+                    "use file = or env = so it stays out of the config"
+                )
+            out[name] = EnvSource(value=str(raw))
+        else:
+            raise ConfigError(
+                f"{source}: [agent.env] {name} has unknown source '{kind}' "
+                "(expected file, env, or value)"
+            )
+    return out
+
+
+def _looks_secret(v: str) -> bool:
+    """Catch the obvious paste-a-key-into-the-config mistake. Deliberately
+    narrow: known credential prefixes, or a long opaque token-ish string."""
+    prefixes = ("tskey-", "lin_api_", "lin_oauth_", "ghp_", "ghs_", "github_pat_", "sk-")
+    if v.startswith(prefixes):
+        return True
+    return len(v) >= 40 and not any(c in v for c in " /\\")
 
 
 def _path(v: str) -> Path:
@@ -285,6 +379,7 @@ def parse(data: dict, source: str = "<config>") -> Config:
         cfg.worktree_root = _path(daemon["worktree_root"])
     if "container_config_dir" in agent:
         cfg.container_config_dir = _path(agent["container_config_dir"])
+    cfg.worker_env = _parse_worker_env(agent.get("env", {}), source)
     if "linear_api_key_env" in creds:
         cfg.linear_api_key_env = creds["linear_api_key_env"]
     if "linear_api_key_file" in creds:

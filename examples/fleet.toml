@@ -60,6 +60,21 @@ claude_container = "claude-container"
 copy_from_repo = [".claude", ".claude-container-overlay"]
 launcher_args = ["--skills-ignore-new"]   # needs claude-container > 1.6.12
 
+# Environment handed to the launcher for every worker. Values are never here —
+# each entry names a chmod-600 file (`file`), an env var of the daemon (`env`),
+# or a non-secret literal (`value`); a literal that looks like a credential is
+# rejected. A worker's container sees a variable only if that workspace's
+# .claude-container-overlay/overlay.json also lists it under "env", so nothing
+# reaches a project that didn't ask for it (needs claude-container >= 1.7.0).
+#
+# TS_AUTHKEY is the motivating case: led_mapper's overlay joins the tailnet at
+# container start so workers can reach the HITL rigs, which accept tailnet
+# peers only. Use an EPHEMERAL, pre-approved, tagged key — each worker's node
+# then self-reaps when the container exits.
+# [agent.env]
+# TS_AUTHKEY = { file = "~/.config/issuefleet/tailscale.key" }
+# HITL_SERVERS = { value = "hitl-rig" }
+
 # The motivating case: Linear project "Splanc" feeding fughilli/splanc.
 # With the Linear agent installed, strategy "agent" means claims happen
 # ONLY by delegating/@-mentioning the bot — no label triggering.
