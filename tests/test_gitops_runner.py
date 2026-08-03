@@ -8,6 +8,7 @@ import time
 import unittest
 from pathlib import Path
 
+from issuefleet import config
 from issuefleet.config import Config, ProjectConfig, ClaimRule
 from issuefleet.gitops import GitError, Gitops
 from issuefleet.model import WorkerRecord
@@ -296,6 +297,48 @@ class TmuxRunnerTest(unittest.TestCase):
         self.cfg.launcher_args = []
         cmd = self.runner.command(self.rec, self.cfg)
         self.assertNotIn("--skills-ignore-new", cmd)
+
+    def test_worker_env_reaches_the_launcher_without_touching_argv(self):
+        key = Path(self.tmp.name) / "ts.key"
+        key.write_text("tskey-auth-EXAMPLE-fixture-2\n")
+        self.cfg.worker_env = {"TS_AUTHKEY": config.EnvSource(file=key)}
+
+        env_file = self.runner._write_env_file(self.rec, self.cfg)
+        self.assertIsNotNone(env_file)
+        self.assertEqual(env_file.stat().st_mode & 0o777, 0o600)
+        # A shell sourcing it under `set -a` must export exactly the value.
+        out = subprocess.run(
+            ["sh", "-c", f"set -a; . {env_file}; set +a; printenv TS_AUTHKEY"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(out.stdout.strip(), "tskey-auth-EXAMPLE-fixture-2")
+        # The launcher command itself must stay clean: it is logged verbatim
+        # when a worker dies, and visible in `ps` for the container's lifetime.
+        self.assertNotIn("tskey-auth-EXAMPLE-fixture-2", " ".join(self.runner.command(self.rec, self.cfg)))
+
+    def test_worker_env_file_is_removed_once_sourced(self):
+        key = Path(self.tmp.name) / "ts.key"
+        key.write_text("tskey-auth-EXAMPLE-fixture-2\n")
+        self.cfg.worker_env = {"TS_AUTHKEY": config.EnvSource(file=key)}
+        self.runner.start(self.rec, self.cfg)
+        time.sleep(0.3)
+        self.assertFalse(
+            self.runner.env_path(self.rec).exists(),
+            "the session shell should delete the env file immediately after sourcing it",
+        )
+        self.runner.stop(self.rec)
+
+    def test_missing_worker_env_source_is_not_fatal(self):
+        self.cfg.worker_env = {
+            "TS_AUTHKEY": config.EnvSource(file=Path(self.tmp.name) / "absent.key")
+        }
+        # No value to write -> no env file, and start() proceeds regardless
+        # (deliberately not asserting alive(): BSD script(1) makes that a
+        # container-only assertion, as test_start_alive_stop_idempotent shows).
+        self.assertIsNone(self.runner._write_env_file(self.rec, self.cfg))
+        self.runner.start(self.rec, self.cfg)
+        self.assertFalse(self.runner.env_path(self.rec).exists())
+        self.runner.stop(self.rec)
 
     def test_start_alive_stop_idempotent(self):
         self.assertFalse(self.runner.alive(self.rec))

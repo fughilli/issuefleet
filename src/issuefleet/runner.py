@@ -17,6 +17,7 @@ never need to guess container names (which embed a pid).
 from __future__ import annotations
 
 import logging
+import os
 import shlex
 import subprocess
 import time
@@ -59,6 +60,50 @@ class TmuxRunner:
     def log_path(self, rec: WorkerRecord) -> Path:
         return self.log_dir / f"{rec.tmux_session}.log"
 
+    def env_path(self, rec: WorkerRecord) -> Path:
+        return self.log_dir / f"{rec.tmux_session}.env"
+
+    def _write_env_file(self, rec: WorkerRecord, config: Config) -> Path | None:
+        """Materialize [agent.env] for one worker, or None if it's empty.
+
+        The launcher forwards a variable to the container BY NAME (overlay.json
+        "env"), so the value has to be in the launcher's own environment — and
+        tmux does not carry the caller's environment into a detached session
+        (an existing tmux server's environment wins), so it must be injected
+        into the session command itself.
+
+        A 0600 file rather than `env VAR=value ...` in the command: the command
+        is visible in `ps` and echoed into the worker log on failure, and a
+        Tailscale auth key has no business in either. The session shell sources
+        this file and deletes it in the same breath (see `start`), so it exists
+        for milliseconds; `stop` sweeps it up if the session died first."""
+        if not config.worker_env:
+            return None
+        lines, missing = [], []
+        for name, src in sorted(config.worker_env.items()):
+            value = src.resolve()
+            if value is None:
+                missing.append(f"{name} (from {src.describe()})")
+                continue
+            lines.append(f"{name}={shlex.quote(value)}")
+        if missing:
+            # Not fatal: the container's overlay decides what to do without it
+            # (led_mapper's skips the tailnet join and says so).
+            log.warning(
+                "worker %s: no value for %s — the container will start without it",
+                rec.tmux_session, ", ".join(missing),
+            )
+        if not lines:
+            return None
+        path = self.env_path(rec)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Create restricted from the start; never widen an existing file.
+        path.unlink(missing_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        return path
+
     def start(self, rec: WorkerRecord, config: Config) -> None:
         if self.alive(rec):
             return  # idempotent: adopt the live session
@@ -71,6 +116,12 @@ class TmuxRunner:
         # captured. pipe-pane raced this and lost — the session vanished
         # before it could attach, leaving an empty log and no diagnosis.
         wrapped = f"exec script -q -e -c {shlex.quote(shlex.join(cmd))} {shlex.quote(str(log_path))}"
+        env_path = self._write_env_file(rec, config)
+        if env_path is not None:
+            # `set -a` exports what the file defines, and the rm runs before
+            # exec so the secret is off disk as soon as it is in the process.
+            quoted = shlex.quote(str(env_path))
+            wrapped = f"set -a; . {quoted}; set +a; rm -f {quoted}; {wrapped}"
         _tmux(["new-session", "-d", "-s", rec.tmux_session, "sh", "-c", wrapped])
         time.sleep(1.0)
         if not self.alive(rec):
@@ -95,3 +146,6 @@ class TmuxRunner:
         # a mid-turn agent is cut off — its commits and mailbox survive and
         # were archived before this call.
         _tmux(["kill-session", "-t", f"={rec.tmux_session}"], check=False)
+        # Backstop: the session shell removes this itself the moment it has
+        # sourced it, so this only fires when the session never got that far.
+        self.env_path(rec).unlink(missing_ok=True)

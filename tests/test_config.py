@@ -1,6 +1,8 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from issuefleet import config
 from issuefleet.config import ConfigError
@@ -203,6 +205,48 @@ class ConfigTest(unittest.TestCase):
         data = dict(MINIMAL)
         data["agent"] = {"launcher_args": []}
         self.assertEqual(config.parse(data).launcher_args, [])
+
+    def test_worker_env_sources(self):
+        self.assertEqual(config.parse(MINIMAL).worker_env, {})
+        with tempfile.TemporaryDirectory() as tmp:
+            key = Path(tmp) / "ts.key"
+            key.write_text("tskey-auth-EXAMPLE-fixture-1\n")
+            data = dict(MINIMAL)
+            data["agent"] = {
+                "env": {
+                    "TS_AUTHKEY": {"file": str(key)},
+                    "FROM_ENV": {"env": "IF_TEST_VAR"},
+                    "HITL_SERVERS": {"value": "hitl-rig"},
+                }
+            }
+            cfg = config.parse(data)
+            # Trailing newline stripped — a shell would otherwise export it.
+            self.assertEqual(cfg.worker_env["TS_AUTHKEY"].resolve(), "tskey-auth-EXAMPLE-fixture-1")
+            self.assertEqual(cfg.worker_env["HITL_SERVERS"].resolve(), "hitl-rig")
+            with mock.patch.dict(os.environ, {"IF_TEST_VAR": "from-env"}):
+                self.assertEqual(cfg.worker_env["FROM_ENV"].resolve(), "from-env")
+            # A source that isn't there resolves to None rather than raising:
+            # the worker still launches, just without the variable.
+            with mock.patch.dict(os.environ, {}, clear=True):
+                self.assertIsNone(cfg.worker_env["FROM_ENV"].resolve())
+            key.unlink()
+            self.assertIsNone(cfg.worker_env["TS_AUTHKEY"].resolve())
+
+    def test_worker_env_rejects_bad_specs(self):
+        def parse_env(env):
+            return config.parse(dict(MINIMAL, agent={"env": env}))
+
+        with self.assertRaisesRegex(config.ConfigError, "exactly one of"):
+            parse_env({"TS_AUTHKEY": "~/ts.key"})  # bare string is ambiguous
+        with self.assertRaisesRegex(config.ConfigError, "exactly one of"):
+            parse_env({"TS_AUTHKEY": {"file": "a", "env": "B"}})
+        with self.assertRaisesRegex(config.ConfigError, "unknown source"):
+            parse_env({"TS_AUTHKEY": {"secret": "a"}})
+        with self.assertRaisesRegex(config.ConfigError, "not a valid variable name"):
+            parse_env({"1BAD": {"value": "x"}})
+        # The whole point of the file/env indirection: a pasted key is refused.
+        with self.assertRaisesRegex(config.ConfigError, "looks like a secret"):
+            parse_env({"TS_AUTHKEY": {"value": "tskey-auth-EXAMPLE-not-a-real-key"}})
 
     def test_claim_rules(self):
         label = config.ClaimRule("label", "agent")
