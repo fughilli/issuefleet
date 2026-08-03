@@ -150,13 +150,34 @@ class Gitops:
                     f.write("\n")
                 f.write(pattern + "\n")
 
+    def _remotes(self, repo: Path) -> list[str]:
+        # Tolerant: a repo whose remotes can't be listed still gets the
+        # bare-ref fallback in has_commits_ahead rather than a hard failure.
+        try:
+            return _git(["remote"], cwd=repo).split()
+        except GitError:
+            return []
+
     def has_commits_ahead(self, worktree: Path, base_ref: str) -> bool:
-        for ref in (f"origin/{base_ref}", base_ref):
+        """Does HEAD carry commits the base doesn't? Resolve the base against
+        each configured remote — not a hard-coded ``origin``, since an adopted
+        operator clone may name its remote something else — preferring
+        ``origin`` (the daemon's own clones use it), then fall back to the bare
+        local ref (a local-only base, or an offline bootstrap with no
+        remote-tracking ref yet)."""
+        remotes = self._remotes(worktree)
+        ordered = (["origin"] if "origin" in remotes else []) + [
+            r for r in remotes if r != "origin"
+        ]
+        candidates = [*(f"{r}/{base_ref}" for r in ordered), base_ref]
+        for ref in candidates:
             try:
                 return int(_git(["rev-list", "--count", f"{ref}..HEAD"], cwd=worktree)) > 0
             except GitError:
                 continue
-        raise GitError(f"cannot resolve base ref {base_ref!r} (or origin/{base_ref}) in {worktree}")
+        raise GitError(
+            f"cannot resolve base ref {base_ref!r} in {worktree} (tried: {', '.join(candidates)})"
+        )
 
     def push(
         self, worktree: Path, branch: str, url: str | None = None, auth_header: str | None = None

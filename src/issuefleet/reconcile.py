@@ -586,6 +586,21 @@ class Reconciler:
 
     def _handle_ready(self, rec: WorkerRecord, project: ProjectConfig, mailbox: Mailbox, msg) -> None:
         forge = self.forges[project.name]
+        # Refresh origin/<base_ref> before the commits-ahead gate. This is the
+        # first thing on the ready path that needs the base to resolve, and
+        # nothing else on this path fetches: a clone that never fetched the
+        # base (an offline/degraded claim, or one whose best-effort pre-claim
+        # fetch failed) would otherwise wedge the outbox here forever —
+        # has_commits_ahead can't resolve the base, every tick re-raises. The
+        # worktree shares this clone's refs, so one fetch here unblocks it.
+        # Best-effort: a transient fetch failure must not block a ready that
+        # can still be judged off local refs.
+        fetch_url, fetch_auth = forge.push_spec()
+        try:
+            self.git.fetch(project.repo, url=fetch_url, auth_header=fetch_auth)
+        except gitops.GitError as e:
+            log.warning("worker %s: pre-ready fetch failed (%s); using local refs",
+                        rec.issue_key, e)
         if not self.git.has_commits_ahead(Path(rec.worktree), rec.base_ref):
             # Wake the agent with a waking kind, or it idles in `ready` forever.
             mailbox.put_inbox(
