@@ -36,6 +36,7 @@ class FakeTracker:
         self.comments: dict[str, list[Comment]] = {}  # issue_id -> comments
         self.posted: list[tuple[str, str]] = []  # (issue_id, body)
         self.state_changes: list[tuple[str, str]] = []  # (issue_id, state_name)
+        self.assigned: list[tuple[str, str]] = []  # (issue_id, assignee_id)
         self.fail_next_post = 0  # countdown of post_comment calls to fail
         self.fail_get_issue: set[str] = set()  # issue_ids whose get_issue raises
         self.activities: list[tuple[str, dict]] = []  # (session_id, content)
@@ -110,6 +111,11 @@ class FakeTracker:
     def has_comment_marker(self, issue_id: str, msg_id: str) -> bool:
         needle = MARKER_PREFIX + msg_id
         return any(needle in c.body for c in self.comments.get(issue_id, []))
+
+    def assign_issue(self, issue_id: str, assignee_id: str) -> None:
+        self.assigned.append((issue_id, assignee_id))
+        if issue_id in self.issues:
+            self.issues[issue_id].assignee_id = assignee_id
 
     def set_state(self, issue_id: str, state_name: str) -> None:
         self.state_changes.append((issue_id, state_name))

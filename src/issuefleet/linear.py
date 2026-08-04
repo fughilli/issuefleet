@@ -521,6 +521,21 @@ class LinearTracker:
         self._issue_team[node["id"]] = node["team"]["id"]
         return _to_issue(node), unknown
 
+    def assign_issue(self, issue_id: str, assignee_id: str) -> None:
+        """Set an issue's assignee. The fleet manager uses this to hand a
+        freshly-filed goal to the fleet's own identity so it auto-claims under
+        the 'agent' strategy (which treats assignee-or-delegate == the agent as
+        eligible). Assigning to the viewer requires the daemon to authenticate
+        as that identity (the agent app), which is the intended setup."""
+        data = self.client.graphql(
+            """mutation($id: String!, $assignee: String!) {
+                 issueUpdate(id: $id, input: {assigneeId: $assignee}) { success }
+               }""",
+            {"id": issue_id, "assignee": assignee_id},
+        )
+        if not data["issueUpdate"]["success"]:
+            raise LinearError(f"issueUpdate (assign) on {issue_id} reported failure")
+
     # -- workflow states ---------------------------------------------------
 
     def _states_for_issue(self, issue_id: str) -> dict[str, str]:
