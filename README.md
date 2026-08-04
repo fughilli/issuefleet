@@ -475,6 +475,14 @@ read `deploy/docker/README.md` before using it.
 - **Crashed workers hold their claim** (deliberately, so the issue isn't
   re-claimed into the same failure). Free the issue by removing/re-adding
   the label after inspecting the kept worktree.
+- **Agent branches are force-pushed, so a diverged branch loses a side.**
+  The daemon pushes `agent/*` with a plain `--force` (a lease needs a
+  remote-tracking ref, which pushing to an explicit token URL doesn't
+  create). Startup now fetches and *fast-forwards* a worker's branch onto
+  its remote tip, so pushing to an agent's branch while it's stopped is
+  safe. But if BOTH sides advanced, the branch is left alone and the agent
+  is only *told* — nothing stops it committing on and force-pushing its own
+  side. Reconcile before letting it resume, or expect to lose yours.
 - **One Linear workspace per config.** All projects share the one API key.
 - **Launcher prompts.** claude-container's interactive confirmations block a
   headless worker. Skill approval needs launcher > 1.6.12, where worktrees

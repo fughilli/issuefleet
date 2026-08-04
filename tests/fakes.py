@@ -283,6 +283,9 @@ class FakeGit:
         self.fail_next_push = 0
         self.fetched: list[tuple] = []  # (repo, url, auth_header) per fetch
         self.fail_next_fetch = 0
+        self.synced: list[str] = []  # worktrees passed to sync_to_remote
+        self.sync_status = "up-to-date"  # what sync_to_remote reports
+        self.fail_next_sync = 0
 
     def fetch(self, repo: Path, url=None, auth_header=None) -> None:
         if self.fail_next_fetch > 0:
@@ -306,6 +309,15 @@ class FakeGit:
 
     def has_commits_ahead(self, worktree: Path, base_ref: str) -> bool:
         return self.ahead
+
+    def sync_to_remote(self, worktree: Path, branch: str) -> str:
+        self.synced.append(str(worktree))
+        if self.fail_next_sync > 0:
+            self.fail_next_sync -= 1
+            from issuefleet.gitops import GitError
+
+            raise GitError("fake git sync failure")
+        return self.sync_status
 
     def push(self, worktree: Path, branch: str, url=None, auth_header=None) -> None:
         if self.fail_next_push > 0:
