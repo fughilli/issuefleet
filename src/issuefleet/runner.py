@@ -20,6 +20,7 @@ import logging
 import os
 import shlex
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -27,6 +28,33 @@ from issuefleet.config import Config
 from issuefleet.model import WorkerRecord
 
 log = logging.getLogger("issuefleet.runner")
+
+# script(1) has two incompatible command-line interfaces, and picking the wrong
+# one fails in the worst possible way: script exits instantly on the unknown
+# flag, so the log it was supposed to create never exists — destroying the very
+# diagnostic that would explain the failure.
+_BSD_SCRIPT_PLATFORMS = ("darwin", "freebsd", "openbsd", "netbsd", "dragonfly")
+
+
+def _script_wrapper(cmd: list[str], log_path: Path) -> str:
+    """A shell string that runs ``cmd`` under script(1), teeing to ``log_path``.
+
+    util-linux (Linux, the container deploy target):
+        script -q -e -c '<cmd>' <file>
+    BSD (macOS and the *BSDs, the local-dev target):
+        script -q -e -t 0 <file> <cmd...>
+
+    macOS rejects ``-c`` outright (``script: illegal option -- c``), which is
+    why this has to be chosen per platform rather than assuming either form.
+
+    ``-t 0`` is not optional on BSD: it sets the flush interval, and the default
+    is THIRTY SECONDS. Without it a long-running worker's output sits in
+    script's buffer — the pane log reads empty while the agent is working, and
+    a killed session loses the buffer entirely. 0 flushes on every I/O event.
+    """
+    if sys.platform.startswith(_BSD_SCRIPT_PLATFORMS):
+        return f"exec script -q -e -t 0 {shlex.quote(str(log_path))} {shlex.join(cmd)}"
+    return f"exec script -q -e -c {shlex.quote(shlex.join(cmd))} {shlex.quote(str(log_path))}"
 
 
 class RunnerError(Exception):
@@ -115,7 +143,7 @@ class TmuxRunner:
         # output to the log file, so even a launcher that dies in <1s is
         # captured. pipe-pane raced this and lost — the session vanished
         # before it could attach, leaving an empty log and no diagnosis.
-        wrapped = f"exec script -q -e -c {shlex.quote(shlex.join(cmd))} {shlex.quote(str(log_path))}"
+        wrapped = _script_wrapper(cmd, log_path)
         env_path = self._write_env_file(rec, config)
         if env_path is not None:
             # `set -a` exports what the file defines, and the rm runs before
@@ -130,10 +158,17 @@ class TmuxRunner:
                 tail = log_path.read_text()[-800:].strip()
             except OSError:
                 pass
+            # An empty log is itself a clue and used to be an unexplained one:
+            # if the wrapper never got as far as opening it, the failure is in
+            # the wrapper, not the launcher. Print the shell line we actually
+            # ran so that case is diagnosable without reading this source.
             log.error(
                 "worker session %s died within 1s of launch. Captured output:\n%s\n"
-                "Reproduce interactively with:\n  %s",
-                rec.tmux_session, tail or "(log empty)", " ".join(cmd),
+                "Shell line that was run:\n  %s\n"
+                "Reproduce the launcher directly with:\n  %s",
+                rec.tmux_session,
+                tail or "(log empty — script(1) may have failed before opening it)",
+                wrapped, shlex.join(cmd),
             )
 
     def alive(self, rec: WorkerRecord) -> bool:
