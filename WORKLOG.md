@@ -58,6 +58,29 @@ end-to-end flow — `docs/SMOKE_TEST.md` is the step-by-step procedure.
 
 ## Recent additions
 
+- **FUG-41 — fleet manager** (branch `agent/fug-41-…`): a host-side singleton
+  (`fleet_manager.py`) that bridges a Signal group (via a sigbot service) to the
+  fleet, ticked alongside the reconciler in `issuefleet run` when
+  `[fleet_manager] enabled`. Signal → goals (issue on a dedicated top-level
+  board, auto-assigned so a worker claims it) or answers (delivered into the
+  blocked worker's mailbox inbox — the reconciler's own wake channel, so the
+  app-identity comment filter can't eat them). Worker `question` outbox messages
+  are triaged via an `Advisor` seam (`advisor.py`): `ConservativeAdvisor`
+  (default, always escalate) or `ClaudeAdvisor` (Anthropic Messages API over the
+  stdlib urllib transport — adaptive thinking + structured output; live-only,
+  degrades to escalation on any error). Escalations/answers/reports go over
+  Signal; durable state in `fleet_manager.json` (cursor baselined on first run
+  so history isn't replayed; own messages filtered by sigbot identity; goals
+  deduped by a description marker). New: `sigbot.py` (wraps the official
+  `sigbot_client.ServiceClient` behind a `SignalClient` protocol via lazy import
+  — the Bazel test graph stays dep-free; the daemon image `pip install`s it),
+  `LinearTracker.assign_issue` + `open_issues_in_project`,
+  `Mailbox.archived_outbox`, `[fleet_manager]` config, `issuefleet fleet`
+  subcommand, and doctor checks. Offline-verified with `FakeSignal`/`FakeTracker`.
+  **Unproven (needs the operator's host):** the live sigbot/Signal round-trip
+  and the `claude` advisor — the core is offline-tested and both live paths sit
+  behind seams that degrade safely.
+
 - **FUG-32 — outer deploy loop** (branch `agent/fug-32-…`):
   `deploy/docker/watch.sh` (+ `//deploy/docker:watch`,
   `deploy/issuefleet-watch.service`) supervises the compose stack and keeps

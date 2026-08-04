@@ -38,7 +38,11 @@ WORKDIR /opt/issuefleet
 COPY src/ src/
 COPY bin/ bin/
 
-# Stdlib-only: no pip install. Config is mounted at
-# /home/fleet/.config/issuefleet (the default --config location under HOME).
+# The daemon core is stdlib-only. The optional fleet manager talks to a sigbot
+# service through the official zero-dependency `sigbot-client`; install it so
+# `[fleet_manager] enabled` works out of the box (harmless when it's disabled —
+# the import is lazy). Config is mounted at /home/fleet/.config/issuefleet (the
+# default --config location under HOME).
+RUN pip install --no-cache-dir sigbot-client
 ENV PYTHONUNBUFFERED=1
 CMD ["bin/issuefleet", "-v", "run"]

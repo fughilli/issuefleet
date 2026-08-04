@@ -220,6 +220,54 @@ The dashboard is a **control plane**, so treat it like one: it binds loopback
 by default; reach it remotely over the tailnet with `tailscale serve`, never
 a public Funnel. Disable it entirely with `[dashboard] enabled = false`.
 
+## Fleet manager (Signal chat) — optional
+
+The **fleet manager** is a host-side singleton that gives you a chat interface
+to the whole fleet over a Signal group, fronted by a
+[sigbot](https://github.com/fughilli/sigbot) service. It runs alongside the
+reconcile loop in the same `issuefleet run` daemon (nothing containerized — it
+needs broad, credentialed, cross-project reach, exactly the powers the
+architecture keeps *out* of workers), and does three things each tick:
+
+- **Records goals.** A message you send in the group becomes a new issue on a
+  dedicated top-level board (`board_project` / `board_team`). With
+  `assign_goals = true` it's assigned to the fleet's own identity, so under the
+  `agent` claim strategy a worker picks it up automatically. It replies with
+  the filed key/URL. (Prefix a message with `goal:` to force goal-filing even
+  when a question is pending.)
+- **Unblocks or escalates workers.** When a worker calls `agentctl ask`, the
+  manager triages the question against the worker's ticket and the top-level
+  board. The **advisor** decides: `conservative` (default) always escalates;
+  `claude` asks the model whether the context clearly answers it. An answerable
+  question is delivered straight into the worker's mailbox (waking it with no
+  human in the loop); anything else is forwarded to the group and tracked as
+  pending. Your reply — either plain (routed to the oldest pending question) or
+  prefixed `FUG-12:` (routed to that issue) — is delivered to the worker the
+  same way.
+- **Reports progress.** Every `report_interval_s` it posts a fleet summary
+  (active workers, PRs, what's awaiting you).
+
+Setup:
+
+1. Stand up a sigbot service for one Signal group and mint an API key; write it
+   to `~/.config/issuefleet/sigbot.key` (chmod 600) or set
+   `$ISSUEFLEET_SIGBOT_API_KEY`. Install the client in the daemon environment:
+   `pip install sigbot-client` (the deploy image already does).
+2. Create the top-level board as a Linear project and set `board_project` /
+   `board_team`. To have recorded goals *worked* by the fleet, also list that
+   project under `[[projects]]` with `claim.strategy = "agent"`.
+3. Set `[fleet_manager] enabled = true` and (optionally) `advisor = "claude"`
+   with an `ANTHROPIC_API_KEY` (or `~/.config/issuefleet/anthropic.key`).
+4. `issuefleet doctor` verifies the key, the client, and the advisor; once the
+   daemon is up, `issuefleet fleet` shows the Signal cursor and any pending
+   escalations.
+
+Escalations and answers travel over the worker mailbox, not Linear comments, so
+they're immune to the app-identity comment filter and need no Linear round-trip.
+State (Signal cursor, seen questions, pending escalations) persists in
+`fleet_manager.json`; the first run baselines the cursor, so the group's history
+isn't replayed as goals.
+
 ## Configuration
 
 ```toml
@@ -254,6 +302,17 @@ linear_secret_file = "~/.config/issuefleet/linear_webhook.secret"
 enabled = true                             # introspection web UI (below)
 bind = "127.0.0.1"                         # keep loopback; private tunnel in front
 port = 8788
+
+[fleet_manager]                            # Signal <-> fleet bridge (below); off by default
+enabled = false
+base_url = "http://sigbot-host:8100"       # the sigbot service (one Signal group)
+api_key_file = "~/.config/issuefleet/sigbot.key"   # minted in the sigbot dashboard
+board_project = "Fleet"                    # top-level board where goals are recorded
+board_team = "FUG"                         # the board's Linear team (name, key, or UUID)
+poll_interval_s = 60                       # Signal poll cadence
+report_interval_s = 3600                   # progress reports to the group; 0 = off
+assign_goals = true                        # assign filed goals to the fleet so they auto-claim
+advisor = "conservative"                   # conservative (always escalate) | claude (LLM triage)
 
 [agent]
 max_auto_turns = 50          # self-driven turns without human contact (the runaway brake)
