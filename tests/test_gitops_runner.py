@@ -282,6 +282,10 @@ class ScriptWrapperTest(unittest.TestCase):
         self.assertIn("-t 0", bsd)
         # util-linux: -c with the whole command as ONE quoted argument.
         self.assertIn("-c ", gnu)
+        # ...and -f, for the same reason BSD needs -t 0: util-linux buffers
+        # until the child exits, so without it a live worker's pane log is
+        # empty the whole time it is working. CI caught this one.
+        self.assertIn(" -f ", gnu)
         self.assertTrue(gnu.rstrip().endswith("/logs/w.log"))
         # Either way the space in the worktree path survives quoting.
         for form in (bsd, gnu):

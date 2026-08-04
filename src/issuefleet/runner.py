@@ -40,21 +40,27 @@ def _script_wrapper(cmd: list[str], log_path: Path) -> str:
     """A shell string that runs ``cmd`` under script(1), teeing to ``log_path``.
 
     util-linux (Linux, the container deploy target):
-        script -q -e -c '<cmd>' <file>
+        script -q -e -f -c '<cmd>' <file>
     BSD (macOS and the *BSDs, the local-dev target):
         script -q -e -t 0 <file> <cmd...>
 
     macOS rejects ``-c`` outright (``script: illegal option -- c``), which is
-    why this has to be chosen per platform rather than assuming either form.
+    why the form has to be chosen per platform rather than assuming either one.
 
-    ``-t 0`` is not optional on BSD: it sets the flush interval, and the default
-    is THIRTY SECONDS. Without it a long-running worker's output sits in
-    script's buffer — the pane log reads empty while the agent is working, and
-    a killed session loses the buffer entirely. 0 flushes on every I/O event.
+    **Both need an explicit flush flag, and neither flushes by default.** BSD's
+    ``-t`` is a flush interval defaulting to THIRTY SECONDS; util-linux buffers
+    until the child exits unless given ``-f``. Either way a long-running worker's
+    output sits in script's buffer: the pane log reads empty for the entire time
+    the agent is working, `issuefleet logs` shows nothing, and a killed session
+    loses the buffer outright. It only *looked* fine because a launcher that dies
+    immediately flushes on exit — which is the one case the original comment
+    was written against.
     """
     if sys.platform.startswith(_BSD_SCRIPT_PLATFORMS):
         return f"exec script -q -e -t 0 {shlex.quote(str(log_path))} {shlex.join(cmd)}"
-    return f"exec script -q -e -c {shlex.quote(shlex.join(cmd))} {shlex.quote(str(log_path))}"
+    return (
+        f"exec script -q -e -f -c {shlex.quote(shlex.join(cmd))} {shlex.quote(str(log_path))}"
+    )
 
 
 class RunnerError(Exception):
