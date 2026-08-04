@@ -39,7 +39,9 @@ from issuefleet.sigbot import SignalError
 
 log = logging.getLogger("issuefleet.fleet_manager")
 
-_SEEN_QUESTIONS_CAP = 1000
+_SEEN_QUESTIONS_CAP = 5000
+_PAGE = 100  # Signal messages fetched per page
+_MAX_DRAIN_PAGES = 50  # backstop against a pathological flood in one tick
 _ISSUE_KEY_RE = re.compile(r"^\s*([A-Za-z]{2,}-\d+)\b[:\-\s]*", re.ASCII)
 
 
@@ -115,33 +117,47 @@ class FleetManager:
 
     def _ingest_signal(self) -> None:
         cursor = self.state.get("signal_cursor")
-        msgs = self.signal.messages(after_id=cursor, limit=100)
-        if not msgs:
+        batch = self.signal.messages(after_id=cursor, limit=_PAGE)
+        if not batch:
             return
-        # First run: establish a baseline at the newest message rather than
-        # replaying the whole group history as goals.
+        # First run: baseline at the newest message rather than replaying the
+        # whole group history as goals. Per the sigbot client contract a bare
+        # messages(limit=N) returns the most-recent N oldest-first, so [-1] is
+        # the true newest.
         if cursor is None:
-            self.state["signal_cursor"] = msgs[-1].id
+            self.state["signal_cursor"] = batch[-1].id
             self._save_state()
             log.info("fleet manager: Signal baseline set; listening for new messages")
             return
 
         ours = self._bot_identity()
-        new_cursor = msgs[-1].id
-        for m in msgs:
-            if m.id == cursor:
-                continue  # `after_id` is usually exclusive, but don't rely on it
-            if m.author and m.author.lower() in ours:
-                continue  # our own send, echoed back in the log
-            text = (m.text or "").strip()
-            if not text:
-                continue
-            try:
-                self._handle_inbound(m, text)
-            except Exception:
-                log.exception("fleet manager: handling Signal message %s failed", m.id)
-        self.state["signal_cursor"] = new_cursor
-        self._save_state()
+        # Drain the full backlog: a burst of more than one page between ticks
+        # must not be skipped by jumping the cursor straight to the newest id.
+        # Bounded so a pathological flood can't spin a single tick forever.
+        pages = 0
+        while batch and pages < _MAX_DRAIN_PAGES:
+            for m in batch:
+                if m.id == cursor:
+                    continue  # `after_id` is usually exclusive, but don't rely on it
+                if m.author and m.author.lower() in ours:
+                    continue  # our own send, echoed back in the log
+                text = (m.text or "").strip()
+                if not text:
+                    continue
+                try:
+                    self._handle_inbound(m, text)
+                except Exception:
+                    # Advance past a poison message rather than head-of-line
+                    # block all of Signal ingestion; goal-filing surfaces its
+                    # own failures to the group so nothing is silently lost.
+                    log.exception("fleet manager: handling Signal message %s failed", m.id)
+            self.state["signal_cursor"] = batch[-1].id
+            self._save_state()
+            if len(batch) < _PAGE:
+                break
+            pages += 1
+            cursor = batch[-1].id
+            batch = self.signal.messages(after_id=cursor, limit=_PAGE)
 
     def _handle_inbound(self, m, text: str) -> None:
         if text.lower().startswith("goal:"):
@@ -151,9 +167,17 @@ class FleetManager:
         if key and self._worker_for_key(key):
             self._route_answer(key, self._strip_key(text), author=m.author)
             return
-        if self.state["pending"]:
-            oldest = self.state["pending"][0]
-            self._route_answer(oldest["issue_key"], text, author=m.author, pending=oldest)
+        pending = self.state["pending"]
+        if len(pending) == 1:
+            # Exactly one question outstanding — a bare reply answers it.
+            self._route_answer(pending[0]["issue_key"], text, author=m.author, pending=pending[0])
+            return
+        if len(pending) > 1:
+            # Ambiguous: don't guess which question a bare reply answers.
+            self.signal.send(
+                "❓ Multiple workers are waiting. Prefix your reply with the issue key "
+                "(e.g. `FUG-12: ...`), or start with `goal:` to file a new goal."
+            )
             return
         self._file_goal(m, text)
 
@@ -183,13 +207,24 @@ class FleetManager:
         description = (
             f"{text}\n\nRecorded from Signal by the fleet manager.\n\n{marker(f'goal-{m.id}')}"
         )
-        issue, _unknown = self.tracker.create_issue(
-            title=title,
-            description=description,
-            team=self.fm.board_team,
-            project=self.fm.board_project,
-            use_context_project=False,
-        )
+        try:
+            issue, _unknown = self.tracker.create_issue(
+                title=title,
+                description=description,
+                team=self.fm.board_team,
+                project=self.fm.board_project,
+                use_context_project=False,
+            )
+        except Exception:
+            # Surface the failure to the group rather than lose the goal
+            # silently — the human can resend. (The cursor still advances, so a
+            # poison message can't wedge ingestion.)
+            log.exception("fleet manager: filing goal from Signal failed")
+            try:
+                self.signal.send("⚠️ Couldn't record that goal (tracker error); please resend.")
+            except SignalError:
+                pass
+            return
         assigned = ""
         if self.fm.assign_goals:
             try:
@@ -257,10 +292,13 @@ class FleetManager:
             return
         issue = None
         for msg in questions:
-            self.state["seen_questions"].append(msg.id)
             qtext = (msg.payload.get("text") or "").strip()
             if not qtext:
+                self.state["seen_questions"].append(msg.id)
                 continue
+            # get_issue / advisor / signal.send below may raise; if so the
+            # exception propagates to _watch_fleet and this question is NOT
+            # marked seen, so it's retried next tick rather than lost.
             if issue is None:
                 issue = self.tracker.get_issue(rec.issue_id)
             ticket = (
@@ -270,15 +308,18 @@ class FleetManager:
                 BlockedQuestion(rec.issue_key, qtext, ticket, self._board())
             )
             if verdict.answerable:
-                self._deliver_to_worker(
+                delivered = self._deliver_to_worker(
                     rec,
                     "fleet-manager",
                     f"{verdict.answer}\n\n(Answered from context by the fleet manager. "
                     "If this is wrong, use `agentctl ask` again.)",
                 )
-                self.signal.send(
-                    f"🤖 Auto-answered {rec.issue_key} from context: {qtext[:120]}"
-                )
+                if delivered:
+                    self.signal.send(
+                        f"🤖 Auto-answered {rec.issue_key} from context: {qtext[:120]}"
+                    )
+                # If the worktree is gone the worker is winding down; the
+                # question is moot — mark seen (below) either way.
             else:
                 self.signal.send(
                     f"❓ {rec.issue_key} is blocked and needs you:\n\n{qtext}\n\n"
@@ -292,6 +333,7 @@ class FleetManager:
                         "question": qtext,
                     }
                 )
+            self.state["seen_questions"].append(msg.id)
 
     def _new_questions(self, rec, mailbox: Mailbox) -> list:
         seen = set(self.state["seen_questions"])
@@ -322,8 +364,10 @@ class FleetManager:
         last = self.state.get("last_report")
         if last is not None and now - last < interval:
             return
-        self.state["last_report"] = now
+        # Commit the timestamp only after a successful send, so a transient
+        # sigbot outage retries next tick instead of skipping a full interval.
         self.signal.send(self._report_text())
+        self.state["last_report"] = now
 
     def _report_text(self) -> str:
         active = [w for w in self.registry.all() if w.phase == PHASE_ACTIVE]

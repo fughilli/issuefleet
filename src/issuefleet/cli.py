@@ -243,9 +243,10 @@ def cmd_run(cfg: Config) -> int:
                 log.info("fleet manager up: sigbot %s, board %r, advisor=%s",
                          cfg.fleet_manager.base_url, cfg.fleet_manager.board_project,
                          cfg.fleet_manager.advisor)
-            except creds.CredentialError as e:
-                log.error("fleet manager enabled but not startable (%s); "
-                          "running without it", e)
+            except Exception:
+                # Never let a fleet-manager startup problem (missing sigbot key,
+                # unreadable state file, …) take down the reconcile loop.
+                log.exception("fleet manager enabled but not startable; running without it")
         # The loop wakes often enough to poll Signal at the fleet manager's
         # cadence when it's the tighter interval.
         loop_interval = cfg.poll_interval_s

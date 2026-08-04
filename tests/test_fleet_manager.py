@@ -248,6 +248,74 @@ class FleetManagerTest(unittest.TestCase):
         fm2.tick()
         self.assertEqual(len([s for s in self.signal.sent if "is blocked" in s]), 1)
 
+    # -- robustness fixes --------------------------------------------------
+
+    def test_transient_tracker_error_retries_question(self):
+        rec = self._worker()
+        self._ask(rec, "Should we drop v1 support?")
+        self.tracker.fail_get_issue.add(rec.issue_id)
+        fm = self._fm()
+        fm.tick()  # get_issue raises → caught → question NOT marked seen/escalated
+        self.assertEqual(fm.state["pending"], [])
+        self.assertEqual([s for s in self.signal.sent if "is blocked" in s], [])
+        self.assertEqual(fm.state["seen_questions"], [])
+        self.tracker.fail_get_issue.discard(rec.issue_id)
+        fm.tick()  # now it escalates
+        self.assertEqual(len(fm.state["pending"]), 1)
+
+    def test_bare_reply_with_multiple_pending_prompts_for_key(self):
+        r1 = self._worker(key="FUG-1")
+        r2 = self._worker(key="FUG-2")
+        fm = self._fm()
+        fm.state["pending"] = [
+            {"msg_id": "a", "issue_id": r1.issue_id, "issue_key": "FUG-1", "question": "q1"},
+            {"msg_id": "b", "issue_id": r2.issue_id, "issue_key": "FUG-2", "question": "q2"},
+        ]
+        fm.state["signal_cursor"] = "base"
+        self.signal.user_says("base", id="base")
+        self.signal.user_says("use postgres")  # bare + ambiguous
+        fm.tick()
+        self.assertTrue(any("Multiple workers are waiting" in s for s in self.signal.sent))
+        self.assertEqual(self._inbox(r1), [])
+        self.assertEqual(self._inbox(r2), [])
+
+    def test_goal_filing_failure_notifies_user(self):
+        fm = self._fm()
+        fm.state["signal_cursor"] = "base"
+        self.signal.user_says("base", id="base")
+        self.signal.user_says("Build a thing")
+        self.tracker.fail_next_create = 1
+        fm.tick()
+        self.assertEqual(self.tracker.created, [])
+        self.assertTrue(any("Couldn't record that goal" in s for s in self.signal.sent))
+
+    def test_ingest_drains_multiple_pages(self):
+        import unittest.mock as mock
+
+        import issuefleet.fleet_manager as fmmod
+
+        fm = self._fm()
+        fm.state["signal_cursor"] = "base"
+        self.signal.user_says("base", id="base")
+        self.signal.user_says("goal: one", id="g1")
+        self.signal.user_says("goal: two", id="g2")
+        self.signal.user_says("goal: three", id="g3")
+        with mock.patch.object(fmmod, "_PAGE", 2):  # force >1 page
+            fm.tick()
+        self.assertEqual(len(self.tracker.created), 3)  # all pages drained
+        # cursor fully advanced (past the interleaved bot confirmations too)
+        self.assertEqual(fm.state["signal_cursor"], self.signal.log[-1].id)
+
+    def test_report_timestamp_only_advances_on_successful_send(self):
+        self.cfg.fleet_manager.report_interval_s = 60
+        fm = self._fm(clock=lambda: 100.0)
+        self.signal.send_fail = 1  # the report send fails
+        fm.tick()
+        self.assertIsNone(fm.state["last_report"])  # not advanced
+        fm.tick()  # retried, succeeds
+        self.assertEqual(fm.state["last_report"], 100.0)
+        self.assertTrue(any("Fleet status" in s for s in self.signal.sent))
+
     def test_board_summary_reads_top_level_board(self):
         self.tracker.add_issue(
             make_issue(key="FUG-200", id="g200", title="ship dashboards", project_id="Fleet")

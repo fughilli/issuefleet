@@ -324,20 +324,28 @@ class FakeSignal:
         self.sent: list[str] = []
         self.log: list[SignalMessage] = []
         self.svc = {"name": "fleet", "label": "fleet", "group_name": "Fleet Ops"}
+        self.send_fail = 0  # countdown of send() calls to fail
 
     def service(self) -> dict:
         return dict(self.svc)
 
     def send(self, text: str, *, prefix: bool = True) -> None:
+        if self.send_fail > 0:
+            self.send_fail -= 1
+            from issuefleet.sigbot import SignalError
+
+            raise SignalError(500, "fake sigbot outage")
         self.sent.append(text)
         self.log.append(SignalMessage(id=f"bot-{len(self.log) + 1}", text=text, author="fleet"))
 
     def messages(self, after_id=None, limit: int = 50) -> list[SignalMessage]:
-        out = self.log
-        if after_id is not None:
-            idx = next((i for i, m in enumerate(out) if m.id == after_id), None)
-            out = out[idx + 1 :] if idx is not None else out
-        return list(out[-limit:])
+        # Mirror the sigbot contract: a bare call returns the most-recent N
+        # (oldest-first); `after_id` pages the OLDEST N strictly after that id.
+        if after_id is None:
+            return list(self.log[-limit:])
+        idx = next((i for i, m in enumerate(self.log) if m.id == after_id), None)
+        after = self.log[idx + 1 :] if idx is not None else self.log
+        return list(after[:limit])
 
     # -- test helper -------------------------------------------------------
 
