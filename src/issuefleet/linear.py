@@ -241,7 +241,13 @@ class LinearTracker:
         return nodes[0]["id"]
 
     def open_issues(self, project: ProjectConfig) -> list[Issue]:
-        pid = self._project_id(project.linear_project)
+        return self.open_issues_in_project(project.linear_project)
+
+    def open_issues_in_project(self, ref: str) -> list[Issue]:
+        """Open issues in a Linear project named or keyed by ``ref``. Lets the
+        fleet manager read its top-level goals board, which isn't necessarily a
+        configured ``[[projects]]`` entry."""
+        pid = self._project_id(ref)
         issues, cursor = [], None
         while True:
             data = self.client.graphql(

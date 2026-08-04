@@ -7,6 +7,7 @@ from pathlib import Path
 
 from issuefleet import MARKER_PREFIX
 from issuefleet.model import Comment, Issue, PrFeedback, PullRequest
+from issuefleet.sigbot import SignalMessage
 
 
 def make_issue(n=1, **kw):
@@ -79,6 +80,9 @@ class FakeTracker:
                 i for i in open_issues if self.viewer_id in (i.assignee_id, i.delegate_id)
             ]
         return [i for i in open_issues if project.claim.matches(i)]
+
+    def open_issues_in_project(self, ref: str) -> list[Issue]:
+        return [i for i in self.issues.values() if i.open and i.project_id == ref]
 
     def get_issue(self, issue_id: str) -> Issue | None:
         if issue_id in self.fail_get_issue:
@@ -309,6 +313,38 @@ class FakeGit:
             raise ConnectionError("fake git push failure")
         self.pushed.append(branch)
         self.push_specs.append((url, auth_header))
+
+
+class FakeSignal:
+    """sigbot ServiceClient stand-in. `sent` records outbound; `log` is the
+    group message log (bot sends land there too, authored by the bot label, so
+    the manager's own-message filter is exercised)."""
+
+    def __init__(self):
+        self.sent: list[str] = []
+        self.log: list[SignalMessage] = []
+        self.svc = {"name": "fleet", "label": "fleet", "group_name": "Fleet Ops"}
+
+    def service(self) -> dict:
+        return dict(self.svc)
+
+    def send(self, text: str, *, prefix: bool = True) -> None:
+        self.sent.append(text)
+        self.log.append(SignalMessage(id=f"bot-{len(self.log) + 1}", text=text, author="fleet"))
+
+    def messages(self, after_id=None, limit: int = 50) -> list[SignalMessage]:
+        out = self.log
+        if after_id is not None:
+            idx = next((i for i, m in enumerate(out) if m.id == after_id), None)
+            out = out[idx + 1 :] if idx is not None else out
+        return list(out[-limit:])
+
+    # -- test helper -------------------------------------------------------
+
+    def user_says(self, text: str, author: str = "kevin", id: str | None = None) -> str:
+        mid = id or f"u{len(self.log) + 1}"
+        self.log.append(SignalMessage(id=mid, text=text, author=author))
+        return mid
 
 
 class FakeRunner:

@@ -1,0 +1,260 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from issuefleet import config as config_mod
+from issuefleet.advisor import ConservativeAdvisor, Triage
+from issuefleet.fleet_manager import FleetManager
+from issuefleet.mailbox import Mailbox
+from issuefleet.model import WorkerRecord
+from issuefleet.registry import Registry
+from fakes import FakeSignal, FakeTracker, make_issue
+
+
+CONFIG = {
+    "projects": [
+        {"name": "p", "linear_project": "P", "repo": "/tmp/p", "claim": {"strategy": "agent"}}
+    ],
+    "fleet_manager": {
+        "enabled": True,
+        "base_url": "http://sig:8100",
+        "board_project": "Fleet",
+        "board_team": "FUG",
+        "report_interval_s": 0,  # disable reports unless a test wants them
+    },
+}
+
+
+class YesAdvisor:
+    def triage(self, q):
+        return Triage(answerable=True, answer="Use Redis.", reason="ticket says so")
+
+
+class FleetManagerTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.cfg = config_mod.parse(CONFIG)
+        self.cfg.state_dir = self.tmp / "state"
+        self.tracker = FakeTracker()
+        self.tracker.app_identity = True
+        self.signal = FakeSignal()
+        self.registry = Registry(self.cfg.state_dir)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _fm(self, advisor=None, clock=None):
+        return FleetManager(
+            self.cfg,
+            self.tracker,
+            self.signal,
+            advisor or ConservativeAdvisor(),
+            self.registry,
+            clock=clock or (lambda: 0.0),
+        )
+
+    def _worker(self, key="FUG-9", title="add caching", pr_number=None):
+        wt = self.tmp / "wt" / key
+        (wt / ".agent" / "mailbox").mkdir(parents=True, exist_ok=True)
+        rec = WorkerRecord(
+            issue_id=f"issue-{key}",
+            issue_key=key,
+            issue_title=title,
+            issue_url=f"https://linear.app/x/{key}",
+            project="p",
+            repo="/tmp/p",
+            branch=f"agent/{key}",
+            worktree=str(wt),
+            base_ref="main",
+            session_uuid="s",
+            tmux_session=f"tmux-{key}",
+            pr_number=pr_number,
+        )
+        self.registry.add(rec)
+        self.tracker.add_issue(
+            make_issue(key=key, id=f"issue-{key}", title=title, description="Use Redis.")
+        )
+        return rec
+
+    def _ask(self, rec, text="Which database should I use?"):
+        return Mailbox(Path(rec.worktree) / ".agent" / "mailbox").put_outbox(
+            "question", {"text": text}
+        )
+
+    def _inbox(self, rec):
+        return Mailbox(Path(rec.worktree) / ".agent" / "mailbox").pending_inbox()
+
+    # -- signal baseline ---------------------------------------------------
+
+    def test_first_run_sets_baseline_without_processing(self):
+        self.signal.user_says("Build a dashboard", id="m0")
+        self._fm().tick()
+        self.assertEqual(self.tracker.created, [])  # history not replayed as goals
+        # cursor now at the newest message
+        fm = self._fm()
+        self.assertEqual(fm.state["signal_cursor"], "m0")
+
+    # -- goals -------------------------------------------------------------
+
+    def test_new_message_becomes_a_goal_and_is_assigned(self):
+        fm = self._fm()
+        self.signal.user_says("prior", id="m0")
+        fm.tick()  # baseline
+        self.signal.user_says("Build a metrics dashboard\nwith p95 latency", id="m1")
+        fm.tick()
+        self.assertEqual(len(self.tracker.created), 1)
+        created = self.tracker.created[0]
+        self.assertEqual(created["title"], "Build a metrics dashboard")
+        self.assertEqual(created["team"], "FUG")
+        self.assertEqual(created["project_id"], "Fleet")
+        # assigned to the fleet identity so it auto-claims
+        self.assertEqual([a[1] for a in self.tracker.assigned], [self.tracker.viewer_id])
+        self.assertTrue(any("Filed" in s for s in self.signal.sent))
+
+    def test_goal_prefix_forces_goal_even_with_pending(self):
+        rec = self._worker()
+        fm = self._fm()
+        fm.state["pending"].append(
+            {"msg_id": "x", "issue_id": rec.issue_id, "issue_key": rec.issue_key, "question": "?"}
+        )
+        fm.state["signal_cursor"] = "base"
+        self.signal.user_says("base-msg", id="base")
+        self.signal.user_says("goal: ship it faster", id="g1")
+        fm.tick()
+        self.assertEqual(len(self.tracker.created), 1)
+        self.assertEqual(self.tracker.created[0]["title"], "ship it faster")
+
+    def test_goal_filing_is_deduped_by_marker(self):
+        fm = self._fm()
+
+        class M:
+            id = "dup"
+
+        fm._file_goal(M(), "do the thing")
+        fm._file_goal(M(), "do the thing")  # marker already present
+        self.assertEqual(len(self.tracker.created), 1)
+
+    def test_own_messages_are_ignored(self):
+        fm = self._fm()
+        self.signal.user_says("prior", id="m0")
+        fm.tick()  # baseline
+        self.signal.send("📥 Filed FUG-1: something")  # bot's own send, authored "fleet"
+        fm.tick()
+        self.assertEqual(self.tracker.created, [])  # our own message wasn't taken as a goal
+
+    # -- blocked-worker triage --------------------------------------------
+
+    def test_unanswerable_question_escalates_to_signal(self):
+        rec = self._worker()
+        self._ask(rec, "Should we drop backwards compatibility?")
+        fm = self._fm()  # conservative advisor → escalate
+        fm.tick()
+        self.assertTrue(any("is blocked and needs you" in s for s in self.signal.sent))
+        self.assertEqual(len(fm.state["pending"]), 1)
+        self.assertEqual(fm.state["pending"][0]["issue_key"], "FUG-9")
+
+    def test_question_is_only_escalated_once(self):
+        rec = self._worker()
+        self._ask(rec)
+        fm = self._fm()
+        fm.tick()
+        fm.tick()
+        blocked = [s for s in self.signal.sent if "is blocked" in s]
+        self.assertEqual(len(blocked), 1)
+
+    def test_answerable_question_is_auto_answered(self):
+        rec = self._worker()
+        self._ask(rec, "Which database should I use?")
+        fm = self._fm(advisor=YesAdvisor())
+        fm.tick()
+        replies = self._inbox(rec)
+        self.assertEqual(len(replies), 1)
+        self.assertIn("Use Redis.", replies[0].payload["text"])
+        self.assertEqual(fm.state["pending"], [])  # not escalated
+        self.assertTrue(any("Auto-answered" in s for s in self.signal.sent))
+
+    # -- human answer routing ---------------------------------------------
+
+    def test_human_reply_routes_to_the_blocked_worker(self):
+        rec = self._worker()
+        self._ask(rec, "Which DB?")
+        fm = self._fm()
+        fm.tick()  # escalate; also sets state
+        # baseline the cursor at the escalation message, then the human replies
+        fm.state["signal_cursor"] = self.signal.log[-1].id
+        self.signal.user_says("use postgres", author="kevin")
+        fm.tick()
+        replies = self._inbox(rec)
+        self.assertEqual(len(replies), 1)
+        self.assertEqual(replies[0].payload["text"], "use postgres")
+        self.assertEqual(replies[0].payload["author"], "kevin")
+        self.assertEqual(fm.state["pending"], [])
+        self.assertTrue(any("Relayed your answer to FUG-9" in s for s in self.signal.sent))
+
+    def test_reply_prefixed_with_issue_key_routes_directly(self):
+        rec = self._worker(key="FUG-42")
+        fm = self._fm()
+        fm.state["signal_cursor"] = "base"
+        self.signal.user_says("base", id="base")
+        self.signal.user_says("FUG-42: use the shared cache", author="kevin")
+        fm.tick()
+        replies = self._inbox(rec)
+        self.assertEqual(len(replies), 1)
+        self.assertEqual(replies[0].payload["text"], "use the shared cache")
+
+    def test_reply_for_unknown_worker_warns(self):
+        fm = self._fm()
+        fm.state["pending"].append(
+            {"msg_id": "x", "issue_id": "gone", "issue_key": "FUG-99", "question": "?"}
+        )
+        fm.state["signal_cursor"] = "base"
+        self.signal.user_says("base", id="base")
+        self.signal.user_says("here is the answer", author="kevin")
+        fm.tick()
+        self.assertTrue(any("no active worker" in s for s in self.signal.sent))
+        self.assertEqual(fm.state["pending"], [])
+
+    # -- reports -----------------------------------------------------------
+
+    def test_report_sent_on_interval(self):
+        self.cfg.fleet_manager.report_interval_s = 60
+        self._worker(key="FUG-7", title="a task", pr_number=101)
+        t = {"now": 0.0}
+        fm = self._fm(clock=lambda: t["now"])
+        fm.tick()  # first tick reports (last_report=0)
+        reports = [s for s in self.signal.sent if "Fleet status" in s]
+        self.assertEqual(len(reports), 1)
+        self.assertIn("FUG-7", reports[0])
+        self.assertIn("PR #101", reports[0])
+        # not again before the interval elapses
+        t["now"] = 30.0
+        fm.tick()
+        self.assertEqual(len([s for s in self.signal.sent if "Fleet status" in s]), 1)
+        # again after the interval
+        t["now"] = 61.0
+        fm.tick()
+        self.assertEqual(len([s for s in self.signal.sent if "Fleet status" in s]), 2)
+
+    # -- persistence -------------------------------------------------------
+
+    def test_state_persists_across_restart(self):
+        rec = self._worker()
+        self._ask(rec)
+        self._fm().tick()  # escalates, saves state
+        fm2 = self._fm()  # fresh instance loads fleet_manager.json
+        self.assertEqual(len(fm2.state["pending"]), 1)
+        # the same question isn't re-escalated after restart
+        fm2.tick()
+        self.assertEqual(len([s for s in self.signal.sent if "is blocked" in s]), 1)
+
+    def test_board_summary_reads_top_level_board(self):
+        self.tracker.add_issue(
+            make_issue(key="FUG-200", id="g200", title="ship dashboards", project_id="Fleet")
+        )
+        fm = self._fm()
+        self.assertIn("FUG-200", fm._board_summary())
+
+
+if __name__ == "__main__":
+    unittest.main()
