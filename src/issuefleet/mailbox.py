@@ -132,6 +132,12 @@ class Mailbox:
     def pending_outbox(self) -> list[Message]:
         return self._pending(self.outbox)
 
+    def archived_outbox(self) -> list[Message]:
+        """Outbox messages already relayed and moved to the archive. The fleet
+        manager reads these (alongside pending) to notice a worker's `question`
+        regardless of whether the reconciler has relayed it yet."""
+        return self._pending(self.outbox_archive)
+
     def _pending(self, box: Path) -> list[Message]:
         msgs = []
         if not box.is_dir():

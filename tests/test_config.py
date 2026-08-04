@@ -281,5 +281,62 @@ class ConfigTest(unittest.TestCase):
             config.parse(data)
 
 
+class FleetManagerConfigTest(unittest.TestCase):
+    def test_defaults_disabled(self):
+        fm = config.parse(MINIMAL).fleet_manager
+        self.assertFalse(fm.enabled)
+        self.assertEqual(fm.advisor, "conservative")
+        self.assertEqual(fm.poll_interval_s, 60)
+        self.assertEqual(fm.report_interval_s, 3600)
+        self.assertTrue(fm.assign_goals)
+
+    def test_disabled_section_skips_validation(self):
+        # A half-filled but disabled section must never block startup.
+        data = dict(MINIMAL, fleet_manager={"enabled": False, "base_url": ""})
+        self.assertFalse(config.parse(data).fleet_manager.enabled)
+
+    def _enabled(self, **over):
+        base = {
+            "enabled": True,
+            "base_url": "http://sig:8100",
+            "board_project": "Fleet",
+            "board_team": "FUG",
+        }
+        base.update(over)
+        return dict(MINIMAL, fleet_manager=base)
+
+    def test_enabled_parses(self):
+        fm = config.parse(self._enabled(report_interval_s=0, assign_goals=False)).fleet_manager
+        self.assertTrue(fm.enabled)
+        self.assertEqual(fm.base_url, "http://sig:8100")
+        self.assertEqual(fm.board_project, "Fleet")
+        self.assertEqual(fm.board_team, "FUG")
+        self.assertEqual(fm.report_interval_s, 0)
+        self.assertFalse(fm.assign_goals)
+
+    def test_enabled_requires_board_and_url(self):
+        for missing in ("base_url", "board_project", "board_team"):
+            with self.assertRaisesRegex(ConfigError, missing):
+                config.parse(self._enabled(**{missing: ""}))
+
+    def test_bad_advisor_rejected(self):
+        with self.assertRaisesRegex(ConfigError, "advisor"):
+            config.parse(self._enabled(advisor="magic"))
+
+    def test_poll_and_report_bounds(self):
+        with self.assertRaisesRegex(ConfigError, "poll_interval_s"):
+            config.parse(self._enabled(poll_interval_s=1))
+        with self.assertRaisesRegex(ConfigError, "report_interval_s"):
+            config.parse(self._enabled(report_interval_s=-1))
+
+    def test_api_key_never_from_config(self):
+        with self.assertRaisesRegex(ConfigError, "secrets"):
+            config.parse(self._enabled(api_key="sb_secret_value"))
+
+    def test_api_key_file_expands(self):
+        fm = config.parse(self._enabled(api_key_file="~/x/sigbot.key")).fleet_manager
+        self.assertNotIn("~", str(fm.api_key_file))
+
+
 if __name__ == "__main__":
     unittest.main()

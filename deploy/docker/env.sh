@@ -32,14 +32,25 @@ mkdir -p "$ISSUEFLEET_PROJECTS"
 # so copying it from PATH is safe; credentials are never copied silently.
 issuefleet_preflight() {
   local launcher="$ISSUEFLEET_ROOT/bin/claude-container"
-  if [ ! -s "$launcher" ] && command -v claude-container >/dev/null 2>&1; then
+  # An absent launcher becomes an empty DIRECTORY the first time docker
+  # resolves the bind mount, and a directory satisfies every naive existence
+  # test — which is how a stale one survived every later up/doctor while
+  # every worker died with "claude-container: command not found". Clear it
+  # here so the seed below can put the real file back. `cp` into a surviving
+  # directory would land at $launcher/claude-container and mount just as
+  # uselessly, so this must run first.
+  if [ -d "$launcher" ]; then
+    rmdir "$launcher" 2>/dev/null \
+      || echo "warning: $launcher is a non-empty directory; remove it by hand" >&2
+  fi
+  if [ ! -f "$launcher" ] && command -v claude-container >/dev/null 2>&1; then
     cp "$(command -v claude-container)" "$launcher"
     echo "note: seeded launcher into $launcher from PATH" >&2
   fi
   local missing=""
-  # An absent launcher FILE would silently become a directory at bind-mount
-  # time — warn loudly instead.
-  [ -s "$launcher" ] || missing="$missing
+  # -f, not -s: the bind-mount directory above passes -s (a dir has nonzero
+  # size) and would silently report a healthy launcher.
+  { [ -f "$launcher" ] && [ -s "$launcher" ]; } || missing="$missing
   - launcher: cp \$(command -v claude-container) $launcher"
   [ -f "$HOME/.config/issuefleet/config.toml" ] || missing="$missing
   - config: ~/.config/issuefleet/config.toml (same file as a laptop setup)"

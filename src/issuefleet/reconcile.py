@@ -413,6 +413,7 @@ class Reconciler:
             mailbox.ensure().put_inbox(
                 "info", {"text": "Your session was restarted after a crash; check `git status` and continue."}
             )
+            self._sync_branch(rec, project, mailbox)
             self.runner.start(rec, self.cfg)
             rec.restarts += 1
             rec.touch()
@@ -700,6 +701,56 @@ class Reconciler:
             rec.touch()
             self.registry.save()
 
+    def _sync_note(self, mailbox: Mailbox, branch: str, status: str) -> None:
+        """Tell the agent when its branch moved under it (or couldn't be
+        moved). 'up-to-date'/'no-remote' — the overwhelmingly common cases —
+        say nothing, so a normal restart's mailbox stays quiet."""
+        if status == "fast-forwarded":
+            text = (
+                f"Your branch `{branch}` was fast-forwarded to origin before this session "
+                "started — someone pushed to it while you were stopped. Re-read any file "
+                "you had in flight before you continue; your working tree is not what you left."
+            )
+        elif status == "diverged":
+            text = (
+                f"Your branch `{branch}` and origin have BOTH advanced, so it was left "
+                "untouched. Reconcile before committing again — this daemon force-pushes, "
+                "so whichever side you don't keep is lost: start with "
+                f"`git log HEAD..origin/{branch}`."
+            )
+        else:
+            return
+        mailbox.ensure().put_inbox("info", {"text": text})
+
+    def _sync_branch(self, rec: WorkerRecord, project: ProjectConfig, mailbox: Mailbox) -> None:
+        """Fast-forward a restarting worker's branch onto origin before its
+        agent comes back up.
+
+        Without this a worker stopped while someone else pushed to its branch
+        resumes on stale code and then, because push() is a plain --force,
+        erases those commits on its next push. (The force is right for the
+        normal case — see gitops.push — but it makes staleness destructive
+        rather than merely confusing.)
+
+        Best-effort by design: a fetch or merge failure must never block a
+        restart, since resuming where it left off is exactly the old behaviour.
+        """
+        forge = self.forges.get(project.name)
+        try:
+            if forge is not None:
+                fetch_url, fetch_auth = forge.push_spec()
+                self.git.fetch(project.repo, url=fetch_url, auth_header=fetch_auth)
+            status = self.git.sync_to_remote(Path(rec.worktree), rec.branch)
+        except (gitops.GitError, OSError) as e:
+            log.warning(
+                "worker %s: branch sync failed (%s); resuming on the local branch",
+                rec.issue_key, e,
+            )
+            return
+        if status in ("fast-forwarded", "diverged"):
+            log.warning("worker %s: branch %s %s vs origin", rec.issue_key, rec.branch, status)
+        self._sync_note(mailbox, rec.branch, status)
+
     def _check_pr(self, rec: WorkerRecord, project: ProjectConfig, mailbox: Mailbox) -> None:
         if rec.pr_number is None:
             return
@@ -930,6 +981,15 @@ class Reconciler:
                 log.warning("[%s] pre-claim fetch failed (%s); using local refs", issue.key, e)
 
         self.git.create_worktree(project.repo, branch, project.base_ref, worktree)
+        # An ADOPTED worktree — re-claiming an issue whose branch and directory
+        # survive from an earlier run — can sit behind its own remote branch;
+        # create_worktree only checks that the branch NAME matches. The fetch
+        # above just refreshed origin/*, so this costs nothing extra.
+        try:
+            sync_status = self.git.sync_to_remote(worktree, branch)
+        except gitops.GitError as e:
+            log.warning("[%s] branch sync failed (%s); using the local branch", issue.key, e)
+            sync_status = "up-to-date"
         self.git.add_worktree_exclude(project.repo, worktree, ".agent/")
         for rel in worker_mod.inherit_repo_files(project.repo, worktree, self.cfg.copy_from_repo):
             self.git.add_worktree_exclude(project.repo, worktree, rel)
@@ -954,6 +1014,7 @@ class Reconciler:
         # the next tick's liveness check starts the session; if we crashed
         # before this line, the next tick re-runs the (idempotent) setup.
         self.registry.add(rec)
+        self._sync_note(Mailbox(worktree / ".agent" / "mailbox"), branch, sync_status)
         self.runner.start(rec, self.cfg)
         self.tracker.set_state(issue.id, project.state_in_progress)
         if session:

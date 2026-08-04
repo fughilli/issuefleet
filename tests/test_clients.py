@@ -141,6 +141,22 @@ class LinearClientTest(unittest.TestCase):
         tracker.set_state("i1", "in progress")  # case-insensitive
         self.assertEqual(t.calls[1]["payload"]["variables"], {"id": "i1", "state": "s1"})
 
+    def test_assign_issue_sends_assignee_id(self):
+        t = RecordingTransport([{"data": {"issueUpdate": {"success": True}}}])
+        tracker = LinearTracker(LinearClient("k", transport=t))
+        tracker.assign_issue("i1", "user-bot")
+        self.assertEqual(
+            t.calls[0]["payload"]["variables"], {"id": "i1", "assignee": "user-bot"}
+        )
+
+    def test_assign_issue_raises_on_failure(self):
+        from issuefleet.linear import LinearError
+
+        t = RecordingTransport([{"data": {"issueUpdate": {"success": False}}}])
+        tracker = LinearTracker(LinearClient("k", transport=t))
+        with self.assertRaises(LinearError):
+            tracker.assign_issue("i1", "user-bot")
+
     def _created_node(self, **kw):
         node = {
             "id": "new-1",

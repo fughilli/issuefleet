@@ -82,6 +82,28 @@ def build_stack(cfg: Config) -> Reconciler:
     return Reconciler(cfg, registry, tracker, forges, git, runner)
 
 
+def build_fleet_manager(cfg: Config, reconciler: Reconciler):
+    """The fleet manager, or None when disabled. Shares the reconciler's
+    tracker and registry so both see the same fleet; credentials (sigbot key,
+    advisor key) resolve host-side, same as everything else."""
+    fm = cfg.fleet_manager
+    if not fm.enabled:
+        return None
+    from issuefleet.advisor import build_advisor
+    from issuefleet.fleet_manager import FleetManager
+    from issuefleet.sigbot import SigbotClient
+
+    api_key, _ = creds.resolve_sigbot_key(cfg)  # raises CredentialError if absent
+    signal = SigbotClient(fm.base_url, api_key)
+    anthropic_key = creds.resolve_anthropic_key(cfg)
+    advisor = build_advisor(fm.advisor, anthropic_key)
+    # The same key makes the inbound Signal path agentic; without it the manager
+    # falls back to its deterministic dispatch (see FleetManager._handle_inbound).
+    return FleetManager(
+        cfg, reconciler.tracker, signal, advisor, reconciler.registry, agent_key=anthropic_key
+    )
+
+
 class DaemonLock:
     """One reconciling process per state dir — two daemons would double-relay.
     (`status`/`logs`/`attach` don't take it; they only read.)"""
@@ -219,10 +241,27 @@ def cmd_run(cfg: Config) -> int:
         reconciler = build_stack(cfg)
         server = _start_webhooks(cfg, reconciler, wake) if cfg.webhooks.enabled else None
         dashboard = _start_dashboard(cfg, reconciler, wake) if cfg.dashboard.enabled else None
-        log.info("daemon up: %d project(s), poll every %ds%s%s",
-                 len(cfg.projects), cfg.poll_interval_s,
+        fleet = None
+        if cfg.fleet_manager.enabled:
+            try:
+                fleet = build_fleet_manager(cfg, reconciler)
+                log.info("fleet manager up: sigbot %s, board %r, advisor=%s",
+                         cfg.fleet_manager.base_url, cfg.fleet_manager.board_project,
+                         cfg.fleet_manager.advisor)
+            except Exception:
+                # Never let a fleet-manager startup problem (missing sigbot key,
+                # unreadable state file, …) take down the reconcile loop.
+                log.exception("fleet manager enabled but not startable; running without it")
+        # The loop wakes often enough to poll Signal at the fleet manager's
+        # cadence when it's the tighter interval.
+        loop_interval = cfg.poll_interval_s
+        if fleet is not None:
+            loop_interval = min(loop_interval, cfg.fleet_manager.poll_interval_s)
+        log.info("daemon up: %d project(s), poll every %ds%s%s%s",
+                 len(cfg.projects), loop_interval,
                  " + webhook wake-ups" if server else "",
-                 " + dashboard" if dashboard else "")
+                 " + dashboard" if dashboard else "",
+                 " + fleet manager" if fleet else "")
         from issuefleet.model import PHASE_CRASHED
 
         crashed = [w.issue_key for w in reconciler.registry.all() if w.phase == PHASE_CRASHED]
@@ -239,8 +278,13 @@ def cmd_run(cfg: Config) -> int:
                     reconciler.tick()
                 except Exception:
                     log.exception("tick failed; retrying next interval")
+                if fleet is not None:
+                    try:
+                        fleet.tick()
+                    except Exception:
+                        log.exception("fleet manager tick failed; retrying next interval")
                 # Sleep until the poll interval elapses OR a webhook wakes us.
-                if wake.wait(timeout=cfg.poll_interval_s):
+                if wake.wait(timeout=loop_interval):
                     log.debug("woken early by webhook")
         finally:
             if server:
@@ -350,6 +394,31 @@ def cmd_logs(cfg: Config, key: str, follow: bool) -> int:
     return 0
 
 
+def cmd_fleet(cfg: Config) -> int:
+    import json
+
+    fm = cfg.fleet_manager
+    if not fm.enabled:
+        print("fleet manager: disabled ([fleet_manager] enabled = false)")
+        return 0
+    print(f"fleet manager: enabled — sigbot {fm.base_url}, board {fm.board_project!r} "
+          f"(team {fm.board_team!r}), advisor={fm.advisor}")
+    try:
+        state = json.loads((cfg.state_dir / "fleet_manager.json").read_text())
+    except FileNotFoundError:
+        print("  no state yet (daemon hasn't run the fleet manager)")
+        return 0
+    print(f"  signal cursor: {state.get('signal_cursor')}")
+    pending = state.get("pending", [])
+    if not pending:
+        print("  awaiting human input: none")
+    else:
+        print(f"  awaiting human input ({len(pending)}):")
+        for p in pending:
+            print(f"    {p['issue_key']}: {p['question'][:100]}")
+    return 0
+
+
 def cmd_github_app_setup(cfg: Config, args) -> int:
     from issuefleet import githubapp
 
@@ -422,6 +491,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="log would-be actions; mutate nothing")
     sub.add_parser("run", parents=[common], help="the daemon")
     sub.add_parser("status", parents=[common], help="fleet state")
+    sub.add_parser("fleet", parents=[common],
+                   help="fleet-manager state (Signal cursor, pending escalations)")
     for name, help_ in (
         ("attach", "attach to a worker's tmux session"),
         ("stop", "wind one worker down"),
@@ -460,6 +531,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_run(cfg)
         if args.cmd == "status":
             return cmd_status(cfg)
+        if args.cmd == "fleet":
+            return cmd_fleet(cfg)
         if args.cmd == "attach":
             return cmd_attach(cfg, args.issue)
         if args.cmd == "stop":

@@ -467,6 +467,52 @@ class ReconcileTest(unittest.TestCase):
         self.rec.tick()
         self.assertEqual(len(self.registry.all()), 3)
 
+    def test_restart_fast_forwards_the_branch_before_the_agent_resumes(self):
+        # A worker stopped while someone pushed to its branch must not resume
+        # on stale code: push() is a plain --force, so its next push would
+        # erase whatever landed while it was down.
+        self.claim_one()
+        w = self.worker()
+        self.git.synced.clear()
+        self.git.sync_status = "fast-forwarded"
+        self.runner.dead.add(w.tmux_session)
+        self.rec.tick()
+        self.assertEqual(self.git.synced, [w.worktree])
+        info = [m.payload.get("text", "") for m in self.mailbox().pending_inbox()]
+        self.assertTrue(any("fast-forwarded to origin" in t for t in info), info)
+
+    def test_restart_warns_on_divergence_without_touching_the_branch(self):
+        self.claim_one()
+        w = self.worker()
+        self.git.sync_status = "diverged"
+        self.runner.dead.add(w.tmux_session)
+        self.runner.started.clear()
+        self.rec.tick()
+        info = [m.payload.get("text", "") for m in self.mailbox().pending_inbox()]
+        self.assertTrue(any("BOTH advanced" in t for t in info), info)
+        # The warning is advisory: the worker still comes back up.
+        self.assertEqual(self.runner.started, [w.tmux_session])
+
+    def test_up_to_date_branch_adds_no_mailbox_noise(self):
+        self.claim_one()
+        w = self.worker()
+        self.git.sync_status = "up-to-date"
+        self.runner.dead.add(w.tmux_session)
+        self.rec.tick()
+        info = [m.payload.get("text", "") for m in self.mailbox().pending_inbox()]
+        self.assertFalse(any("origin" in t for t in info), info)
+
+    def test_branch_sync_failure_never_blocks_a_restart(self):
+        # Best-effort: a fetch/merge failure leaves the old behaviour (resume
+        # where it left off) rather than stranding the worker.
+        self.claim_one()
+        w = self.worker()
+        self.git.fail_next_sync = 1
+        self.runner.dead.add(w.tmux_session)
+        self.runner.started.clear()
+        self.rec.tick()
+        self.assertEqual(self.runner.started, [w.tmux_session])
+
     # -- inbound comments --------------------------------------------------
 
     def test_human_comment_ingested_own_posts_filtered(self):

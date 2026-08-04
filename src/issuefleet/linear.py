@@ -241,7 +241,13 @@ class LinearTracker:
         return nodes[0]["id"]
 
     def open_issues(self, project: ProjectConfig) -> list[Issue]:
-        pid = self._project_id(project.linear_project)
+        return self.open_issues_in_project(project.linear_project)
+
+    def open_issues_in_project(self, ref: str) -> list[Issue]:
+        """Open issues in a Linear project named or keyed by ``ref``. Lets the
+        fleet manager read its top-level goals board, which isn't necessarily a
+        configured ``[[projects]]`` entry."""
+        pid = self._project_id(ref)
         issues, cursor = [], None
         while True:
             data = self.client.graphql(
@@ -520,6 +526,21 @@ class LinearTracker:
         node = result["issue"]
         self._issue_team[node["id"]] = node["team"]["id"]
         return _to_issue(node), unknown
+
+    def assign_issue(self, issue_id: str, assignee_id: str) -> None:
+        """Set an issue's assignee. The fleet manager uses this to hand a
+        freshly-filed goal to the fleet's own identity so it auto-claims under
+        the 'agent' strategy (which treats assignee-or-delegate == the agent as
+        eligible). Assigning to the viewer requires the daemon to authenticate
+        as that identity (the agent app), which is the intended setup."""
+        data = self.client.graphql(
+            """mutation($id: String!, $assignee: String!) {
+                 issueUpdate(id: $id, input: {assigneeId: $assignee}) { success }
+               }""",
+            {"id": issue_id, "assignee": assignee_id},
+        )
+        if not data["issueUpdate"]["success"]:
+            raise LinearError(f"issueUpdate (assign) on {issue_id} reported failure")
 
     # -- workflow states ---------------------------------------------------
 

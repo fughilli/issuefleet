@@ -95,6 +95,12 @@ class Git(Protocol):
 
     def has_commits_ahead(self, worktree: Path, base_ref: str) -> bool: ...
 
+    def sync_to_remote(self, worktree: Path, branch: str) -> str:
+        """Fast-forward an adopted branch onto origin/<branch> before its agent
+        starts. Returns "no-remote" | "up-to-date" | "fast-forwarded" |
+        "diverged"; never rewrites a diverged branch."""
+        ...
+
     def push(self, worktree: Path, branch: str, url=None, auth_header=None) -> None:
         """Push with --force-with-lease (re-submissions may rebase), to the
         forge's HTTPS URL with its scoped token — never the operator's SSH

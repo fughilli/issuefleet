@@ -220,6 +220,76 @@ The dashboard is a **control plane**, so treat it like one: it binds loopback
 by default; reach it remotely over the tailnet with `tailscale serve`, never
 a public Funnel. Disable it entirely with `[dashboard] enabled = false`.
 
+## Fleet manager (Signal chat) — optional
+
+The **fleet manager** is a host-side singleton that gives you a chat interface
+to the whole fleet over a Signal group, fronted by a
+[sigbot](https://github.com/fughilli/sigbot) service. It runs alongside the
+reconcile loop in the same `issuefleet run` daemon (nothing containerized — it
+needs broad, credentialed, cross-project reach, exactly the powers the
+architecture keeps *out* of workers), and does three things each tick:
+
+- **Answers you.** With an Anthropic key it is itself an agent: your message goes
+  to a tool loop that can inspect the fleet (`list_workers`, `list_open_issues`,
+  `get_issue`, `pending_escalations`) and act (`file_goal`, `reply_to_worker`),
+  then replies in plain English. So "what's going on in Splanc?" gets *answered*;
+  "make the HITL tests faster" gets filed as a goal; an answer to a blocked
+  worker gets delivered. It works out which from the message, not from prefixes.
+  Goals land on a dedicated top-level board (`board_project` / `board_team`);
+  with `assign_goals = true` they're assigned to the fleet's own identity, so
+  under the `agent` claim strategy a worker picks them up automatically.
+
+  **Without a key it degrades to a dispatch table** — `goal:`-prefixed and bare
+  messages are filed as issues, `FUG-12:`-prefixed ones are relayed to that
+  worker, and there is no way to *ask* it anything (a question becomes a ticket).
+  That fallback is also what runs if the API call fails, so a flaky key never
+  drops a message.
+- **Unblocks or escalates workers.** When a worker calls `agentctl ask`, the
+  manager triages the question against the worker's ticket and the top-level
+  board. The **advisor** decides: `conservative` (default) always escalates;
+  `claude` asks the model whether the context clearly answers it. An answerable
+  question is delivered straight into the worker's mailbox (waking it with no
+  human in the loop); anything else is forwarded to the group and tracked as
+  pending. Your reply — either plain (routed to the oldest pending question) or
+  prefixed `FUG-12:` (routed to that issue) — is delivered to the worker the
+  same way.
+- **Reports progress.** Every `report_interval_s` it posts a fleet summary
+  (active workers, PRs, what's awaiting you).
+
+Setup:
+
+1. Stand up a sigbot service for one Signal group and mint an API key; write it
+   to `~/.config/issuefleet/sigbot.key` (chmod 600) or set
+   `$ISSUEFLEET_SIGBOT_API_KEY`. Set `base_url` to the service's URL — nothing
+   validates it offline (the sigbot calls are live-only, so `doctor` can't
+   catch a placeholder), and under the compose stack the daemon shares the
+   tailscale sidecar's network namespace, so `127.0.0.1` there is *not* your
+   host. The client comes from the build: `bazel run //:issuefleet` gets
+   `sigbot-client` from the pinned requirements lock, and the deploy image
+   `pip install`s it. Only the bare `bin/issuefleet` wrapper — deliberately
+   stdlib-only — needs it installed by hand.
+2. Create the top-level board as a Linear project and set `board_project` /
+   `board_team`. To have recorded goals *worked* by the fleet, also list that
+   project under `[[projects]]` with `claim.strategy = "agent"`.
+3. Set `[fleet_manager] enabled = true`. Provide an `ANTHROPIC_API_KEY` (or
+   `~/.config/issuefleet/anthropic.key`) to get the agentic manager above — the
+   same key also enables `advisor = "claude"` for worker-question triage. Both
+   fall back to their conservative, non-LLM behaviour without it.
+4. `issuefleet doctor` verifies the key, the client, and the advisor; once the
+   daemon is up, `issuefleet fleet` shows the Signal cursor and any pending
+   escalations.
+
+Escalations and answers travel over the worker mailbox, not Linear comments, so
+they're immune to the app-identity comment filter and need no Linear round-trip.
+State (Signal cursor, seen questions, pending escalations) persists in
+`fleet_manager.json`. The first run baselines **both** sides of that history so
+it isn't replayed as live work: the Signal cursor jumps to the newest message,
+so the group's backlog doesn't become goals, and every already-*archived* worker
+question is marked seen, so a resolved `agentctl ask` from days ago doesn't
+resurface as a fresh escalation. Questions still sitting in a worker's
+`pending_outbox` are untouched by the baseline — nobody has drained those, so
+they're genuinely unanswered and escalate on that first tick.
+
 ## Configuration
 
 ```toml
@@ -254,6 +324,17 @@ linear_secret_file = "~/.config/issuefleet/linear_webhook.secret"
 enabled = true                             # introspection web UI (below)
 bind = "127.0.0.1"                         # keep loopback; private tunnel in front
 port = 8788
+
+[fleet_manager]                            # Signal <-> fleet bridge (below); off by default
+enabled = false
+base_url = "http://sigbot-host:8100"       # the sigbot service (one Signal group)
+api_key_file = "~/.config/issuefleet/sigbot.key"   # minted in the sigbot dashboard
+board_project = "Fleet"                    # top-level board where goals are recorded
+board_team = "FUG"                         # the board's Linear team (name, key, or UUID)
+poll_interval_s = 60                       # Signal poll cadence
+report_interval_s = 3600                   # progress reports to the group; 0 = off
+assign_goals = true                        # assign filed goals to the fleet so they auto-claim
+advisor = "conservative"                   # conservative (always escalate) | claude (LLM triage)
 
 [agent]
 max_auto_turns = 50          # self-driven turns without human contact (the runaway brake)
@@ -410,6 +491,14 @@ read `deploy/docker/README.md` before using it.
 - **Crashed workers hold their claim** (deliberately, so the issue isn't
   re-claimed into the same failure). Free the issue by removing/re-adding
   the label after inspecting the kept worktree.
+- **Agent branches are force-pushed, so a diverged branch loses a side.**
+  The daemon pushes `agent/*` with a plain `--force` (a lease needs a
+  remote-tracking ref, which pushing to an explicit token URL doesn't
+  create). Startup now fetches and *fast-forwards* a worker's branch onto
+  its remote tip, so pushing to an agent's branch while it's stopped is
+  safe. But if BOTH sides advanced, the branch is left alone and the agent
+  is only *told* — nothing stops it committing on and force-pushing its own
+  side. Reconcile before letting it resume, or expect to lose yours.
 - **One Linear workspace per config.** All projects share the one API key.
 - **Launcher prompts.** claude-container's interactive confirmations block a
   headless worker. Skill approval needs launcher > 1.6.12, where worktrees
@@ -441,8 +530,17 @@ read `deploy/docker/README.md` before using it.
 ```sh
 bazelisk test //tests:all     # hermetic Python 3.11 toolchain, no system deps
 bazelisk run //:issuefleet -- doctor
+bazelisk run //:requirements  # regenerate requirements_lock.txt from requirements.in
 nix develop                   # optional devshell: bazelisk, python, tmux
 ```
+
+`bazelisk run //:issuefleet` is the most self-sufficient way to run the daemon:
+it brings its own Python 3.11 *and* the one non-stdlib runtime dependency
+(`sigbot-client`, for the fleet manager), so it works on a host with neither.
+The core stays stdlib-only — that dep hangs off `//src/issuefleet:cli` alone,
+never the library, so `bin/issuefleet` and the test graph are untouched. Edit
+`requirements.in` and re-run `//:requirements` to move the pin;
+`//:requirements_test` fails if the lock drifts.
 
 Layout: `src/issuefleet/` (core: mailbox, turns, reconcile, clients, ports),
 `src/issuefleet/agent_runtime/` (the code staged into each worktree's

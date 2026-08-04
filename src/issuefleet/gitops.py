@@ -179,6 +179,42 @@ class Gitops:
             f"cannot resolve base ref {base_ref!r} in {worktree} (tried: {', '.join(candidates)})"
         )
 
+    def _is_ancestor(self, worktree: Path, maybe_ancestor: str, descendant: str) -> bool:
+        proc = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", maybe_ancestor, descendant],
+            cwd=worktree,
+            capture_output=True,
+        )
+        return proc.returncode == 0
+
+    def sync_to_remote(self, worktree: Path, branch: str) -> str:
+        """Fast-forward an adopted worker branch onto its remote tip, so a
+        restarted agent never resumes on stale code. Returns ``"no-remote"``
+        (nothing pushed yet, or the ref isn't fetched), ``"up-to-date"``,
+        ``"fast-forwarded"``, or ``"diverged"``.
+
+        Fast-forward ONLY, deliberately. A diverged branch is left exactly as
+        it is: the worker's unpushed commits are the expensive side, and since
+        ``push()`` force-pushes, any automatic resolution here would silently
+        destroy whichever side it didn't pick. Reconciling is the agent's job,
+        in-session, prompted by the note the caller mails it.
+
+        Reads only the remote-tracking ref, never the network — the caller
+        fetches first (with the forge's scoped token) so this works in a
+        worktree that has no credential of its own.
+        """
+        remote = f"origin/{branch}"
+        if not self._ref_exists(worktree, f"refs/remotes/{remote}"):
+            return "no-remote"
+        # Remote tip already contained in HEAD covers both "equal" and "the
+        # worker is ahead of what was last pushed" — nothing to pull either way.
+        if self._is_ancestor(worktree, remote, "HEAD"):
+            return "up-to-date"
+        if self._is_ancestor(worktree, "HEAD", remote):
+            _git(["merge", "--ff-only", remote], cwd=worktree)
+            return "fast-forwarded"
+        return "diverged"
+
     def push(
         self, worktree: Path, branch: str, url: str | None = None, auth_header: str | None = None
     ) -> None:

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from issuefleet import MARKER_PREFIX
 from issuefleet.model import Comment, Issue, PrFeedback, PullRequest
+from issuefleet.sigbot import SignalMessage
 
 
 def make_issue(n=1, **kw):
@@ -36,6 +37,7 @@ class FakeTracker:
         self.comments: dict[str, list[Comment]] = {}  # issue_id -> comments
         self.posted: list[tuple[str, str]] = []  # (issue_id, body)
         self.state_changes: list[tuple[str, str]] = []  # (issue_id, state_name)
+        self.assigned: list[tuple[str, str]] = []  # (issue_id, assignee_id)
         self.fail_next_post = 0  # countdown of post_comment calls to fail
         self.fail_get_issue: set[str] = set()  # issue_ids whose get_issue raises
         self.activities: list[tuple[str, dict]] = []  # (session_id, content)
@@ -79,6 +81,9 @@ class FakeTracker:
             ]
         return [i for i in open_issues if project.claim.matches(i)]
 
+    def open_issues_in_project(self, ref: str) -> list[Issue]:
+        return [i for i in self.issues.values() if i.open and i.project_id == ref]
+
     def get_issue(self, issue_id: str) -> Issue | None:
         if issue_id in self.fail_get_issue:
             raise ConnectionError("fake Linear outage on get_issue")
@@ -110,6 +115,11 @@ class FakeTracker:
     def has_comment_marker(self, issue_id: str, msg_id: str) -> bool:
         needle = MARKER_PREFIX + msg_id
         return any(needle in c.body for c in self.comments.get(issue_id, []))
+
+    def assign_issue(self, issue_id: str, assignee_id: str) -> None:
+        self.assigned.append((issue_id, assignee_id))
+        if issue_id in self.issues:
+            self.issues[issue_id].assignee_id = assignee_id
 
     def set_state(self, issue_id: str, state_name: str) -> None:
         self.state_changes.append((issue_id, state_name))
@@ -273,6 +283,9 @@ class FakeGit:
         self.fail_next_push = 0
         self.fetched: list[tuple] = []  # (repo, url, auth_header) per fetch
         self.fail_next_fetch = 0
+        self.synced: list[str] = []  # worktrees passed to sync_to_remote
+        self.sync_status = "up-to-date"  # what sync_to_remote reports
+        self.fail_next_sync = 0
 
     def fetch(self, repo: Path, url=None, auth_header=None) -> None:
         if self.fail_next_fetch > 0:
@@ -297,12 +310,74 @@ class FakeGit:
     def has_commits_ahead(self, worktree: Path, base_ref: str) -> bool:
         return self.ahead
 
+    def sync_to_remote(self, worktree: Path, branch: str) -> str:
+        self.synced.append(str(worktree))
+        if self.fail_next_sync > 0:
+            self.fail_next_sync -= 1
+            from issuefleet.gitops import GitError
+
+            raise GitError("fake git sync failure")
+        return self.sync_status
+
     def push(self, worktree: Path, branch: str, url=None, auth_header=None) -> None:
         if self.fail_next_push > 0:
             self.fail_next_push -= 1
             raise ConnectionError("fake git push failure")
         self.pushed.append(branch)
         self.push_specs.append((url, auth_header))
+
+
+class FakeSignal:
+    """sigbot ServiceClient stand-in. `sent` records outbound; `log` is the
+    group message log (bot sends land there too, authored by the bot label, so
+    the manager's own-message filter is exercised)."""
+
+    def __init__(self):
+        self.sent: list[str] = []
+        self.log: list[SignalMessage] = []
+        self.svc = {"name": "fleet", "label": "fleet", "group_name": "Fleet Ops"}
+        self.send_fail = 0  # countdown of send() calls to fail
+        self.reacted: list[tuple] = []  # (message_id, emoji) per react()
+        self.reactions_unsupported = False  # simulate an un-upgraded sigbot
+
+    def service(self) -> dict:
+        return dict(self.svc)
+
+    def send(self, text: str, *, prefix: bool = True) -> None:
+        if self.send_fail > 0:
+            self.send_fail -= 1
+            from issuefleet.sigbot import SignalError
+
+            raise SignalError(500, "fake sigbot outage")
+        self.sent.append(text)
+        # Mirror the real service: sigbot records NO sender/sender_name on its
+        # own sends, so author normalizes to "unknown" and only `direction`
+        # identifies them. The fake used to stamp author="fleet" here, which made
+        # the name-based filter look like it worked and hid a live loopback bug.
+        self.log.append(SignalMessage(id=f"bot-{len(self.log) + 1}", text=text,
+                                      author="unknown", direction="out"))
+
+    def messages(self, after_id=None, limit: int = 50) -> list[SignalMessage]:
+        # Mirror the sigbot contract: a bare call returns the most-recent N
+        # (oldest-first); `after_id` pages the OLDEST N strictly after that id.
+        if after_id is None:
+            return list(self.log[-limit:])
+        idx = next((i for i, m in enumerate(self.log) if m.id == after_id), None)
+        after = self.log[idx + 1 :] if idx is not None else self.log
+        return list(after[:limit])
+
+    # -- test helper -------------------------------------------------------
+
+    def react(self, message_id, emoji: str) -> bool:
+        if self.reactions_unsupported:
+            return False
+        self.reacted.append((message_id, emoji))
+        return True
+
+    def user_says(self, text: str, author: str = "kevin", id: str | None = None) -> str:
+        mid = id or f"u{len(self.log) + 1}"
+        self.log.append(SignalMessage(id=mid, text=text, author=author))
+        return mid
 
 
 class FakeRunner:

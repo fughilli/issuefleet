@@ -83,6 +83,32 @@ def resolve_linear_oauth_client(cfg: Config) -> tuple[str, str]:
     return cfg.linear_oauth_client_id, secret
 
 
+def resolve_sigbot_key(cfg: Config) -> tuple[str, str]:
+    """(key, source-description) for the fleet manager's sigbot API key.
+    Env-then-file, same rule as every other secret. Raises CredentialError if
+    absent — the fleet manager can't reach its Signal group without it."""
+    fm = cfg.fleet_manager
+    v = os.environ.get(fm.api_key_env)
+    if v:
+        return v.strip(), f"env ${fm.api_key_env}"
+    v = _read_key_file(fm.api_key_file)
+    if v:
+        return v, str(fm.api_key_file)
+    raise CredentialError(
+        f"no sigbot API key: set ${fm.api_key_env} or write it to "
+        f"{fm.api_key_file} (chmod 600). Mint one in the sigbot dashboard."
+    )
+
+
+def resolve_anthropic_key(cfg: Config) -> str | None:
+    """Optional Anthropic API key for the fleet manager's 'claude' advisor.
+    Env-then-file; returns None when absent (the advisor falls back to
+    escalate-everything). Not resolved from the config file (a secret)."""
+    return resolve_optional(
+        "ANTHROPIC_API_KEY", Path("~/.config/issuefleet/anthropic.key").expanduser()
+    )
+
+
 def github_auth_mode(cfg: Config) -> str:
     """'app' or 'token'. auto = app when the App ID is configured and its
     private key file exists, else fall back to a PAT."""

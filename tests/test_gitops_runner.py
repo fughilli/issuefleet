@@ -146,6 +146,64 @@ class GitopsTest(unittest.TestCase):
         with self.assertRaisesRegex(GitError, "cannot resolve base ref 'nope'"):
             self.git.has_commits_ahead(self.wt, "nope")
 
+    def head_of(self, cwd):
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=cwd, capture_output=True, text=True
+        ).stdout.strip()
+
+    def advance_origin(self, branch, msg="remote work"):
+        """Push a commit to `branch` on origin from an unrelated clone — what
+        an operator pushing to an agent's branch looks like from the daemon."""
+        other = Path(self.tmp.name) / f"other-{len(msg)}-{branch.replace('/', '_')}"
+        run(["git", "clone", "-b", branch, str(self.origin), str(other)])
+        (other / "remote_work.txt").write_text(msg)
+        run(["git", "add", "."], cwd=other)
+        run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", msg], cwd=other)
+        run(["git", "push", "origin", branch], cwd=other)
+
+    def test_sync_to_remote_fast_forwards_a_behind_branch(self):
+        # The live regression: someone pushes to the agent's branch while the
+        # worker is stopped. Resuming stale and then push --force erases it.
+        self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
+        self.commit_in_worktree()
+        self.git.push(self.wt, "agent/fug-1-x")
+        self.advance_origin("agent/fug-1-x")
+        self.git.fetch(self.repo)
+        self.assertEqual(self.git.sync_to_remote(self.wt, "agent/fug-1-x"), "fast-forwarded")
+        self.assertTrue((self.wt / "remote_work.txt").is_file())
+
+    def test_sync_to_remote_keeps_unpushed_worker_commits(self):
+        # Worker ahead of origin: nothing to pull, and nothing to reset — its
+        # unpushed commits are the unrecoverable side.
+        self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
+        self.commit_in_worktree()
+        self.git.push(self.wt, "agent/fug-1-x")
+        self.git.fetch(self.repo)
+        self.commit_in_worktree("unpushed")
+        head = self.head_of(self.wt)
+        self.assertEqual(self.git.sync_to_remote(self.wt, "agent/fug-1-x"), "up-to-date")
+        self.assertEqual(self.head_of(self.wt), head)
+
+    def test_sync_to_remote_leaves_a_diverged_branch_untouched(self):
+        # Both sides advanced. Fast-forward is impossible and any automatic
+        # resolution would destroy one side, so the branch must not move.
+        self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
+        self.commit_in_worktree()
+        self.git.push(self.wt, "agent/fug-1-x")
+        self.advance_origin("agent/fug-1-x")
+        self.git.fetch(self.repo)
+        self.commit_in_worktree("local divergence")
+        head = self.head_of(self.wt)
+        self.assertEqual(self.git.sync_to_remote(self.wt, "agent/fug-1-x"), "diverged")
+        self.assertEqual(self.head_of(self.wt), head)
+
+    def test_sync_to_remote_without_a_remote_branch(self):
+        # First run: nothing pushed yet, so there is no origin/<branch> to
+        # compare against and the fresh worktree is already correct.
+        self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
+        self.commit_in_worktree()
+        self.assertEqual(self.git.sync_to_remote(self.wt, "agent/fug-1-x"), "no-remote")
+
     def test_push_and_delete_remote_branch(self):
         self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
         self.commit_in_worktree()
