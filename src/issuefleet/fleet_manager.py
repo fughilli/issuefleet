@@ -235,15 +235,22 @@ class FleetManager:
     # ------------------------------------------------------- fleet watch
 
     def _watch_fleet(self) -> None:
-        board = self._board_summary()
+        self._board_cache: str | None = None  # computed lazily, once per tick
         for rec in self.registry.all():
             try:
-                self._triage_worker(rec, board)
+                self._triage_worker(rec)
             except Exception:
                 log.exception("fleet manager: triage of %s failed", rec.issue_key)
         self.state["seen_questions"] = self.state["seen_questions"][-_SEEN_QUESTIONS_CAP:]
 
-    def _triage_worker(self, rec, board: str) -> None:
+    def _board(self) -> str:
+        # Only read the top-level board when a worker is actually blocked, and
+        # at most once per tick.
+        if self._board_cache is None:
+            self._board_cache = self._board_summary()
+        return self._board_cache
+
+    def _triage_worker(self, rec) -> None:
         mailbox = Mailbox(Path(rec.worktree) / ".agent" / "mailbox")
         questions = self._new_questions(rec, mailbox)
         if not questions:
@@ -260,7 +267,7 @@ class FleetManager:
                 f"{issue.title}\n\n{issue.description}" if issue else rec.issue_title
             )
             verdict = self.advisor.triage(
-                BlockedQuestion(rec.issue_key, qtext, ticket, board)
+                BlockedQuestion(rec.issue_key, qtext, ticket, self._board())
             )
             if verdict.answerable:
                 self._deliver_to_worker(
