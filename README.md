@@ -282,8 +282,13 @@ Setup:
 Escalations and answers travel over the worker mailbox, not Linear comments, so
 they're immune to the app-identity comment filter and need no Linear round-trip.
 State (Signal cursor, seen questions, pending escalations) persists in
-`fleet_manager.json`; the first run baselines the cursor, so the group's history
-isn't replayed as goals.
+`fleet_manager.json`. The first run baselines **both** sides of that history so
+it isn't replayed as live work: the Signal cursor jumps to the newest message,
+so the group's backlog doesn't become goals, and every already-*archived* worker
+question is marked seen, so a resolved `agentctl ask` from days ago doesn't
+resurface as a fresh escalation. Questions still sitting in a worker's
+`pending_outbox` are untouched by the baseline — nobody has drained those, so
+they're genuinely unanswered and escalate on that first tick.
 
 ## Configuration
 

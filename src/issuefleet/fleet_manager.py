@@ -106,6 +106,11 @@ class FleetManager:
             data = {}
         data.setdefault("signal_cursor", None)
         data.setdefault("seen_questions", [])
+        # Pre-existing state files predate the baseline flag. They were written by
+        # a daemon that had already drained (and escalated) whatever was in the
+        # outboxes, so treat them as baselined — re-baselining would silently
+        # swallow escalations that are genuinely still open.
+        data.setdefault("questions_baselined", bool(data.get("seen_questions")))
         data.setdefault("pending", [])
         data.setdefault("last_report", None)  # None = never reported yet
         return data
@@ -471,12 +476,50 @@ class FleetManager:
 
     def _watch_fleet(self) -> None:
         self._board_cache: str | None = None  # computed lazily, once per tick
+        if not self.state.get("questions_baselined"):
+            self._baseline_questions()
         for rec in self.registry.all():
             try:
                 self._triage_worker(rec)
             except Exception:
                 log.exception("fleet manager: triage of %s failed", rec.issue_key)
         self.state["seen_questions"] = self.state["seen_questions"][-_SEEN_QUESTIONS_CAP:]
+
+    def _baseline_questions(self) -> None:
+        """First run: mark the workers' already-ARCHIVED questions as seen, so
+        history isn't replayed as live escalations.
+
+        The Signal cursor is baselined the same way (see _ingest_signal) so the
+        group's history isn't replayed as goals; without the equivalent here a
+        fresh state_dir escalated every archived `agentctl ask` — including
+        questions the worker resolved hours or days ago. _new_questions reads
+        archived_outbox() as well as pending (the reconciler archives an outbox
+        message as soon as it drains it, so a live question is usually already
+        archived by the time we look), and that is exactly what makes an
+        unbaselined first run replay the whole history.
+
+        Only the archive is baselined. A question still in pending_outbox has
+        not been drained by anyone yet, so it is genuinely unanswered and must
+        still escalate on this very tick — that is the difference between "we
+        booted late" and "we lost the question".
+        """
+        ids = []
+        for rec in self.registry.all():
+            try:
+                mailbox = Mailbox(Path(rec.worktree) / ".agent" / "mailbox")
+                ids += [m.id for m in mailbox.archived_outbox() if m.kind == "question"]
+            except OSError:
+                continue  # worktree gone; nothing to baseline
+        self.state["seen_questions"] = (self.state["seen_questions"] + ids)[
+            -_SEEN_QUESTIONS_CAP:
+        ]
+        self.state["questions_baselined"] = True
+        self._save_state()
+        log.info(
+            "fleet manager: question baseline set (%d archived question(s) marked seen); "
+            "pending questions still escalate",
+            len(ids),
+        )
 
     def _board(self) -> str:
         # Only read the top-level board when a worker is actually blocked, and

@@ -126,6 +126,61 @@ class FleetManagerTest(unittest.TestCase):
         self.assertEqual(len(self.tracker.created), 1)
         self.assertEqual(self.tracker.created[0]["title"], "ship it faster")
 
+    # -- question baseline -------------------------------------------------
+
+    def _archive_question(self, rec, text):
+        """A question the reconciler already drained — the shape that was being
+        replayed as a fresh escalation."""
+        mb = Mailbox(Path(rec.worktree) / ".agent" / "mailbox")
+        msg = mb.put_outbox("question", {"text": text})
+        mb.archive_outbox(msg)
+        return msg
+
+    def test_first_run_baselines_archived_questions_instead_of_escalating(self):
+        # The regression: a fresh state_dir replayed every archived `agentctl
+        # ask` as a live escalation, including ones long since resolved.
+        rec = self._worker()
+        self._archive_question(rec, "a stale question from hours ago")
+        fm = self._fm()
+        fm.tick()
+        self.assertEqual(fm.state["pending"], [])
+        self.assertFalse(any("stale question" in s for s in self.signal.sent))
+        self.assertTrue(fm.state["questions_baselined"])
+
+    def test_a_pending_question_still_escalates_on_the_first_tick(self):
+        # Not yet drained by anyone => genuinely unanswered, not history.
+        rec = self._worker()
+        self._ask(rec, "I am actually blocked right now")
+        fm = self._fm()
+        fm.tick()
+        self.assertEqual(len(fm.state["pending"]), 1)
+        self.assertIn("I am actually blocked right now", self.signal.sent[-1])
+
+    def test_a_question_after_the_baseline_still_escalates(self):
+        rec = self._worker()
+        self._archive_question(rec, "stale")
+        fm = self._fm()
+        fm.tick()  # baseline
+        self.signal.sent.clear()
+        self._ask(rec, "a genuinely new question")
+        fm.tick()
+        self.assertEqual(len(fm.state["pending"]), 1)
+        self.assertIn("a genuinely new question", self.signal.sent[-1])
+
+    def test_an_existing_state_file_is_not_re_baselined(self):
+        # A daemon that already escalated must not swallow those questions on
+        # the next start just because the flag is new.
+        rec = self._worker()
+        fm = self._fm()
+        fm.state["seen_questions"] = ["some-old-id"]
+        fm.state.pop("questions_baselined", None)
+        fm._save_state()
+        self._ask(rec, "still waiting on you")
+        fresh = self._fm()
+        self.assertTrue(fresh.state["questions_baselined"])
+        fresh.tick()
+        self.assertEqual(len(fresh.state["pending"]), 1)
+
     # -- agentic inbound path ---------------------------------------------
 
     def _ask_agent(self, fm, text, fake_run_agent):
