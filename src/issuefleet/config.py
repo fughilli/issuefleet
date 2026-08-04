@@ -127,6 +127,37 @@ class DashboardConfig:
 
 
 @dataclass
+class FleetManagerConfig:
+    """The fleet manager: a host-side singleton that bridges a Signal group
+    (fronted by a sigbot service) to the fleet. It records user goals as issues
+    on a dedicated top-level board, watches the workers, unblocks agents whose
+    questions the ticket/board context answers, and routes the rest to the
+    human over Signal. Disabled by default — the daemon runs the reconcile loop
+    with or without it."""
+
+    enabled: bool = False
+    # sigbot service (one Signal group, one persona). base_url is not a secret;
+    # the API key follows the usual env-then-file rule (never the config file).
+    base_url: str = ""
+    api_key_env: str = "ISSUEFLEET_SIGBOT_API_KEY"
+    api_key_file: Path = Path("~/.config/issuefleet/sigbot.key").expanduser()
+    # The dedicated top-level board where user goals are recorded as issues.
+    # A team is required (a brand-new goal has no context issue to inherit one
+    # from); the project is where the goals land and is polled for progress.
+    board_project: str = ""  # Linear project name or UUID
+    board_team: str = ""  # Linear team name, key, or UUID
+    poll_interval_s: int = 60  # how often to check Signal + the fleet
+    report_interval_s: int = 3600  # progress-report cadence to Signal; 0 = never
+    # Assign filed goals to the fleet's agent identity so they auto-claim under
+    # the 'agent' claim strategy. Off if you'd rather triage goals by hand.
+    assign_goals: bool = True
+    # Triage backend for blocked-worker questions: 'conservative' always
+    # escalates to the human (deterministic, no LLM); 'claude' asks the model
+    # whether ticket/board context answers it first.
+    advisor: str = "conservative"
+
+
+@dataclass
 class Config:
     projects: list[ProjectConfig]
     poll_interval_s: int = 60
@@ -191,6 +222,7 @@ class Config:
     linear_oauth_redirect_port: int = 9779
     webhooks: WebhookConfig = field(default_factory=WebhookConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
+    fleet_manager: FleetManagerConfig = field(default_factory=FleetManagerConfig)
 
     def project(self, name: str) -> ProjectConfig:
         for p in self.projects:
@@ -265,6 +297,48 @@ def _parse_worker_env(table: object, source: str) -> dict[str, EnvSource]:
     return out
 
 
+_ADVISOR_KINDS = ("conservative", "claude")
+
+
+def _parse_fleet_manager(table: dict, source: str) -> FleetManagerConfig:
+    fm = FleetManagerConfig(
+        enabled=bool(table.get("enabled", False)),
+        base_url=str(table.get("base_url", "")),
+        board_project=str(table.get("board_project", "")),
+        board_team=str(table.get("board_team", "")),
+        poll_interval_s=int(table.get("poll_interval_s", 60)),
+        report_interval_s=int(table.get("report_interval_s", 3600)),
+        assign_goals=bool(table.get("assign_goals", True)),
+        advisor=str(table.get("advisor", "conservative")),
+    )
+    if "api_key_env" in table:
+        fm.api_key_env = str(table["api_key_env"])
+    if "api_key_file" in table:
+        fm.api_key_file = _path(str(table["api_key_file"]))
+    if fm.advisor not in _ADVISOR_KINDS:
+        raise ConfigError(
+            f"{source} [fleet_manager]: advisor must be one of {_ADVISOR_KINDS}, "
+            f"got {fm.advisor!r}"
+        )
+    # Only validate the rest when it's actually turned on — a disabled section
+    # (or none at all) must never block the daemon from starting.
+    if fm.enabled:
+        for req, key in (
+            (fm.base_url, "base_url"),
+            (fm.board_project, "board_project"),
+            (fm.board_team, "board_team"),
+        ):
+            if not req:
+                raise ConfigError(
+                    f"{source} [fleet_manager]: {key} is required when enabled"
+                )
+        if fm.poll_interval_s < 5:
+            raise ConfigError(f"{source} [fleet_manager]: poll_interval_s must be >= 5")
+        if fm.report_interval_s < 0:
+            raise ConfigError(f"{source} [fleet_manager]: report_interval_s must be >= 0")
+    return fm
+
+
 def _looks_secret(v: str) -> bool:
     """Catch the obvious paste-a-key-into-the-config mistake. Deliberately
     narrow: known credential prefixes, or a long opaque token-ish string."""
@@ -303,12 +377,14 @@ def parse(data: dict, source: str = "<config>") -> Config:
     agent = data.get("agent", {})
     hooks = data.get("webhooks", {})
     dash = data.get("dashboard", {})
+    fleet = data.get("fleet_manager", {})
     for name, table in (
         ("daemon", daemon),
         ("credentials", creds),
         ("agent", agent),
         ("webhooks", hooks),
         ("dashboard", dash),
+        ("fleet_manager", fleet),
     ):
         if not isinstance(table, dict):
             raise ConfigError(f"{source}: [{name}] must be a table")
@@ -431,6 +507,8 @@ def parse(data: dict, source: str = "<config>") -> Config:
         bind=dash.get("bind", "127.0.0.1"),
         port=int(dash.get("port", 8788)),
     )
+
+    cfg.fleet_manager = _parse_fleet_manager(fleet, source)
 
     if cfg.poll_interval_s < 5:
         raise ConfigError(f"{source}: poll_interval_s must be >= 5")
