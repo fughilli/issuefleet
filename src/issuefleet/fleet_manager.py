@@ -45,6 +45,11 @@ _PAGE = 100  # Signal messages fetched per page
 _MAX_DRAIN_PAGES = 50  # backstop against a pathological flood in one tick
 _ISSUE_KEY_RE = re.compile(r"^\s*([A-Za-z]{2,}-\d+)\b[:\-\s]*", re.ASCII)
 
+# Acknowledgement reactions. Signal replaces a reaction rather than stacking
+# them, so _DONE supersedes _SEEN with no explicit clear.
+_SEEN = "\N{EYES}"
+_DONE = "\N{WHITE HEAVY CHECK MARK}"
+
 _AGENT_SYSTEM = """\
 You are the fleet manager for a team of autonomous coding agents. You speak to \
 one operator in a Signal group; each message you receive is from them, and your \
@@ -180,8 +185,16 @@ class FleetManager:
             for m in batch:
                 if m.id == cursor:
                     continue  # `after_id` is usually exclusive, but don't rely on it
+                if m.outbound:
+                    # Our own send, echoed back in the group log. This is the
+                    # load-bearing check: sigbot stores NO sender/sender_name on
+                    # outgoing rows, so the name comparison below can never
+                    # identify them (author falls back to "unknown"). Without
+                    # this the manager answers itself — observed filing its own
+                    # "📥 Filed FUG-49" confirmation as a new goal, recursively.
+                    continue
                 if m.author and m.author.lower() in ours:
-                    continue  # our own send, echoed back in the log
+                    continue  # belt-and-braces for a service that omits direction
                 text = (m.text or "").strip()
                 if not text:
                     continue
@@ -208,13 +221,21 @@ class FleetManager:
         English. _handle_scripted below is the fallback for a daemon with no key
         — a dispatch table that can only file goals and relay replies, which is
         why it answers a question by filing it as a ticket."""
+        # 👀 on arrival, ✅ once we've actually answered — the operator can see
+        # the manager picked a message up during the seconds an agent turn takes,
+        # without either of those states costing a message in the group.
+        self.signal.react(m.id, _SEEN)
         if self.agent_key:
             try:
                 self._handle_agentically(m, text)
+                self.signal.react(m.id, _DONE)
                 return
             except AgentError as e:
                 log.warning("fleet manager: agent failed (%s); using scripted dispatch", e)
         self._handle_scripted(m, text)
+        # Only on the success path: a raised handler leaves 👀 standing, which
+        # reads correctly as "seen, but stuck".
+        self.signal.react(m.id, _DONE)
 
     def _handle_scripted(self, m, text: str) -> None:
         if text.lower().startswith("goal:"):

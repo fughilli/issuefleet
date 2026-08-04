@@ -126,6 +126,86 @@ class FleetManagerTest(unittest.TestCase):
         self.assertEqual(len(self.tracker.created), 1)
         self.assertEqual(self.tracker.created[0]["title"], "ship it faster")
 
+    # -- acknowledgement reactions -----------------------------------------
+
+    def test_a_handled_message_gets_seen_then_done(self):
+        fm = self._fm()
+        self.signal.user_says("base", id="base")
+        fm.tick()
+        self.signal.reacted.clear()
+        self.signal.user_says("build a dashboard", id="u1")
+        fm.tick()
+        self.assertEqual(self.signal.reacted,
+                         [("u1", "\N{EYES}"), ("u1", "\N{WHITE HEAVY CHECK MARK}")])
+
+    def test_the_agent_path_also_acknowledges(self):
+        fm = self._fm(agent_key="sk-test")
+        self._ask_agent(fm, "what's up?", lambda **kw: "all quiet")
+        self.assertEqual(self.signal.reacted,
+                         [("q1", "\N{EYES}"), ("q1", "\N{WHITE HEAVY CHECK MARK}")])
+
+    def test_our_own_posts_are_never_reacted_to(self):
+        fm = self._fm()
+        self.signal.user_says("base", id="base")
+        fm.tick()
+        self.signal.user_says("goal: ship it", id="u1")
+        fm.tick()
+        self.signal.reacted.clear()
+        fm.tick()  # the "Filed ..." confirmation is now in the log
+        self.assertEqual(self.signal.reacted, [])
+
+    def test_reactions_being_unsupported_does_not_break_the_tick(self):
+        # An un-upgraded sigbot must degrade to silence, not fail a message.
+        self.signal.reactions_unsupported = True
+        fm = self._fm()
+        self.signal.user_says("base", id="base")
+        fm.tick()
+        self.signal.user_says("build a dashboard", id="u1")
+        fm.tick()
+        self.assertEqual(len(self.tracker.created), 1)
+        self.assertEqual(self.signal.reacted, [])
+
+    # -- own-message loopback ----------------------------------------------
+
+    def test_the_managers_own_posts_are_never_reprocessed(self):
+        # The live bug: sigbot stores no sender on outgoing rows, so the
+        # author-name filter never matched and the manager answered itself —
+        # filing its own "Filed FUG-49" confirmation as a new goal, recursively.
+        fm = self._fm()
+        self.signal.user_says("base", id="base")
+        fm.tick()  # baseline
+        self.signal.user_says("build a dashboard", id="u1")
+        fm.tick()
+        self.assertEqual(len(self.tracker.created), 1)
+        filed = self.signal.sent[-1]
+        self.assertIn("Filed", filed)
+        # That confirmation is now in the group log. Another tick must ignore it.
+        self.tracker.created.clear()
+        fm.tick()
+        self.assertEqual(self.tracker.created, [])
+
+    def test_an_outbound_message_is_skipped_even_with_a_matching_author(self):
+        from issuefleet.sigbot import SignalMessage
+
+        fm = self._fm()
+        self.signal.user_says("base", id="base")
+        fm.tick()
+        self.signal.log.append(
+            SignalMessage(id="x1", text="goal: not a real goal",
+                          author="kevin", direction="out"))
+        fm.tick()
+        self.assertEqual(self.tracker.created, [])
+
+    def test_direction_defaults_to_inbound_when_absent(self):
+        # An older sigbot omits the field; the manager must not go deaf.
+        from issuefleet.sigbot import SignalMessage
+
+        m = SignalMessage.from_api({"id": 1, "text": "hi", "sender": "kevin"})
+        self.assertFalse(m.outbound)
+        m_out = SignalMessage.from_api({"id": 2, "text": "hi", "direction": "out"})
+        self.assertTrue(m_out.outbound)
+        self.assertEqual(m_out.author, "unknown")  # no sender on outgoing rows
+
     # -- question baseline -------------------------------------------------
 
     def _archive_question(self, rec, text):

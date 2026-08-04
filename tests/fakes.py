@@ -337,6 +337,8 @@ class FakeSignal:
         self.log: list[SignalMessage] = []
         self.svc = {"name": "fleet", "label": "fleet", "group_name": "Fleet Ops"}
         self.send_fail = 0  # countdown of send() calls to fail
+        self.reacted: list[tuple] = []  # (message_id, emoji) per react()
+        self.reactions_unsupported = False  # simulate an un-upgraded sigbot
 
     def service(self) -> dict:
         return dict(self.svc)
@@ -348,7 +350,12 @@ class FakeSignal:
 
             raise SignalError(500, "fake sigbot outage")
         self.sent.append(text)
-        self.log.append(SignalMessage(id=f"bot-{len(self.log) + 1}", text=text, author="fleet"))
+        # Mirror the real service: sigbot records NO sender/sender_name on its
+        # own sends, so author normalizes to "unknown" and only `direction`
+        # identifies them. The fake used to stamp author="fleet" here, which made
+        # the name-based filter look like it worked and hid a live loopback bug.
+        self.log.append(SignalMessage(id=f"bot-{len(self.log) + 1}", text=text,
+                                      author="unknown", direction="out"))
 
     def messages(self, after_id=None, limit: int = 50) -> list[SignalMessage]:
         # Mirror the sigbot contract: a bare call returns the most-recent N
@@ -360,6 +367,12 @@ class FakeSignal:
         return list(after[:limit])
 
     # -- test helper -------------------------------------------------------
+
+    def react(self, message_id, emoji: str) -> bool:
+        if self.reactions_unsupported:
+            return False
+        self.reacted.append((message_id, emoji))
+        return True
 
     def user_says(self, text: str, author: str = "kevin", id: str | None = None) -> str:
         mid = id or f"u{len(self.log) + 1}"

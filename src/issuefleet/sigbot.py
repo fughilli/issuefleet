@@ -52,7 +52,17 @@ class SignalMessage:
     id: Any
     text: str
     author: str
+    # "in" (someone else posted it) | "out" (the service posted it). The only
+    # reliable own-message signal: sigbot records no sender/sender_name at all on
+    # its own sends, so an author-name comparison can never identify them.
+    # Defaults to "in" so a service that omits the field behaves as before rather
+    # than going deaf.
+    direction: str = "in"
     raw: dict = field(default_factory=dict)
+
+    @property
+    def outbound(self) -> bool:
+        return self.direction.lower() == "out"
 
     @classmethod
     def from_api(cls, d: dict) -> "SignalMessage":
@@ -67,6 +77,7 @@ class SignalMessage:
             id=d.get("id"),
             text=first(_TEXT_KEYS),
             author=first(_AUTHOR_KEYS, default="unknown"),
+            direction=first(("direction",), default="in"),
             raw=d,
         )
 
@@ -85,6 +96,10 @@ class SignalClient(Protocol):
         """The group's message log, oldest-first. ``after_id`` pages
         incrementally past a previously seen id."""
 
+    def react(self, message_id: Any, emoji: str) -> bool:
+        """Put an emoji on a message. Best-effort: returns False (never raises)
+        when the service or client is too old to support reactions."""
+
 
 class SigbotClient:
     """Wraps ``sigbot_client.ServiceClient``, normalizing its errors to
@@ -96,6 +111,7 @@ class SigbotClient:
         self._base_url = base_url
         self._api_key = api_key
         self._client = service_client
+        self._warned_no_reactions = False
 
     def _svc(self):
         if self._client is None:
@@ -132,3 +148,43 @@ class SigbotClient:
             lambda: self._svc().messages(after_id=after_id, limit=limit), "messages()"
         )
         return [SignalMessage.from_api(m) for m in (raw or [])]
+
+    def react(self, message_id: Any, emoji: str) -> bool:
+        """Put an emoji on a message; True if it landed.
+
+        Deliberately best-effort and never raising. A reaction is a courtesy —
+        it must not be able to fail a tick or lose a message — and the capability
+        is split across two moving parts the operator upgrades independently:
+        sigbot-client >= 0.3.0 for the method, and a sigbot service new enough to
+        serve the route. Either being behind degrades to silence, not an error.
+
+        Reacting again replaces the previous emoji rather than adding a second,
+        which is Signal's own semantics — so ✅ after 👀 needs no explicit clear.
+        """
+        svc = self._svc() if self._client is not None else self._try_svc()
+        if svc is None or not hasattr(svc, "react"):
+            self._note_no_reactions("sigbot-client is older than 0.3.0")
+            return False
+        try:
+            svc.react(message_id, emoji)
+            return True
+        except Exception as e:
+            status = getattr(e, "status", None)
+            if status == 404:
+                self._note_no_reactions("this sigbot service has no reactions route")
+            else:
+                log.debug("reaction on %s failed: %s", message_id, e)
+            return False
+
+    def _try_svc(self):
+        try:
+            return self._svc()
+        except SignalError:
+            return None
+
+    def _note_no_reactions(self, why: str) -> None:
+        # Once per process: a per-message warning would be pure noise on a
+        # deployment that simply hasn't upgraded yet.
+        if not self._warned_no_reactions:
+            log.info("fleet manager: reactions unavailable (%s); continuing without them", why)
+            self._warned_no_reactions = True

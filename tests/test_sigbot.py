@@ -9,6 +9,7 @@ class FakeServiceClient:
     def __init__(self):
         self.sent: list[tuple[str, bool]] = []
         self.log: list[dict] = []
+        self.reacted: list[tuple] = []
         self.raise_on: dict[str, Exception] = {}  # method name -> exception
 
     def _maybe_raise(self, name):
@@ -22,6 +23,10 @@ class FakeServiceClient:
     def send(self, text, prefix=True):
         self._maybe_raise("send")
         self.sent.append((text, prefix))
+
+    def react(self, message_id, emoji):
+        self._maybe_raise("react")
+        self.reacted.append((message_id, emoji))
 
     def messages(self, after_id=None, limit=50):
         self._maybe_raise("messages")
@@ -99,6 +104,48 @@ class SigbotClientTest(unittest.TestCase):
         with self.assertRaises(SignalError) as cm:
             bare.service()
         self.assertIn("sigbot-client", cm.exception.message)
+
+
+class ReactionTest(unittest.TestCase):
+    """react() is a courtesy: it must never raise, because a failed
+    acknowledgement must not cost a message or fail a tick."""
+
+    def _client(self, svc):
+        return SigbotClient("http://x", "k", service_client=svc)
+
+    def test_react_passes_through(self):
+        svc = FakeServiceClient()
+        assert self._client(svc).react(7, "\N{EYES}") is True
+        self.assertEqual(svc.reacted, [(7, "\N{EYES}")])
+
+    def test_old_client_without_react_returns_false(self):
+        class Old:
+            def service(self):
+                return {}
+
+        self.assertIs(self._client(Old()).react(7, "\N{EYES}"), False)
+
+    def test_404_from_an_old_service_returns_false(self):
+        svc = FakeServiceClient()
+        svc.raise_on["react"] = SigbotApiErrorLike(404, "not found")
+        self.assertIs(self._client(svc).react(7, "\N{EYES}"), False)
+
+    def test_any_other_failure_also_returns_false(self):
+        svc = FakeServiceClient()
+        svc.raise_on["react"] = RuntimeError("connection reset")
+        self.assertIs(self._client(svc).react(7, "\N{EYES}"), False)
+
+    def test_the_unsupported_warning_is_logged_once(self):
+        class Old:
+            def service(self):
+                return {}
+
+        c = self._client(Old())
+        with self.assertLogs("issuefleet.sigbot", level="INFO") as cm:
+            c.react(1, "x")
+            c.react(2, "x")
+            c.react(3, "x")
+        self.assertEqual(len([r for r in cm.records if "unavailable" in r.getMessage()]), 1)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,6 @@
 #    bazel run @@//:requirements
 --index-url https://pypi.org/simple
 
-sigbot-client==0.2.5 \
-    --hash=sha256:71287b1d1c61cb748cd7a51e7f848330b2efdbf927ec461509c54d53c20c9bdc
+sigbot-client==0.3.0 \
+    --hash=sha256:9f2464c2c24a5f01b0c098bc96d003bea259fb57523c157d378c43de04cd4782
     # via -r requirements.in
