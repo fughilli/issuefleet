@@ -33,6 +33,7 @@ from pathlib import Path
 
 from issuefleet import MARKER_PREFIX, marker
 from issuefleet.advisor import BlockedQuestion
+from issuefleet.agent import AgentError, Tool, run_agent
 from issuefleet.mailbox import Mailbox
 from issuefleet.model import PHASE_ACTIVE
 from issuefleet.sigbot import SignalError
@@ -44,15 +45,50 @@ _PAGE = 100  # Signal messages fetched per page
 _MAX_DRAIN_PAGES = 50  # backstop against a pathological flood in one tick
 _ISSUE_KEY_RE = re.compile(r"^\s*([A-Za-z]{2,}-\d+)\b[:\-\s]*", re.ASCII)
 
+_AGENT_SYSTEM = """\
+You are the fleet manager for a team of autonomous coding agents. You speak to \
+one operator in a Signal group; each message you receive is from them, and your \
+reply is posted straight back into that group.
+
+Work out what the message actually is and respond to that. It is usually one of:
+
+- A question about the fleet or the work ("what's going on in the Splanc \
+project?"). Investigate with your tools, then answer in plain English. Do not \
+file it as an issue.
+- New work the operator wants done. Record it with file_goal.
+- An answer to a blocked worker's question. Deliver it with reply_to_worker; \
+check pending_escalations to see who is waiting and, if more than one worker is, \
+ask which they mean instead of guessing.
+- Ordinary conversation. Just reply.
+
+Investigate before you answer: a question about a project usually needs \
+list_workers and list_open_issues at minimum. Answer from what the tools return, \
+and say plainly when something isn't in them rather than guessing.
+
+Reply as a person would in a chat: a few sentences of prose, no headings, no \
+markdown tables, no bullet lists unless you are genuinely enumerating several \
+items. Lead with the answer. Mention issue keys and PR numbers inline. Keep it \
+short — the operator is on their phone.
+
+Act only on what was asked. Don't file goals, deliver replies, or take any other \
+action the operator didn't ask for, and don't re-verify work a tool already \
+confirmed. If a tool reports it did something, trust it and don't repeat that \
+fact back at length."""
+
 
 class FleetManager:
-    def __init__(self, config, tracker, signal, advisor, registry, *, clock=time.time):
+    def __init__(
+        self, config, tracker, signal, advisor, registry, *, clock=time.time, agent_key=None
+    ):
         self.cfg = config
         self.fm = config.fleet_manager
         self.tracker = tracker
         self.signal = signal
         self.advisor = advisor
         self.registry = registry
+        # An Anthropic key turns the inbound path agentic (see _handle_inbound).
+        # Absent, the deterministic dispatch below is the whole behaviour.
+        self.agent_key = agent_key
         self._clock = clock
         self.state_path = Path(config.state_dir) / "fleet_manager.json"
         self.state = self._load_state()
@@ -160,6 +196,22 @@ class FleetManager:
             batch = self.signal.messages(after_id=cursor, limit=_PAGE)
 
     def _handle_inbound(self, m, text: str) -> None:
+        """Route one inbound Signal message.
+
+        The manager is an agent: with an Anthropic key it hands the message to a
+        tool loop that can inspect the fleet and act, then replies in plain
+        English. _handle_scripted below is the fallback for a daemon with no key
+        — a dispatch table that can only file goals and relay replies, which is
+        why it answers a question by filing it as a ticket."""
+        if self.agent_key:
+            try:
+                self._handle_agentically(m, text)
+                return
+            except AgentError as e:
+                log.warning("fleet manager: agent failed (%s); using scripted dispatch", e)
+        self._handle_scripted(m, text)
+
+    def _handle_scripted(self, m, text: str) -> None:
         if text.lower().startswith("goal:"):
             self._file_goal(m, text[len("goal:"):].strip())
             return
@@ -180,6 +232,154 @@ class FleetManager:
             )
             return
         self._file_goal(m, text)
+
+    # ------------------------------------------------------- agent path
+
+    def _handle_agentically(self, m, text: str) -> None:
+        """Hand the message to the tool loop and post whatever it says back.
+
+        The agent decides what the message *is* — a question about the fleet, a
+        goal to record, an answer for a blocked worker — instead of us guessing
+        from prefixes. Its tools cover reads and the two write actions, so a
+        single turn can investigate and then act."""
+        reply = run_agent(
+            api_key=self.agent_key,
+            system=_AGENT_SYSTEM,
+            user_message=(
+                f"Message from {m.author or 'the operator'} in the Signal group:\n\n{text}"
+            ),
+            tools=self._agent_tools(m),
+        )
+        if reply:
+            self.signal.send(reply)
+
+    def _agent_tools(self, m) -> list:
+        """The manager's tool surface. Reads first, then the two actions that
+        change something — both of which the deterministic path also performs,
+        so the agent has no powers the scripted dispatch lacks."""
+
+        def list_workers(_):
+            workers = self.registry.all()
+            if not workers:
+                return "No workers are registered."
+            lines = []
+            for w in workers:
+                pending = [
+                    p for p in self.state["pending"] if p["issue_key"].lower() == w.issue_key.lower()
+                ]
+                lines.append(
+                    f"{w.issue_key} [{w.project}] phase={w.phase} "
+                    f"restarts={w.restarts} branch={w.branch} "
+                    f"PR={('#' + str(w.pr_number)) if w.pr_number else 'none'} "
+                    f"awaiting_human={'yes' if pending else 'no'} — {w.issue_title}"
+                )
+            return "\n".join(lines)
+
+        def list_open_issues(args):
+            ref = str(args.get("project") or self.fm.board_project)
+            issues = self.tracker.open_issues_in_project(ref)
+            if not issues:
+                return f"No open issues in {ref!r}."
+            claimed = {w.issue_key.lower() for w in self.registry.all()}
+            return "\n".join(
+                f"{i.key}: {i.title} ({i.state_name})"
+                f"{' [claimed by a worker]' if i.key.lower() in claimed else ''}"
+                for i in issues[:100]
+            )
+
+        def get_issue(args):
+            key = str(args.get("issue_key") or "").strip()
+            # The tracker has no by-key lookup, so scan the boards we know: the
+            # goals board plus every configured project (where worker issues live).
+            refs = [self.fm.board_project] + [p.linear_project for p in self.cfg.projects]
+            issue = None
+            for ref in refs:
+                try:
+                    found = [i for i in self.tracker.open_issues_in_project(ref)
+                             if i.key.lower() == key.lower()]
+                except Exception:
+                    continue  # a bad project ref shouldn't sink the whole lookup
+                if found:
+                    issue = found[0]
+                    break
+            if issue is None:
+                return (
+                    f"No open issue {key!r} in the goals board or any configured project. "
+                    "It may be closed, or in a project this fleet doesn't watch."
+                )
+            return (
+                f"{issue.key}: {issue.title}\nstate: {issue.state_name}\nurl: {issue.url}\n\n"
+                f"{getattr(issue, 'description', '') or '(no description)'}"
+            )
+
+        def pending_escalations(_):
+            pending = self.state["pending"]
+            if not pending:
+                return "No workers are waiting on the human."
+            return "\n".join(f"{p['issue_key']}: {p['question']}" for p in pending)
+
+        def file_goal(args):
+            body = str(args.get("text") or "").strip()
+            if not body:
+                return "Refused: a goal needs text."
+            before = self.tracker.find_issue_by_marker(MARKER_PREFIX + f"goal-{m.id}")
+            self._file_goal(m, body)  # sends its own Signal confirmation
+            after = self.tracker.find_issue_by_marker(MARKER_PREFIX + f"goal-{m.id}")
+            if after is None or after is before:
+                return "Filing the goal failed; the operator has been told."
+            return f"Filed {after.key} on the board. Do not repeat this in your reply."
+
+        def reply_to_worker(args):
+            key = str(args.get("issue_key") or "").strip()
+            body = str(args.get("text") or "").strip()
+            if not key or not body:
+                return "Refused: reply_to_worker needs both issue_key and text."
+            rec = self._worker_for_key(key)
+            if rec is None:
+                return f"{key} has no active worker; nothing was delivered."
+            if not self._deliver_to_worker(rec, m.author or "human (via Signal)", body):
+                return f"Couldn't reach {key}'s worker (worktree gone); nothing was delivered."
+            self.state["pending"] = [
+                p for p in self.state["pending"] if p["issue_key"].lower() != key.lower()
+            ]
+            return f"Delivered to {key}'s worker and cleared its pending escalation."
+
+        _KEY = {
+            "type": "object",
+            "properties": {"issue_key": {"type": "string", "description": "e.g. FUG-12"}},
+            "required": ["issue_key"],
+        }
+        return [
+            Tool("list_workers", "Every registered worker: issue, project, phase, turn, "
+                 "branch, PR, and whether it is waiting on a human answer.",
+                 {"type": "object", "properties": {}}, list_workers),
+            Tool("list_open_issues", "Open issues in a Linear project. Omit 'project' for the "
+                 "top-level goals board. Marks which are already claimed by a worker.",
+                 {"type": "object",
+                  "properties": {"project": {"type": "string",
+                                             "description": "Linear project name; "
+                                                            "defaults to the goals board"}}},
+                 list_open_issues),
+            Tool("get_issue", "Full title, state, URL and description for one issue.",
+                 _KEY, get_issue),
+            Tool("pending_escalations", "Questions from blocked workers currently awaiting "
+                 "a human answer.", {"type": "object", "properties": {}}, pending_escalations),
+            Tool("file_goal", "Record a NEW piece of work as an issue on the goals board. "
+                 "Only for genuine new work the operator wants done — never to record a "
+                 "question, and never for work an open issue already covers.",
+                 {"type": "object",
+                  "properties": {"text": {"type": "string",
+                                          "description": "The goal, in the operator's words"}},
+                  "required": ["text"]},
+                 file_goal),
+            Tool("reply_to_worker", "Deliver an answer into a blocked worker's mailbox, "
+                 "unblocking it. Use when the operator is answering a pending question.",
+                 {"type": "object",
+                  "properties": {"issue_key": {"type": "string"},
+                                 "text": {"type": "string"}},
+                  "required": ["issue_key", "text"]},
+                 reply_to_worker),
+        ]
 
     @staticmethod
     def _leading_issue_key(text: str) -> str | None:

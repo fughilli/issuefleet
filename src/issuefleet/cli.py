@@ -95,8 +95,13 @@ def build_fleet_manager(cfg: Config, reconciler: Reconciler):
 
     api_key, _ = creds.resolve_sigbot_key(cfg)  # raises CredentialError if absent
     signal = SigbotClient(fm.base_url, api_key)
-    advisor = build_advisor(fm.advisor, creds.resolve_anthropic_key(cfg))
-    return FleetManager(cfg, reconciler.tracker, signal, advisor, reconciler.registry)
+    anthropic_key = creds.resolve_anthropic_key(cfg)
+    advisor = build_advisor(fm.advisor, anthropic_key)
+    # The same key makes the inbound Signal path agentic; without it the manager
+    # falls back to its deterministic dispatch (see FleetManager._handle_inbound).
+    return FleetManager(
+        cfg, reconciler.tracker, signal, advisor, reconciler.registry, agent_key=anthropic_key
+    )
 
 
 class DaemonLock:

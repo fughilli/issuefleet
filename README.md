@@ -229,12 +229,21 @@ reconcile loop in the same `issuefleet run` daemon (nothing containerized — it
 needs broad, credentialed, cross-project reach, exactly the powers the
 architecture keeps *out* of workers), and does three things each tick:
 
-- **Records goals.** A message you send in the group becomes a new issue on a
-  dedicated top-level board (`board_project` / `board_team`). With
-  `assign_goals = true` it's assigned to the fleet's own identity, so under the
-  `agent` claim strategy a worker picks it up automatically. It replies with
-  the filed key/URL. (Prefix a message with `goal:` to force goal-filing even
-  when a question is pending.)
+- **Answers you.** With an Anthropic key it is itself an agent: your message goes
+  to a tool loop that can inspect the fleet (`list_workers`, `list_open_issues`,
+  `get_issue`, `pending_escalations`) and act (`file_goal`, `reply_to_worker`),
+  then replies in plain English. So "what's going on in Splanc?" gets *answered*;
+  "make the HITL tests faster" gets filed as a goal; an answer to a blocked
+  worker gets delivered. It works out which from the message, not from prefixes.
+  Goals land on a dedicated top-level board (`board_project` / `board_team`);
+  with `assign_goals = true` they're assigned to the fleet's own identity, so
+  under the `agent` claim strategy a worker picks them up automatically.
+
+  **Without a key it degrades to a dispatch table** — `goal:`-prefixed and bare
+  messages are filed as issues, `FUG-12:`-prefixed ones are relayed to that
+  worker, and there is no way to *ask* it anything (a question becomes a ticket).
+  That fallback is also what runs if the API call fails, so a flaky key never
+  drops a message.
 - **Unblocks or escalates workers.** When a worker calls `agentctl ask`, the
   manager triages the question against the worker's ticket and the top-level
   board. The **advisor** decides: `conservative` (default) always escalates;
@@ -262,8 +271,10 @@ Setup:
 2. Create the top-level board as a Linear project and set `board_project` /
    `board_team`. To have recorded goals *worked* by the fleet, also list that
    project under `[[projects]]` with `claim.strategy = "agent"`.
-3. Set `[fleet_manager] enabled = true` and (optionally) `advisor = "claude"`
-   with an `ANTHROPIC_API_KEY` (or `~/.config/issuefleet/anthropic.key`).
+3. Set `[fleet_manager] enabled = true`. Provide an `ANTHROPIC_API_KEY` (or
+   `~/.config/issuefleet/anthropic.key`) to get the agentic manager above — the
+   same key also enables `advisor = "claude"` for worker-question triage. Both
+   fall back to their conservative, non-LLM behaviour without it.
 4. `issuefleet doctor` verifies the key, the client, and the advisor; once the
    daemon is up, `issuefleet fleet` shows the Signal cursor and any pending
    escalations.

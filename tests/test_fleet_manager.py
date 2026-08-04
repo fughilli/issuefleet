@@ -44,7 +44,7 @@ class FleetManagerTest(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def _fm(self, advisor=None, clock=None):
+    def _fm(self, advisor=None, clock=None, agent_key=None):
         return FleetManager(
             self.cfg,
             self.tracker,
@@ -52,6 +52,7 @@ class FleetManagerTest(unittest.TestCase):
             advisor or ConservativeAdvisor(),
             self.registry,
             clock=clock or (lambda: 0.0),
+            agent_key=agent_key,
         )
 
     def _worker(self, key="FUG-9", title="add caching", pr_number=None):
@@ -124,6 +125,130 @@ class FleetManagerTest(unittest.TestCase):
         fm.tick()
         self.assertEqual(len(self.tracker.created), 1)
         self.assertEqual(self.tracker.created[0]["title"], "ship it faster")
+
+    # -- agentic inbound path ---------------------------------------------
+
+    def _ask_agent(self, fm, text, fake_run_agent):
+        """Drive one inbound message through the agent path."""
+        from unittest import mock
+
+        fm.state["signal_cursor"] = "base"
+        self.signal.user_says("base-msg", id="base")
+        self.signal.user_says(text, id="q1")
+        with mock.patch("issuefleet.fleet_manager.run_agent", fake_run_agent):
+            fm.tick()
+
+    def test_a_question_is_answered_not_filed_as_a_ticket(self):
+        # The regression: "What's going on in the Splanc project?" used to fall
+        # through the dispatch table into _file_goal.
+        seen = {}
+
+        def fake_run_agent(**kw):
+            seen.update(kw)
+            return "Two agents are running on Splanc; FUG-43 has PR #26 open."
+
+        fm = self._fm(agent_key="sk-test")
+        self._ask_agent(fm, "What's going on in the Splanc project?", fake_run_agent)
+        self.assertEqual(self.tracker.created, [])  # nothing filed
+        self.assertIn("FUG-43 has PR #26 open.", self.signal.sent[-1])
+        self.assertIn("Splanc", seen["user_message"])
+        self.assertIn("list_workers", [t.name for t in seen["tools"]])
+
+    def test_agent_failure_falls_back_to_scripted_dispatch(self):
+        from issuefleet.agent import AgentError
+
+        def boom(**kw):
+            raise AgentError("no key / API down")
+
+        fm = self._fm(agent_key="sk-test")
+        self._ask_agent(fm, "goal: ship it faster", boom)
+        # The scripted path still recorded the goal rather than dropping it.
+        self.assertEqual(len(self.tracker.created), 1)
+        self.assertEqual(self.tracker.created[0]["title"], "ship it faster")
+
+    def test_without_a_key_the_scripted_dispatch_runs(self):
+        def never(**kw):
+            raise AssertionError("agent must not run without a key")
+
+        fm = self._fm()  # no agent_key
+        self._ask_agent(fm, "goal: ship it faster", never)
+        self.assertEqual(len(self.tracker.created), 1)
+
+    def test_file_goal_tool_files_and_reports_the_key(self):
+        fm = self._fm(agent_key="sk-test")
+
+        class M:
+            id = "m1"
+            author = "kevin"
+
+        tools = {t.name: t for t in fm._agent_tools(M())}
+        out = tools["file_goal"].run({"text": "make HITL tests faster"})
+        self.assertEqual(len(self.tracker.created), 1)
+        self.assertIn("Filed", out)
+
+    def test_reply_to_worker_tool_delivers_and_clears_pending(self):
+        rec = self._worker(key="FUG-9")
+        fm = self._fm(agent_key="sk-test")
+        fm.state["pending"].append(
+            {"msg_id": "x", "issue_id": rec.issue_id, "issue_key": "FUG-9", "question": "?"}
+        )
+
+        class M:
+            id = "m1"
+            author = "kevin"
+
+        tools = {t.name: t for t in fm._agent_tools(M())}
+        out = tools["reply_to_worker"].run({"issue_key": "FUG-9", "text": "use Redis"})
+        self.assertIn("Delivered", out)
+        self.assertEqual(fm.state["pending"], [])
+        inbox = Mailbox(Path(rec.worktree) / ".agent" / "mailbox").pending_inbox()
+        self.assertEqual([m.payload["text"] for m in inbox], ["use Redis"])
+
+    def test_reply_to_worker_tool_reports_an_unknown_key(self):
+        fm = self._fm(agent_key="sk-test")
+
+        class M:
+            id = "m1"
+            author = "kevin"
+
+        tools = {t.name: t for t in fm._agent_tools(M())}
+        self.assertIn("no active worker", tools["reply_to_worker"].run(
+            {"issue_key": "FUG-404", "text": "hi"}
+        ))
+
+    def test_list_workers_tool_flags_who_is_awaiting_the_human(self):
+        self._worker(key="FUG-9")
+        fm = self._fm(agent_key="sk-test")
+        fm.state["pending"].append(
+            {"msg_id": "x", "issue_id": "i", "issue_key": "FUG-9", "question": "?"}
+        )
+
+        class M:
+            id = "m1"
+            author = "kevin"
+
+        tools = {t.name: t for t in fm._agent_tools(M())}
+        out = tools["list_workers"].run({})
+        self.assertIn("FUG-9", out)
+        self.assertIn("awaiting_human=yes", out)
+
+    def test_get_issue_tool_searches_worker_projects_not_just_the_board(self):
+        # Worker issues live in a configured project ("P"), not the goals board.
+        self.tracker.add_issue(
+            make_issue(key="FUG-9", id="issue-FUG-9", title="add caching",
+                       description="Use Redis.", project_id="P")
+        )
+        fm = self._fm(agent_key="sk-test")
+
+        class M:
+            id = "m1"
+            author = "kevin"
+
+        tools = {t.name: t for t in fm._agent_tools(M())}
+        out = tools["get_issue"].run({"issue_key": "FUG-9"})
+        self.assertIn("add caching", out)
+        self.assertIn("Use Redis.", out)  # the description
+        self.assertIn("No open issue", tools["get_issue"].run({"issue_key": "FUG-404"}))
 
     def test_goal_filing_is_deduped_by_marker(self):
         fm = self._fm()
