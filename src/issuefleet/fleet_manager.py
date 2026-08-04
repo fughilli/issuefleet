@@ -279,6 +279,33 @@ class FleetManager:
         if reply:
             self.signal.send(reply)
 
+    def _project_names(self) -> list[str]:
+        """Every name the agent may legitimately pass as `project`, board first."""
+        names = [self.fm.board_project]
+        for p in self.cfg.projects:
+            names += [n for n in (p.linear_project, p.name) if n not in names]
+        return names
+
+    def _resolve_project_ref(self, ref) -> str:
+        """Map whatever the agent passed onto a Linear project name.
+
+        Two namespaces collide here: the registry (and so list_workers, and the
+        `issuefleet` CLI) speaks config names — 'splanc' — while the tracker keys
+        on Linear project names — 'Splanc'. An agent that reads list_workers and
+        feeds the project straight into list_open_issues is doing the obvious
+        thing, and used to get 'no Linear project named splanc' for its trouble.
+        Accept either spelling, case-insensitively, instead of making the model
+        guess which namespace a given tool wants.
+        """
+        r = str(ref or "").strip()
+        if not r:
+            return self.fm.board_project
+        lowered = r.lower()
+        for p in self.cfg.projects:
+            if lowered in (p.name.lower(), p.linear_project.lower()):
+                return p.linear_project
+        return r  # the board, a UUID, or something the tracker will reject
+
     def _agent_tools(self, m) -> list:
         """The manager's tool surface. Reads first, then the two actions that
         change something — both of which the deterministic path also performs,
@@ -302,8 +329,13 @@ class FleetManager:
             return "\n".join(lines)
 
         def list_open_issues(args):
-            ref = str(args.get("project") or self.fm.board_project)
-            issues = self.tracker.open_issues_in_project(ref)
+            ref = self._resolve_project_ref(args.get("project"))
+            try:
+                issues = self.tracker.open_issues_in_project(ref)
+            except Exception as e:
+                return (
+                    f"{e}. Valid projects: {', '.join(self._project_names())}."
+                )
             if not issues:
                 return f"No open issues in {ref!r}."
             claimed = {w.issue_key.lower() for w in self.registry.all()}
@@ -379,12 +411,19 @@ class FleetManager:
             Tool("list_workers", "Every registered worker: issue, project, phase, turn, "
                  "branch, PR, and whether it is waiting on a human answer.",
                  {"type": "object", "properties": {}}, list_workers),
-            Tool("list_open_issues", "Open issues in a Linear project. Omit 'project' for the "
-                 "top-level goals board. Marks which are already claimed by a worker.",
+            Tool("list_open_issues",
+                 "Open issues in a project. Omit 'project' for the top-level goals "
+                 "board. Marks which are already claimed by a worker.",
                  {"type": "object",
-                  "properties": {"project": {"type": "string",
-                                             "description": "Linear project name; "
-                                                            "defaults to the goals board"}}},
+                  "properties": {"project": {
+                      "type": "string",
+                      # Enumerated rather than described: the model was passing
+                      # the config name it saw in list_workers, which the tracker
+                      # doesn't know. Both spellings are accepted now, but naming
+                      # them removes the guess entirely.
+                      "enum": self._project_names(),
+                      "description": "Which project's issues to list; defaults to "
+                                     "the goals board"}}},
                  list_open_issues),
             Tool("get_issue", "Full title, state, URL and description for one issue.",
                  _KEY, get_issue),

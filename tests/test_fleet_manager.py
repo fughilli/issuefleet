@@ -367,6 +367,47 @@ class FleetManagerTest(unittest.TestCase):
         self.assertIn("FUG-9", out)
         self.assertIn("awaiting_human=yes", out)
 
+    def test_list_open_issues_accepts_the_config_name_not_just_the_linear_one(self):
+        # The live bug: list_workers reports the config name ("p"), the tracker
+        # keys on the Linear name ("P"), and the agent fed one into the other.
+        self.tracker.add_issue(
+            make_issue(key="FUG-9", id="issue-FUG-9", title="add caching", project_id="P"))
+        fm = self._fm(agent_key="sk-test")
+
+        class M:
+            id = "m1"
+            author = "kevin"
+
+        tools = {t.name: t for t in fm._agent_tools(M())}
+        for spelling in ("p", "P", "  p  "):
+            self.assertIn("add caching", tools["list_open_issues"].run({"project": spelling}),
+                          f"failed for {spelling!r}")
+
+    def test_list_open_issues_defaults_to_the_goals_board(self):
+        self.tracker.add_issue(
+            make_issue(key="FUG-2", id="issue-FUG-2", title="a goal", project_id="Fleet"))
+        fm = self._fm(agent_key="sk-test")
+
+        class M:
+            id = "m1"
+            author = "kevin"
+
+        tools = {t.name: t for t in fm._agent_tools(M())}
+        self.assertIn("a goal", tools["list_open_issues"].run({}))
+
+    def test_the_project_argument_is_enumerated_for_the_model(self):
+        fm = self._fm(agent_key="sk-test")
+
+        class M:
+            id = "m1"
+            author = "kevin"
+
+        tools = {t.name: t for t in fm._agent_tools(M())}
+        enum = tools["list_open_issues"].input_schema["properties"]["project"]["enum"]
+        self.assertIn("Fleet", enum)   # the goals board
+        self.assertIn("P", enum)       # Linear name
+        self.assertIn("p", enum)       # config name
+
     def test_get_issue_tool_searches_worker_projects_not_just_the_board(self):
         # Worker issues live in a configured project ("P"), not the goals board.
         self.tracker.add_issue(
