@@ -12,6 +12,10 @@ bazel_dep(name = "rules_python", version = "2.2.0")
 # The devshell lives in flake.nix instead.
 bazel_dep(name = "rules_nixpkgs_core", version = "0.13.0")
 
+# Lock regeneration only (`bazel run //:requirements`), never a build input,
+# so it stays a dev dependency and out of any consumer's graph.
+bazel_dep(name = "rules_uv", version = "0.89.2", dev_dependency = True)
+
 PYTHON_VERSION = "3.11"
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
@@ -20,7 +24,30 @@ python.toolchain(
     python_version = PYTHON_VERSION,
 )
 
-# The runtime core is stdlib-only by design (a zero-install daemon is a
-# feature — see AGENT_BUILD_PROMPT.md §2), so there is no pip graph at all.
-# If dev-only deps ever become necessary, add rules_uv + a requirements pair
-# per the bazel-polyglot-nix pattern.
+# The runtime CORE is stdlib-only by design (a zero-install daemon is a real
+# feature — see AGENT_BUILD_PROMPT.md §2), and stays that way: `bin/issuefleet`
+# is nothing but PYTHONPATH=src, and the whole test graph depends on
+# //src/issuefleet — the library — which pulls in nothing.
+#
+# The single exception is the fleet manager's sigbot-client, wired only onto
+# //src/issuefleet:cli, the Bazel entrypoint. sigbot.py imports it lazily, so
+# the dep is inert until [fleet_manager] is enabled; it exists so `bazel run
+# //:issuefleet -- doctor` can check the live Signal path on a host that has no
+# pip-installed anything (and, on macOS, no Python 3.11 at all). The deployed
+# container is a separate path — it runs bin/issuefleet against the image's own
+# `pip install`, see deploy/docker/Dockerfile.
+#
+# requirements.in is the intent, requirements_lock.txt the hash-pinned result.
+# Regenerate with `bazel run //:requirements`; `//:requirements_test` fails if
+# the two ever drift.
+#
+# The hub is named issuefleet_pypi, not the obvious "pypi": rules_python
+# reserves that name and warns that a future release will rewrite it to exactly
+# this. Adopting it now costs one label and avoids the churn.
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "issuefleet_pypi",
+    python_version = PYTHON_VERSION,
+    requirements_lock = "//:requirements_lock.txt",
+)
+use_repo(pip, "issuefleet_pypi")

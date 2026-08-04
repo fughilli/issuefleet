@@ -225,8 +225,9 @@ def _check_fleet_manager(cfg: Config) -> list[Check]:
         import sigbot_client  # noqa: F401
         out.append(Check(OK, "sigbot-client", "installed"))
     except ImportError:
-        out.append(Check(FAIL, "sigbot-client", "not installed — `pip install sigbot-client` "
-                         "in the daemon environment"))
+        out.append(Check(FAIL, "sigbot-client", "not importable — run via `bazel run "
+                         "//:issuefleet` (the lock provides it), or `pip install "
+                         "sigbot-client` into this interpreter"))
     if fm.advisor == "claude":
         if creds.resolve_anthropic_key(cfg):
             out.append(Check(OK, "advisor key", "Anthropic key resolves"))

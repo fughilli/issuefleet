@@ -11,8 +11,11 @@ time.
 Why wrap rather than hand-roll (as we did for Linear/GitHub over ``httpx.py``):
 sigbot already ships a stdlib-only client, so wrapping it keeps us correct
 against the live service instead of re-deriving its endpoints by guesswork. The
-import is lazy, so the Bazel test graph and the offline test suite stay
-dependency-free; only the live daemon needs ``sigbot-client`` installed.
+import is lazy, so the offline test suite stays dependency-free — the tests
+depend on ``//src/issuefleet``, the library, which carries no pip deps at all.
+The wheel hangs off ``//src/issuefleet:cli`` (the Bazel entrypoint) via the
+requirements lock, so only the bare ``bin/issuefleet`` wrapper needs it
+installed by hand.
 """
 
 from __future__ import annotations
@@ -101,8 +104,9 @@ class SigbotClient:
             except ImportError as e:
                 raise SignalError(
                     None,
-                    "sigbot-client is not installed in the daemon environment; "
-                    "`pip install sigbot-client` (see the fleet-manager setup docs)",
+                    "sigbot-client is not importable in this interpreter; run via "
+                    "`bazel run //:issuefleet` (the requirements lock provides it) "
+                    "or `pip install sigbot-client` (see the fleet-manager setup docs)",
                 ) from e
             self._client = ServiceClient(self._base_url, api_key=self._api_key)
         return self._client

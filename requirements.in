@@ -1,0 +1,10 @@
+# The fleet manager's Signal transport, and the only non-stdlib runtime
+# dependency in the project — read the note in MODULE.bazel before adding a
+# second one. Optional in practice: sigbot.py imports it lazily, so nothing
+# loads it until [fleet_manager] is enabled.
+#
+# The floor is the API src/issuefleet/sigbot.py binds to: ServiceClient(
+# base_url, api_key=), .service(), .send(text, prefix=), .messages(after_id=,
+# limit=). requirements_lock.txt pins the exact version and its hash;
+# regenerate it with `bazel run //:requirements` after editing this file.
+sigbot-client>=0.2.5

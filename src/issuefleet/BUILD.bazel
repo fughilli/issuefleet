@@ -1,3 +1,4 @@
+load("@issuefleet_pypi//:requirements.bzl", "requirement")
 load("@rules_python//python:defs.bzl", "py_binary", "py_library")
 
 py_library(
@@ -12,5 +13,12 @@ py_binary(
     srcs = ["cli.py"],
     main = "cli.py",
     visibility = ["//visibility:public"],
-    deps = [":issuefleet"],
+    deps = [
+        ":issuefleet",
+        # The fleet manager's Signal transport. Deliberately here and not on
+        # :issuefleet, so the test graph and every other consumer of the
+        # library stay stdlib-only; sigbot.py imports it lazily, so a disabled
+        # [fleet_manager] never loads it. See MODULE.bazel.
+        requirement("sigbot-client"),
+    ],
 )

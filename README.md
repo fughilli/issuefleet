@@ -251,8 +251,14 @@ Setup:
 
 1. Stand up a sigbot service for one Signal group and mint an API key; write it
    to `~/.config/issuefleet/sigbot.key` (chmod 600) or set
-   `$ISSUEFLEET_SIGBOT_API_KEY`. Install the client in the daemon environment:
-   `pip install sigbot-client` (the deploy image already does).
+   `$ISSUEFLEET_SIGBOT_API_KEY`. Set `base_url` to the service's URL — nothing
+   validates it offline (the sigbot calls are live-only, so `doctor` can't
+   catch a placeholder), and under the compose stack the daemon shares the
+   tailscale sidecar's network namespace, so `127.0.0.1` there is *not* your
+   host. The client comes from the build: `bazel run //:issuefleet` gets
+   `sigbot-client` from the pinned requirements lock, and the deploy image
+   `pip install`s it. Only the bare `bin/issuefleet` wrapper — deliberately
+   stdlib-only — needs it installed by hand.
 2. Create the top-level board as a Linear project and set `board_project` /
    `board_team`. To have recorded goals *worked* by the fleet, also list that
    project under `[[projects]]` with `claim.strategy = "agent"`.
@@ -500,8 +506,17 @@ read `deploy/docker/README.md` before using it.
 ```sh
 bazelisk test //tests:all     # hermetic Python 3.11 toolchain, no system deps
 bazelisk run //:issuefleet -- doctor
+bazelisk run //:requirements  # regenerate requirements_lock.txt from requirements.in
 nix develop                   # optional devshell: bazelisk, python, tmux
 ```
+
+`bazelisk run //:issuefleet` is the most self-sufficient way to run the daemon:
+it brings its own Python 3.11 *and* the one non-stdlib runtime dependency
+(`sigbot-client`, for the fleet manager), so it works on a host with neither.
+The core stays stdlib-only — that dep hangs off `//src/issuefleet:cli` alone,
+never the library, so `bin/issuefleet` and the test graph are untouched. Edit
+`requirements.in` and re-run `//:requirements` to move the pin;
+`//:requirements_test` fails if the lock drifts.
 
 Layout: `src/issuefleet/` (core: mailbox, turns, reconcile, clients, ports),
 `src/issuefleet/agent_runtime/` (the code staged into each worktree's
