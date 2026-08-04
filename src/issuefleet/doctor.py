@@ -208,6 +208,34 @@ def _check_dashboard(cfg: Config) -> list[Check]:
                   "loopback + a private tunnel (it can stop workers)")]
 
 
+def _check_fleet_manager(cfg: Config) -> list[Check]:
+    fm = cfg.fleet_manager
+    if not fm.enabled:
+        return [Check(OK, "fleet manager", "disabled")]
+    out = [Check(OK, "fleet manager", f"enabled — board {fm.board_project!r} "
+                 f"(team {fm.board_team!r}), advisor={fm.advisor}")]
+    try:
+        key, src = creds.resolve_sigbot_key(cfg)
+        out.append(Check(OK, "sigbot key", f"resolves ({src})"))
+    except creds.CredentialError as e:
+        out.append(Check(FAIL, "sigbot key", str(e)))
+    # The sigbot integration and the Anthropic advisor call are live-only; the
+    # daemon speaks to them at runtime. Flag what's needed, don't dial out here.
+    try:
+        import sigbot_client  # noqa: F401
+        out.append(Check(OK, "sigbot-client", "installed"))
+    except ImportError:
+        out.append(Check(FAIL, "sigbot-client", "not installed — `pip install sigbot-client` "
+                         "in the daemon environment"))
+    if fm.advisor == "claude":
+        if creds.resolve_anthropic_key(cfg):
+            out.append(Check(OK, "advisor key", "Anthropic key resolves"))
+        else:
+            out.append(Check(WARN, "advisor key", "advisor=claude but no ANTHROPIC_API_KEY / "
+                             "~/.config/issuefleet/anthropic.key — will escalate everything"))
+    return out
+
+
 def _check_linear(cfg: Config, tracker) -> list[Check]:
     out = []
     if creds.linear_uses_app_token(cfg):
@@ -381,6 +409,7 @@ def run_doctor(
     checks += _check_dirs(cfg)
     checks += _check_webhooks(cfg)
     checks += _check_dashboard(cfg)
+    checks += _check_fleet_manager(cfg)
     linear_checks = _check_linear(cfg, tracker)
     checks += linear_checks
     checks += _check_github(cfg, git, forges)

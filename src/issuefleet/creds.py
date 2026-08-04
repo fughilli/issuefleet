@@ -100,6 +100,15 @@ def resolve_sigbot_key(cfg: Config) -> tuple[str, str]:
     )
 
 
+def resolve_anthropic_key(cfg: Config) -> str | None:
+    """Optional Anthropic API key for the fleet manager's 'claude' advisor.
+    Env-then-file; returns None when absent (the advisor falls back to
+    escalate-everything). Not resolved from the config file (a secret)."""
+    return resolve_optional(
+        "ANTHROPIC_API_KEY", Path("~/.config/issuefleet/anthropic.key").expanduser()
+    )
+
+
 def github_auth_mode(cfg: Config) -> str:
     """'app' or 'token'. auto = app when the App ID is configured and its
     private key file exists, else fall back to a PAT."""

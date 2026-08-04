@@ -1,6 +1,7 @@
 """Doctor and dry-run plan, offline via injected fakes."""
 
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -176,6 +177,47 @@ class CliParserTest(unittest.TestCase):
         self.assertTrue(getattr(a, "verbose", False))
         a = self.parse(["logs", "FUG-1", "-f"])
         self.assertTrue(a.follow)
+
+    def test_fleet_subcommand_parses(self):
+        self.assertEqual(self.parse(["fleet"]).cmd, "fleet")
+
+
+class FleetManagerCheckTest(unittest.TestCase):
+    def _cfg(self, **fm):
+        base = {"enabled": True, "base_url": "http://s:8100",
+                "board_project": "Fleet", "board_team": "FUG"}
+        base.update(fm)
+        return config.parse({"projects": [{"name": "x", "linear_project": "X",
+                                           "repo": "/tmp/x", "claim": {"strategy": "agent"}}],
+                             "fleet_manager": base})
+
+    def test_disabled_is_ok(self):
+        from issuefleet.doctor import _check_fleet_manager
+
+        cfg = config.parse({"projects": [{"name": "x", "linear_project": "X",
+                                          "repo": "/tmp/x", "claim": {"strategy": "agent"}}]})
+        checks = _check_fleet_manager(cfg)
+        self.assertEqual([c.status for c in checks], ["ok"])
+
+    def test_enabled_flags_missing_sigbot_key(self):
+        from unittest import mock
+
+        from issuefleet.doctor import _check_fleet_manager
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            checks = _check_fleet_manager(self._cfg())
+        key_check = [c for c in checks if c.label == "sigbot key"][0]
+        self.assertEqual(key_check.status, "fail")
+
+    def test_claude_advisor_without_key_warns(self):
+        from unittest import mock
+
+        from issuefleet.doctor import _check_fleet_manager
+
+        with mock.patch.dict(os.environ, {"ISSUEFLEET_SIGBOT_API_KEY": "sb_x"}, clear=True):
+            checks = _check_fleet_manager(self._cfg(advisor="claude"))
+        adv = [c for c in checks if c.label == "advisor key"][0]
+        self.assertEqual(adv.status, "warn")
 
 
 class WorkerRuntimeCheckTest(unittest.TestCase):
