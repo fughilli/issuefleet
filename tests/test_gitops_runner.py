@@ -3,6 +3,7 @@ and real tmux — the two host tools this container does have."""
 
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -311,6 +312,44 @@ class GitopsTest(unittest.TestCase):
             ensure_checkout(self.git, self._project(broken, git_url=str(self.origin)))
 
 
+class ScriptWrapperTest(unittest.TestCase):
+    """Pure-string tests for the script(1) dialect choice — deliberately NOT in
+    TmuxRunnerTest, which is skipped wherever tmux is absent (including the
+    bazel sandbox). The macOS `illegal option -- c` bug shipped precisely
+    because the only coverage of this code path was inside that skipped class.
+    """
+
+    def test_script_wrapper_matches_the_platform_dialect(self):
+        from issuefleet import runner as runner_mod
+
+        cmd = ["launcher", "-w", "/some path/wt", "run"]
+        log_path = Path("/logs/w.log")
+        real = sys.platform
+        try:
+            runner_mod.sys.platform = "darwin"
+            bsd = runner_mod._script_wrapper(cmd, log_path)
+            runner_mod.sys.platform = "linux"
+            gnu = runner_mod._script_wrapper(cmd, log_path)
+        finally:
+            runner_mod.sys.platform = real
+        # BSD: file first, command as trailing argv, never -c.
+        self.assertNotIn(" -c ", bsd)
+        self.assertIn("script -q -e -t 0 /logs/w.log launcher", bsd)
+        # -t 0 is load-bearing: BSD script's default flush interval is 30s, so
+        # without it a live worker's pane log reads empty while it works.
+        self.assertIn("-t 0", bsd)
+        # util-linux: -c with the whole command as ONE quoted argument.
+        self.assertIn("-c ", gnu)
+        # ...and -f, for the same reason BSD needs -t 0: util-linux buffers
+        # until the child exits, so without it a live worker's pane log is
+        # empty the whole time it is working. CI caught this one.
+        self.assertIn(" -f ", gnu)
+        self.assertTrue(gnu.rstrip().endswith("/logs/w.log"))
+        # Either way the space in the worktree path survives quoting.
+        for form in (bsd, gnu):
+            self.assertIn("some path", form)
+
+
 @unittest.skipIf(shutil.which("tmux") is None, "tmux not available")
 class TmuxRunnerTest(unittest.TestCase):
     def setUp(self):
@@ -340,6 +379,25 @@ class TmuxRunnerTest(unittest.TestCase):
     def tearDown(self):
         self.runner.stop(self.rec)
         self.tmp.cleanup()
+
+    def test_the_launcher_output_actually_reaches_the_pane_log(self):
+        """The regression that mattered: on macOS the util-linux `script -c`
+        form fails with `illegal option -- c`, script exits instantly, and the
+        log is never created — so the worker dies with no diagnostic at all.
+        Assert against real tmux + real script(1) on whatever platform we're on.
+        """
+        marker = "LAUNCHER_RAN_OK"
+        self.stub.write_text(f"#!/bin/sh\necho {marker}\nsleep 300\n")
+        self.stub.chmod(0o755)
+        self.runner.start(self.rec, self.cfg)
+        log_path = self.runner.log_path(self.rec)
+        for _ in range(40):  # script flushes through a pty; give it a moment
+            if log_path.exists() and marker in log_path.read_text(errors="replace"):
+                break
+            time.sleep(0.1)
+        self.assertTrue(log_path.exists(), "script(1) never created the pane log")
+        self.assertIn(marker, log_path.read_text(errors="replace"))
+        self.assertTrue(self.runner.alive(self.rec))
 
     def test_command_shape(self):
         cmd = self.runner.command(self.rec, self.cfg)
