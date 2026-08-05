@@ -295,6 +295,37 @@ resurface as a fresh escalation. Questions still sitting in a worker's
 `pending_outbox` are untouched by the baseline — nobody has drained those, so
 they're genuinely unanswered and escalate on that first tick.
 
+## Security gate (credential scanning on `ready`)
+
+The [load-bearing idea](#the-load-bearing-idea-credentials-never-enter-the-agents)
+keeps *the operator's* credentials out of the containers — but nothing stops an
+agent from committing a secret it generated, pasted, or scraped from its own
+environment into its branch. The one outbox action that carries such content
+*into the repository* is `ready` (it force-pushes the branch and opens the PR),
+so the orchestrator scans the diff a `ready` would push **before** the push,
+host-side, and can reject it.
+
+The scan is deterministic and stdlib-only (`security.py`): it inspects only the
+*added* lines of the branch's diff (`base...HEAD`) for known credential shapes —
+private-key blocks, AWS/GitHub/Anthropic/OpenAI/Linear/Slack/Google/Stripe/
+Tailscale tokens, JWTs, and secret-shaped assignments — plus newly-added
+sensitive files (`.env`, `id_rsa`/`id_ed25519`, `*.pem`, `credentials.json`, …).
+Patterns are narrow (a match is almost certainly a real secret) so a
+false-positive block is rare; when one happens it's recoverable.
+
+On a hit in the default `block` mode, nothing is pushed: the worker is woken via
+its mailbox with a **redacted** rationale (the secret is never echoed into the
+note, the logs, or the archived receipt — that would just relocate the leak),
+naming the file and rule and telling it to scrub the secret from the branch
+history and resubmit, or to justify a false positive via `agentctl ask`. `warn`
+logs the finding and delivers the note but still pushes; `off` disables scanning.
+
+`deep_scan = "claude"` layers an optional LLM pass on top (reusing the fleet
+manager's Anthropic key) that can catch secrets the regexes miss. It is additive
+only — every deterministic finding stands regardless — and an API failure
+degrades to the deterministic result rather than clearing a hit or wedging a
+submission.
+
 ## Configuration
 
 ```toml
@@ -340,6 +371,10 @@ poll_interval_s = 60                       # Signal poll cadence
 report_interval_s = 3600                   # progress reports to the group; 0 = off
 assign_goals = true                        # assign filed goals to the fleet so they auto-claim
 advisor = "conservative"                   # conservative (always escalate) | claude (LLM triage)
+
+[security]                                 # scan each `ready` diff for leaked credentials; on by default
+mode = "block"                             # block (reject the ready) | warn (log + notify, still push) | off
+deep_scan = "off"                          # off | claude (extra LLM pass; reuses the Anthropic key)
 
 [agent]
 max_auto_turns = 50          # self-driven turns without human contact (the runaway brake)

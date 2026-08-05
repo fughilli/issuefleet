@@ -237,6 +237,24 @@ def _check_fleet_manager(cfg: Config) -> list[Check]:
     return out
 
 
+def _check_security(cfg: Config) -> list[Check]:
+    sec = cfg.security
+    if sec.mode == "off":
+        return [Check(WARN, "security gate", "off — the `ready` diff is NOT scanned "
+                      "for leaked credentials before it's pushed")]
+    label = "blocks a leaky `ready`" if sec.mode == "block" else "warns but still pushes"
+    out = [Check(OK, "security gate", f"mode={sec.mode} ({label}); "
+                 "deterministic secret scan on the pushed diff")]
+    if sec.deep_scan == "claude":
+        if creds.resolve_anthropic_key(cfg):
+            out.append(Check(OK, "security deep-scan", "Anthropic key resolves"))
+        else:
+            out.append(Check(WARN, "security deep-scan", "deep_scan=claude but no "
+                             "ANTHROPIC_API_KEY / ~/.config/issuefleet/anthropic.key — "
+                             "will fall back to the deterministic scanner"))
+    return out
+
+
 def _check_linear(cfg: Config, tracker) -> list[Check]:
     out = []
     if creds.linear_uses_app_token(cfg):
@@ -411,6 +429,7 @@ def run_doctor(
     checks += _check_webhooks(cfg)
     checks += _check_dashboard(cfg)
     checks += _check_fleet_manager(cfg)
+    checks += _check_security(cfg)
     linear_checks = _check_linear(cfg, tracker)
     checks += linear_checks
     checks += _check_github(cfg, git, forges)

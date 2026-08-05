@@ -309,7 +309,6 @@ class FakeGit:
         self.synced: list[str] = []  # worktrees passed to sync_to_remote
         self.sync_status = "up-to-date"  # what sync_to_remote reports
         self.fail_next_sync = 0
-        self.diff_text = ""  # what diff() returns (the security gate scans it)
 
     def fetch(self, repo: Path, url=None, auth_header=None) -> None:
         if self.fail_next_fetch > 0:
@@ -340,9 +339,6 @@ class FakeGit:
             from issuefleet.gitops import GitError
 
             raise GitError("fake git diff failure")
-        return self.diff_text
-
-    def diff(self, worktree: Path, base_ref: str) -> str:
         return self.diff_text
 
     def sync_to_remote(self, worktree: Path, branch: str) -> str:
