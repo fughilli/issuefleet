@@ -53,6 +53,21 @@ bind = "0.0.0.0"
 port = 8788
 allow_add_project = true
 
+# The security gate scans the diff a worker's `ready` would push for leaked
+# credentials before the branch leaves the host — the one mistake this whole
+# "credentials never enter the agents" architecture exists to prevent. On by
+# default; the block below is only needed to loosen or extend it.
+#   mode = "block" (default) rejects a leaky `ready` and wakes the agent with a
+#     redacted rationale to fix and resubmit; "warn" pushes anyway but notifies;
+#     "off" disables scanning.
+#   deep_scan = "claude" additionally runs an LLM pass (reusing the Anthropic
+#     key that the fleet manager's advisor uses) to catch secrets the built-in
+#     patterns miss. Additive only, and degrades to the deterministic scanner if
+#     the key/API is unavailable — it never clears a deterministic hit.
+[security]
+mode = "block"
+deep_scan = "off"
+
 [agent]
 max_auto_turns = 50
 max_restarts = 3

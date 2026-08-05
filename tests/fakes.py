@@ -299,6 +299,8 @@ class FakeGit:
         self.removed: list[str] = []
         self.deleted_remote: list[str] = []
         self.ahead = True  # what has_commits_ahead reports
+        self.diff_text = ""  # what diff() returns (empty => security gate passes)
+        self.fail_next_diff = 0
         self.push_specs: list[tuple] = []  # (url, auth_header) per push
         self.excludes: list[tuple[str, str]] = []  # (worktree, pattern)
         self.fail_next_push = 0
@@ -344,6 +346,14 @@ class FakeGit:
 
     def has_commits_ahead(self, worktree: Path, base_ref: str) -> bool:
         return self.ahead
+
+    def diff(self, worktree: Path, base_ref: str) -> str:
+        if self.fail_next_diff > 0:
+            self.fail_next_diff -= 1
+            from issuefleet.gitops import GitError
+
+            raise GitError("fake git diff failure")
+        return self.diff_text
 
     def sync_to_remote(self, worktree: Path, branch: str) -> str:
         self.synced.append(str(worktree))

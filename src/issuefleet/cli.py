@@ -65,7 +65,16 @@ def build_stack(cfg: Config) -> Reconciler:
         forges[project.name] = forge
     registry = Registry(cfg.state_dir)
     runner = TmuxRunner(log_dir=cfg.state_dir / "logs")
-    return Reconciler(cfg, registry, tracker, forges, git, runner, token_source=token_source)
+    from issuefleet.security import build_gate
+
+    gate = build_gate(
+        cfg.security.mode,
+        cfg.security.deep_scan,
+        creds.resolve_anthropic_key(cfg) if cfg.security.deep_scan == "claude" else None,
+    )
+    return Reconciler(
+        cfg, registry, tracker, forges, git, runner, token_source=token_source, gate=gate
+    )
 
 
 def build_fleet_manager(cfg: Config, reconciler: Reconciler):

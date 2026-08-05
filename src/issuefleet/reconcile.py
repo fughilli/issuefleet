@@ -109,6 +109,7 @@ class Reconciler:
         forges: dict[str, object],  # project name -> Forge
         git,
         runner,
+        gate=None,  # SecurityGate; None => scanning off (NullGate)
         token_source=None,  # owner -> (callable | token); enables add-project
     ):
         self.cfg = config
@@ -117,6 +118,13 @@ class Reconciler:
         self.forges = forges
         self.git = git
         self.runner = runner
+        # The security gate scans the diff a `ready` would push for leaked
+        # credentials before the branch leaves the host. Default off (NullGate)
+        # so a directly-constructed reconciler — every test that isn't about the
+        # gate — is unaffected; build_stack wires the configured backend.
+        from issuefleet.security import NullGate
+
+        self.gate = gate if gate is not None else NullGate()
         # How to mint a forge for a project added at runtime. None when the
         # stack was built without it (some tests) — add-project then no-ops
         # with an error result rather than raising.
@@ -707,6 +715,66 @@ class Reconciler:
         mailbox.put_inbox("info", {"text": text})
         mailbox.archive_outbox(msg, receipt={"issue": issue.key, "url": issue.url})
 
+    def _security_ok(self, rec: WorkerRecord, mailbox: Mailbox, msg) -> bool:
+        """Scan the diff this `ready` would push for leaked credentials. In
+        ``block`` mode a hit stops the push and wakes the agent with the (
+        redacted) rationale so it can fix the branch and resubmit — the same
+        recovery path as the no-commits rejection. In ``warn`` mode the finding
+        is logged and the note delivered, but the push proceeds. ``off`` never
+        reaches here (the gate is a NullGate). Returns True to continue.
+
+        A scan that cannot run (the diff can't be produced) fails CLOSED: a
+        security gate that silently waves through what it couldn't inspect is
+        worse than one that asks the agent to try again."""
+        mode = self.cfg.security.mode
+        try:
+            diff = self.git.diff(Path(rec.worktree), rec.base_ref)
+            verdict = self.gate.scan(diff)
+        except Exception:
+            log.exception("worker %s: security scan failed to run", rec.issue_key)
+            if mode == "warn":
+                return True  # warn never blocks, even on scanner failure
+            mailbox.put_inbox(
+                "reply",
+                {
+                    "author": "issuefleet-security-gate",
+                    "text": "Your `ready` could not be submitted: the security "
+                    "gate failed to scan your diff, so it was not pushed. Try "
+                    "`agentctl ready` again; if it keeps failing, raise it with "
+                    "`agentctl ask`.",
+                },
+            )
+            mailbox.archive_outbox(msg, receipt={"rejected": "security scan error"})
+            return False
+
+        if verdict.ok:
+            return True
+
+        n = len(verdict.findings)
+        if mode == "warn":
+            log.warning("worker %s: security gate found %d issue(s) (warn mode; "
+                        "submitting anyway)", rec.issue_key, n)
+            mailbox.put_inbox(
+                "reply",
+                {
+                    "author": "issuefleet-security-gate",
+                    "text": "⚠️ The security gate flagged possible leaked "
+                    "credentials in your diff, but is in warn-only mode, so your "
+                    "PR was submitted anyway. Please review:\n\n" + verdict.render(),
+                },
+            )
+            return True
+
+        log.warning("worker %s: security gate BLOCKED ready (%d finding(s))", rec.issue_key, n)
+        mailbox.put_inbox(
+            "reply",
+            {"author": "issuefleet-security-gate", "text": verdict.render()},
+        )
+        mailbox.archive_outbox(
+            msg, receipt={"rejected": "security gate", "findings": n}
+        )
+        return False
+
     def _handle_ready(self, rec: WorkerRecord, project: ProjectConfig, mailbox: Mailbox, msg) -> None:
         forge = self.forges[project.name]
         # Refresh origin/<base_ref> before the commits-ahead gate. This is the
@@ -736,6 +804,9 @@ class Reconciler:
                 },
             )
             mailbox.archive_outbox(msg, receipt={"rejected": "no commits ahead"})
+            return
+
+        if not self._security_ok(rec, mailbox, msg):
             return
 
         title = msg.payload.get("title") or f"{rec.issue_key}: {rec.issue_title}"

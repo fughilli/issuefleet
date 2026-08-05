@@ -158,21 +158,40 @@ class Gitops:
         except GitError:
             return []
 
-    def has_commits_ahead(self, worktree: Path, base_ref: str) -> bool:
-        """Does HEAD carry commits the base doesn't? Resolve the base against
-        each configured remote — not a hard-coded ``origin``, since an adopted
-        operator clone may name its remote something else — preferring
-        ``origin`` (the daemon's own clones use it), then fall back to the bare
-        local ref (a local-only base, or an offline bootstrap with no
-        remote-tracking ref yet)."""
+    def _base_candidates(self, worktree: Path, base_ref: str) -> list[str]:
+        """Where the base ref might resolve, most-preferred first: the base on
+        each configured remote (preferring ``origin`` — the daemon's own clones
+        use it, but an adopted operator clone may name its remote something
+        else), then the bare local ref (a local-only base, or an offline
+        bootstrap with no remote-tracking ref yet)."""
         remotes = self._remotes(worktree)
         ordered = (["origin"] if "origin" in remotes else []) + [
             r for r in remotes if r != "origin"
         ]
-        candidates = [*(f"{r}/{base_ref}" for r in ordered), base_ref]
+        return [*(f"{r}/{base_ref}" for r in ordered), base_ref]
+
+    def has_commits_ahead(self, worktree: Path, base_ref: str) -> bool:
+        """Does HEAD carry commits the base doesn't?"""
+        candidates = self._base_candidates(worktree, base_ref)
         for ref in candidates:
             try:
                 return int(_git(["rev-list", "--count", f"{ref}..HEAD"], cwd=worktree)) > 0
+            except GitError:
+                continue
+        raise GitError(
+            f"cannot resolve base ref {base_ref!r} in {worktree} (tried: {', '.join(candidates)})"
+        )
+
+    def diff(self, worktree: Path, base_ref: str) -> str:
+        """The unified diff a `ready` would contribute: HEAD against its
+        merge-base with the resolved base (``base...HEAD``, three-dot), so only
+        this branch's own additions show — commits the base gained in the
+        meantime don't pollute the scan. Resolves the base the same way as
+        ``has_commits_ahead``."""
+        candidates = self._base_candidates(worktree, base_ref)
+        for ref in candidates:
+            try:
+                return _git(["diff", "--unified=0", f"{ref}...HEAD"], cwd=worktree)
             except GitError:
                 continue
         raise GitError(

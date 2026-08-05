@@ -221,6 +221,77 @@ class ReconcileTest(unittest.TestCase):
         kinds = [(m.kind, m.payload.get("text", "")) for m in self.mailbox().pending_inbox()]
         self.assertTrue(any(k == "reply" and "no commits" in t for k, t in kinds))
 
+    # -- security gate -----------------------------------------------------
+
+    def _leaky_diff(self):
+        return (
+            "diff --git a/c.py b/c.py\n--- a/c.py\n+++ b/c.py\n@@ -0,0 +1 @@\n"
+            "+token = 'ghp_" + "a" * 36 + "'\n"
+        )
+
+    def test_security_gate_blocks_leaky_ready_and_wakes_agent(self):
+        from issuefleet.security import RegexSecretScanner
+
+        self.rec.gate = RegexSecretScanner()  # cfg.security.mode defaults to "block"
+        self.claim_one()
+        self.git.diff_text = self._leaky_diff()
+        self.mailbox().put_outbox("ready", {"title": "T", "body": "B"})
+        self.rec.tick()
+        # Nothing pushed, no PR, and the agent is woken with a redacted reason.
+        self.assertEqual(self.git.pushed, [])
+        self.assertEqual(self.forge.opened, [])
+        kinds = [(m.kind, m.payload.get("text", "")) for m in self.mailbox().pending_inbox()]
+        self.assertTrue(any(k == "reply" and "security gate" in t for k, t in kinds))
+        # The raw secret never reaches the mailbox.
+        self.assertFalse(any("ghp_" + "a" * 36 in t for _, t in kinds))
+        # The outbox message is archived with a rejection receipt (not retried).
+        self.assertEqual(self.mailbox().pending_outbox(), [])
+
+    def test_security_gate_passes_clean_ready(self):
+        from issuefleet.security import RegexSecretScanner
+
+        self.rec.gate = RegexSecretScanner()
+        self.claim_one()
+        self.git.diff_text = (
+            "diff --git a/c.py b/c.py\n--- a/c.py\n+++ b/c.py\n@@ -0,0 +1 @@\n+x = 1\n"
+        )
+        self.mailbox().put_outbox("ready", {"title": "T", "body": "B"})
+        self.rec.tick()
+        self.assertEqual(self.git.pushed, [self.worker().branch])
+
+    def test_security_warn_mode_submits_but_notifies(self):
+        from issuefleet.security import RegexSecretScanner
+
+        self.rec.gate = RegexSecretScanner()
+        self.cfg.security.mode = "warn"
+        self.claim_one()
+        self.git.diff_text = self._leaky_diff()
+        self.mailbox().put_outbox("ready", {"title": "T", "body": "B"})
+        self.rec.tick()
+        self.assertEqual(self.git.pushed, [self.worker().branch])  # still pushed
+        texts = [m.payload.get("text", "") for m in self.mailbox().pending_inbox()]
+        self.assertTrue(any("warn-only" in t for t in texts))
+
+    def test_security_off_never_scans(self):
+        # Default reconciler gate is NullGate; a leaky diff sails through.
+        self.claim_one()
+        self.git.diff_text = self._leaky_diff()
+        self.mailbox().put_outbox("ready", {"title": "T", "body": "B"})
+        self.rec.tick()
+        self.assertEqual(self.git.pushed, [self.worker().branch])
+
+    def test_security_scan_error_fails_closed(self):
+        from issuefleet.security import RegexSecretScanner
+
+        self.rec.gate = RegexSecretScanner()
+        self.claim_one()
+        self.git.fail_next_diff = 1
+        self.mailbox().put_outbox("ready", {"title": "T", "body": "B"})
+        self.rec.tick()
+        self.assertEqual(self.git.pushed, [])  # not pushed when the scan can't run
+        texts = [m.payload.get("text", "") for m in self.mailbox().pending_inbox()]
+        self.assertTrue(any("could not be submitted" in t for t in texts))
+
     # -- file-issue (bot authoring Linear issues) --------------------------
 
     def test_file_issue_creates_and_reports_back(self):
