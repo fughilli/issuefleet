@@ -194,7 +194,7 @@ answers GET with a health probe for tunnel checks.
 ## Introspection dashboard (web UI)
 
 With `[dashboard] enabled = true` (the default), the running daemon also
-serves a web UI at `http://127.0.0.1:8788/` — the same information as
+serves a web UI at `http://<host>:8788/` — the same information as
 `issuefleet status`, but browsable:
 
 - **Fleet list** (`/`): every worker with its session liveness, agent phase,
@@ -205,20 +205,34 @@ serves a web UI at `http://127.0.0.1:8788/` — the same information as
 - **Transcript** (`/worker/<KEY>/turn/<N>`): the turn's stream-json log
   rendered as assistant text, tool calls, tool results, and the cost/duration
   summary (raw JSONL one click away).
+- **Projects** (`/projects`): the projects the fleet manages, recent add
+  attempts, and a form to **add a new project** (see below).
 - **JSON API**: `/api/workers` for scripting.
 
-**Stopping a worker** is the one mutating action. It is `POST`-only and
-gated behind a browser confirmation dialog. Clicking Stop doesn't touch the
-fleet from the web thread — it enqueues the wind-down for the reconcile loop
-(the single writer), which stops the container, removes the worktree, and
-keeps the branch + an archived transcript, exactly like `issuefleet stop`.
-(For a poll-claimed issue whose claim rule still matches, the next tick will
-re-claim it — remove the label / advance the state to make a stop stick, same
-as the CLI.)
+**Stopping a worker** is a mutating action. It is `POST`-only and gated behind
+a browser confirmation dialog. Clicking Stop doesn't touch the fleet from the
+web thread — it enqueues the wind-down for the reconcile loop (the single
+writer), which stops the container, removes the worktree, and keeps the branch
++ an archived transcript, exactly like `issuefleet stop`. (For a poll-claimed
+issue whose claim rule still matches, the next tick will re-claim it — remove
+the label / advance the state to make a stop stick, same as the CLI.)
 
-The dashboard is a **control plane**, so treat it like one: it binds loopback
-by default; reach it remotely over the tailnet with `tailscale serve`, never
-a public Funnel. Disable it entirely with `[dashboard] enabled = false`.
+**Adding a project** (`/projects`) is the other mutating action. Fill in the
+name, Linear project, repo path, an optional `git_url` to clone from, and a
+claim rule, then submit. As with Stop, the web thread never touches the fleet:
+it validates the form, enqueues the request, and the reconcile loop (the single
+writer) clones the repo, wires up its forge, adds it to the live fleet, and
+**appends a `[[projects]]` block to your config file** so it survives a restart
+— the file is written only after the clone succeeds, so a bad entry can never
+wedge the next daemon start. The new project is polled for claimable work the
+same tick it lands. Turn the form off with `[dashboard] allow_add_project =
+false` for a look-but-don't-touch deployment.
+
+The dashboard is a **control plane**, so treat it like one. It binds `0.0.0.0`
+by default so you can reach it from other machines **on your tailnet**; keep it
+there (a private `tailscale serve` is fine too) and never point a public Funnel
+at it. Set `[dashboard] bind = "127.0.0.1"` to keep it loopback-only, or
+disable it entirely with `[dashboard] enabled = false`.
 
 ## Fleet manager (Signal chat) — optional
 
@@ -357,9 +371,10 @@ github_secret_file = "~/.config/issuefleet/github_webhook.secret"
 linear_secret_file = "~/.config/issuefleet/linear_webhook.secret"
 
 [dashboard]
-enabled = true                             # introspection web UI (below)
-bind = "127.0.0.1"                         # keep loopback; private tunnel in front
+enabled = true                             # introspection + light-control UI (below)
+bind = "0.0.0.0"                           # tailnet-reachable; keep it off public nets
 port = 8788
+allow_add_project = true                   # false = no add-project form (read + stop only)
 
 [fleet_manager]                            # Signal <-> fleet bridge (below); off by default
 enabled = false
@@ -464,8 +479,9 @@ bin/issuefleet once --dry-run    # print every action a tick would take; mutate 
 ```
 
 Or point a browser at the daemon's **introspection dashboard**
-(`http://127.0.0.1:8788/`) for the same view plus per-turn transcripts and a
-confirm-gated Stop button — see [Introspection dashboard](#introspection-dashboard-web-ui).
+(`http://<host>:8788/`) for the same view plus per-turn transcripts, a
+confirm-gated Stop button, and an add-project form — see
+[Introspection dashboard](#introspection-dashboard-web-ui).
 
 Two log layers per worker:
 

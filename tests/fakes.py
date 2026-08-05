@@ -309,6 +309,20 @@ class FakeGit:
         self.synced: list[str] = []  # worktrees passed to sync_to_remote
         self.sync_status = "up-to-date"  # what sync_to_remote reports
         self.fail_next_sync = 0
+        self.cloned: list[tuple] = []  # (url, path) per clone
+        self._repos: set[Path] = set()  # paths that are (now) real clones
+        self.remote = "https://github.example/owner/name.git"
+
+    def is_repo(self, repo: Path) -> bool:
+        return Path(repo) in self._repos
+
+    def remote_url(self, repo: Path) -> str:
+        return self.remote
+
+    def clone(self, url: str, path: Path, auth_header=None) -> None:
+        Path(path).mkdir(parents=True, exist_ok=True)
+        self.cloned.append((url, str(path)))
+        self._repos.add(Path(path))
 
     def fetch(self, repo: Path, url=None, auth_header=None) -> None:
         if self.fail_next_fetch > 0:

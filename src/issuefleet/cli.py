@@ -16,13 +16,12 @@ from issuefleet import config as config_mod
 from issuefleet import creds
 from issuefleet.config import Config, ConfigError
 from issuefleet.doctor import run_doctor
-from issuefleet.github import GithubForge, parse_repo_slug
 from issuefleet import gitops as gitops_mod
 from issuefleet.gitops import Gitops
 from issuefleet.linear import LinearClient, LinearTracker, client_from_config
 from issuefleet.mailbox import Mailbox
 from issuefleet.model import WorkerRecord
-from issuefleet.reconcile import Reconciler
+from issuefleet.reconcile import Reconciler, build_forge_and_checkout
 from issuefleet.registry import Registry
 from issuefleet.runner import TmuxRunner
 
@@ -54,28 +53,15 @@ def build_stack(cfg: Config) -> Reconciler:
 
     forges = {}
     for project in cfg.projects:
-        # Slug from whichever source exists — the forge (and its scoped
-        # token) must exist BEFORE the clone, which uses it over HTTPS so
-        # no SSH key is ever needed.
-        if git.is_repo(project.repo):
-            slug = parse_repo_slug(git.remote_url(project.repo))
-        elif project.git_url:
-            slug = parse_repo_slug(project.git_url)
-        else:
-            raise SystemExit(
-                f"[{project.name}] repo {project.repo} does not exist and the project "
-                "has no git_url to clone from"
-            )
-        forge = GithubForge(token_source(slug.split("/")[0]), slug)
+        # The forge (and its scoped token) is built and the checkout cloned by
+        # the shared helper, so a project added later from the dashboard comes
+        # up the same way. A dead end is fatal here (startup), reportable there.
         try:
-            clone_url, clone_auth = forge.push_spec()
-            action = gitops_mod.ensure_checkout(
-                git, project, clone_url=clone_url, auth_header=clone_auth
-            )
-            if action:
-                log.info("[%s] %s -> %s", project.name, project.repo, action)
-        except gitops_mod.GitError as e:
+            forge, action = build_forge_and_checkout(project, git, token_source)
+        except (ValueError, gitops_mod.GitError) as e:
             raise SystemExit(f"[{project.name}] {e}")
+        if action:
+            log.info("[%s] %s -> %s", project.name, project.repo, action)
         forges[project.name] = forge
     registry = Registry(cfg.state_dir)
     runner = TmuxRunner(log_dir=cfg.state_dir / "logs")
@@ -86,7 +72,9 @@ def build_stack(cfg: Config) -> Reconciler:
         cfg.security.deep_scan,
         creds.resolve_anthropic_key(cfg) if cfg.security.deep_scan == "claude" else None,
     )
-    return Reconciler(cfg, registry, tracker, forges, git, runner, gate=gate)
+    return Reconciler(
+        cfg, registry, tracker, forges, git, runner, token_source=token_source, gate=gate
+    )
 
 
 def build_fleet_manager(cfg: Config, reconciler: Reconciler):
@@ -224,10 +212,21 @@ def _start_dashboard(cfg: Config, reconciler: Reconciler, wake: threading.Event)
         reconciler.enqueue_stop(issue_key)
         wake.set()
 
-    view = FleetView(cfg.state_dir, stop_cb=stop_cb)
+    def add_project_cb(spec: dict) -> None:
+        reconciler.enqueue_add_project(spec)
+        wake.set()
+
+    view = FleetView(
+        cfg.state_dir,
+        stop_cb=stop_cb,
+        config_path=cfg.source_path,
+        allow_add_project=dcfg.allow_add_project,
+        add_project_cb=add_project_cb,
+        project_results_cb=reconciler.project_results,
+    )
     bind = _dashboard_bind(dcfg)
     server = DashboardServer(bind=bind, port=dcfg.port, view=view).start()
-    log.info("dashboard on http://%s:%d (introspection web UI; put a private tunnel in front)",
+    log.info("dashboard on http://%s:%d (introspection + light control; keep it on the tailnet)",
              bind, server.port)
     return server
 

@@ -117,13 +117,21 @@ class WebhookConfig:
 
 @dataclass
 class DashboardConfig:
-    """The introspection web UI. Read-mostly control plane: bind loopback and
-    put a private tunnel (Tailscale serve) in front — never expose it, and
-    never point a public Funnel at it, since it can wind down workers."""
+    """The introspection + light-control web UI. It can wind a worker down and
+    (unless ``allow_add_project`` is off) add a project to the fleet, so treat
+    it as a control plane: bind it to the tailnet, not to a public interface.
+    The default bind is ``0.0.0.0`` so a plain host run is reachable from other
+    machines on the tailnet; keep it behind Tailscale (a private serve, or just
+    the tailnet itself) and never point a public Funnel at it."""
 
     enabled: bool = True
-    bind: str = "127.0.0.1"
+    bind: str = "0.0.0.0"
     port: int = 8788
+    # Whether the dashboard may add a project to the fleet (clone the repo and
+    # persist a new [[projects]] entry to the config file). On by default —
+    # anyone who can reach the dashboard can already stop workers — but can be
+    # turned off for a look-but-don't-touch deployment.
+    allow_add_project: bool = True
 
 
 @dataclass
@@ -247,6 +255,10 @@ class Config:
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     fleet_manager: FleetManagerConfig = field(default_factory=FleetManagerConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
+    # The file this config was loaded from, when it came from disk. The daemon
+    # writes back here when a project is added in-band (see append_project);
+    # None for a config built straight from a dict (tests, `parse`).
+    source_path: Path | None = None
 
     def project(self, name: str) -> ProjectConfig:
         for p in self.projects:
@@ -402,6 +414,107 @@ def _path(v: str) -> Path:
     return Path(os.path.expandvars(v)).expanduser()
 
 
+def parse_project(p: dict, where: str) -> ProjectConfig:
+    """Validate and build one ``[[projects]]`` entry. Shared by ``parse`` (the
+    file loader) and the dashboard's add-project path, so a project typed into
+    the web form is checked exactly the way one written into the config is."""
+    if not isinstance(p, dict):
+        raise ConfigError(f"{where}: a project must be a table")
+    _reject_secrets(p, where)
+    for req in ("name", "linear_project", "repo"):
+        if not p.get(req):
+            raise ConfigError(f"{where}: missing required key {req!r}")
+    claim_raw = p.get("claim", {"strategy": "label", "value": "agent"})
+    strategy = claim_raw.get("strategy", "label")
+    if strategy not in CLAIM_STRATEGIES:
+        raise ConfigError(
+            f"{where}: claim.strategy must be one of {CLAIM_STRATEGIES}, got {strategy!r}"
+        )
+    if strategy != "agent" and not claim_raw.get("value"):
+        raise ConfigError(f"{where}: claim.value is required (e.g. the label name)")
+    if "local_checkout" in p:
+        # Removed: `repo` is always a clone the daemon owns. Silently
+        # ignoring the key would swap a symlink for a clone with no
+        # warning, so say so instead.
+        raise ConfigError(
+            f"{where}: local_checkout is no longer supported — the daemon always "
+            "clones into `repo` now. Drop the key (and set git_url if unset)."
+        )
+    max_workers = p.get("max_workers")
+    if max_workers is not None:
+        try:
+            max_workers = int(max_workers)
+        except (TypeError, ValueError):
+            raise ConfigError(f"{where}: max_workers must be an integer")
+        if max_workers < 1:
+            raise ConfigError(f"{where}: max_workers must be >= 1")
+    return ProjectConfig(
+        name=p["name"],
+        linear_project=p["linear_project"],
+        repo=_path(p["repo"]),
+        claim=ClaimRule(strategy=strategy, value=claim_raw.get("value", "")),
+        git_url=p.get("git_url") or None,
+        base_ref=p.get("base_ref") or "main",
+        branch_template=p.get("branch_template") or "agent/{key}-{slug}",
+        state_in_progress=p.get("state_in_progress") or "In Progress",
+        state_done=p.get("state_done") or "Done",
+        delete_remote_branch=bool(p.get("delete_remote_branch", True)),
+        max_workers=max_workers,
+    )
+
+
+def _toml_str(v: str) -> str:
+    """A TOML basic string. Escapes what the spec requires; enough for the
+    project fields we serialize (names, paths, URLs, labels)."""
+    out = v.replace("\\", "\\\\").replace('"', '\\"')
+    out = out.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    return f'"{out}"'
+
+
+def project_to_toml(p: ProjectConfig) -> str:
+    """Render a project back to a ``[[projects]]`` block. Used to append a
+    dashboard-added project to the config file; kept minimal and canonical
+    (only the fields the project carries), not a faithful echo of hand-written
+    formatting."""
+    lines = [
+        "[[projects]]",
+        f"name = {_toml_str(p.name)}",
+        f"linear_project = {_toml_str(p.linear_project)}",
+        f"repo = {_toml_str(str(p.repo))}",
+    ]
+    if p.git_url:
+        lines.append(f"git_url = {_toml_str(p.git_url)}")
+    lines.append(f"base_ref = {_toml_str(p.base_ref)}")
+    if p.claim.strategy == "agent":
+        lines.append("claim = { strategy = \"agent\" }")
+    else:
+        lines.append(
+            f"claim = {{ strategy = {_toml_str(p.claim.strategy)}, "
+            f"value = {_toml_str(p.claim.value)} }}"
+        )
+    if p.branch_template != "agent/{key}-{slug}":
+        lines.append(f"branch_template = {_toml_str(p.branch_template)}")
+    lines.append(f"state_in_progress = {_toml_str(p.state_in_progress)}")
+    lines.append(f"state_done = {_toml_str(p.state_done)}")
+    lines.append(f"delete_remote_branch = {str(p.delete_remote_branch).lower()}")
+    if p.max_workers is not None:
+        lines.append(f"max_workers = {p.max_workers}")
+    return "\n".join(lines) + "\n"
+
+
+def append_project(config_path: str | Path, p: ProjectConfig) -> None:
+    """Persist a newly added project by appending its ``[[projects]]`` block to
+    the config file. Appending (rather than rewriting) keeps every existing
+    comment and hand-formatting intact — the file stays the operator's, we only
+    add to the end. The caller appends only after the clone succeeds, so the
+    file never grows an entry the daemon can't bring up on the next start."""
+    path = Path(config_path).expanduser()
+    existing = path.read_text() if path.exists() else ""
+    sep = "" if existing.endswith("\n\n") or not existing else ("\n" if existing.endswith("\n") else "\n\n")
+    with open(path, "a") as f:
+        f.write(sep + project_to_toml(p))
+
+
 def load(path: str | Path) -> Config:
     path = Path(path).expanduser()
     try:
@@ -411,7 +524,9 @@ def load(path: str | Path) -> Config:
         raise ConfigError(f"config file not found: {path}")
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path}: invalid TOML: {e}")
-    return parse(data, source=str(path))
+    cfg = parse(data, source=str(path))
+    cfg.source_path = path
+    return cfg
 
 
 def parse(data: dict, source: str = "<config>") -> Config:
@@ -439,44 +554,10 @@ def parse(data: dict, source: str = "<config>") -> Config:
     if not raw_projects:
         raise ConfigError(f"{source}: at least one [[projects]] entry is required")
 
-    projects = []
-    for i, p in enumerate(raw_projects):
-        where = f"{source} [[projects]] #{i + 1}"
-        _reject_secrets(p, where)
-        for req in ("name", "linear_project", "repo"):
-            if not p.get(req):
-                raise ConfigError(f"{where}: missing required key {req!r}")
-        claim_raw = p.get("claim", {"strategy": "label", "value": "agent"})
-        strategy = claim_raw.get("strategy", "label")
-        if strategy not in CLAIM_STRATEGIES:
-            raise ConfigError(
-                f"{where}: claim.strategy must be one of {CLAIM_STRATEGIES}, got {strategy!r}"
-            )
-        if strategy != "agent" and not claim_raw.get("value"):
-            raise ConfigError(f"{where}: claim.value is required (e.g. the label name)")
-        if "local_checkout" in p:
-            # Removed: `repo` is always a clone the daemon owns. Silently
-            # ignoring the key would swap a symlink for a clone with no
-            # warning, so say so instead.
-            raise ConfigError(
-                f"{where}: local_checkout is no longer supported — the daemon always "
-                "clones into `repo` now. Drop the key (and set git_url if unset)."
-            )
-        projects.append(
-            ProjectConfig(
-                name=p["name"],
-                linear_project=p["linear_project"],
-                repo=_path(p["repo"]),
-                claim=ClaimRule(strategy=strategy, value=claim_raw.get("value", "")),
-                git_url=p.get("git_url"),
-                base_ref=p.get("base_ref", "main"),
-                branch_template=p.get("branch_template", "agent/{key}-{slug}"),
-                state_in_progress=p.get("state_in_progress", "In Progress"),
-                state_done=p.get("state_done", "Done"),
-                delete_remote_branch=p.get("delete_remote_branch", True),
-                max_workers=p.get("max_workers"),
-            )
-        )
+    projects = [
+        parse_project(p, f"{source} [[projects]] #{i + 1}")
+        for i, p in enumerate(raw_projects)
+    ]
     names = [p.name for p in projects]
     if len(set(names)) != len(names):
         raise ConfigError(f"{source}: duplicate [[projects]] name")
@@ -549,8 +630,9 @@ def parse(data: dict, source: str = "<config>") -> Config:
 
     cfg.dashboard = DashboardConfig(
         enabled=bool(dash.get("enabled", True)),
-        bind=dash.get("bind", "127.0.0.1"),
+        bind=dash.get("bind", "0.0.0.0"),
         port=int(dash.get("port", 8788)),
+        allow_add_project=bool(dash.get("allow_add_project", True)),
     )
 
     cfg.fleet_manager = _parse_fleet_manager(fleet, source)

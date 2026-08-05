@@ -338,5 +338,118 @@ class FleetManagerConfigTest(unittest.TestCase):
         self.assertNotIn("~", str(fm.api_key_file))
 
 
+class DashboardConfigTest(unittest.TestCase):
+    def test_bind_defaults_to_all_interfaces(self):
+        # FUG-68: the dashboard binds 0.0.0.0 by default so it's reachable from
+        # other machines on the tailnet.
+        cfg = config.parse(MINIMAL)
+        self.assertEqual(cfg.dashboard.bind, "0.0.0.0")
+        self.assertTrue(cfg.dashboard.enabled)
+        self.assertTrue(cfg.dashboard.allow_add_project)
+
+    def test_bind_and_add_project_overridable(self):
+        data = dict(MINIMAL)
+        data["dashboard"] = {"bind": "127.0.0.1", "allow_add_project": False}
+        cfg = config.parse(data)
+        self.assertEqual(cfg.dashboard.bind, "127.0.0.1")
+        self.assertFalse(cfg.dashboard.allow_add_project)
+
+
+class ParseProjectTest(unittest.TestCase):
+    def test_defaults_and_agent_claim(self):
+        p = config.parse_project(
+            {"name": "foo", "linear_project": "Foo", "repo": "~/Projects/foo"}, "where"
+        )
+        self.assertEqual(p.name, "foo")
+        self.assertEqual(p.claim.strategy, "label")  # the default claim
+        self.assertEqual(p.base_ref, "main")
+        self.assertNotIn("~", str(p.repo))
+
+    def test_missing_required_key(self):
+        with self.assertRaisesRegex(ConfigError, "linear_project"):
+            config.parse_project({"name": "foo", "repo": "~/x"}, "where")
+
+    def test_bad_claim_strategy(self):
+        with self.assertRaisesRegex(ConfigError, "claim.strategy"):
+            config.parse_project(
+                {"name": "f", "linear_project": "F", "repo": "~/x",
+                 "claim": {"strategy": "bogus"}}, "where",
+            )
+
+    def test_nonagent_claim_needs_value(self):
+        with self.assertRaisesRegex(ConfigError, "claim.value"):
+            config.parse_project(
+                {"name": "f", "linear_project": "F", "repo": "~/x",
+                 "claim": {"strategy": "label"}}, "where",
+            )
+
+    def test_max_workers_validated(self):
+        with self.assertRaisesRegex(ConfigError, "max_workers"):
+            config.parse_project(
+                {"name": "f", "linear_project": "F", "repo": "~/x", "max_workers": 0}, "where",
+            )
+        # A string (as it arrives from a web form) is coerced.
+        p = config.parse_project(
+            {"name": "f", "linear_project": "F", "repo": "~/x", "max_workers": "3"}, "where",
+        )
+        self.assertEqual(p.max_workers, 3)
+
+    def test_secret_rejected(self):
+        with self.assertRaisesRegex(ConfigError, "secrets"):
+            config.parse_project(
+                {"name": "f", "linear_project": "F", "repo": "~/x",
+                 "github_token": "ghp_xxx"}, "where",
+            )
+
+
+class AppendProjectTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "config.toml"
+        self.path.write_text(
+            "# my comment\n"
+            "[dashboard]\n"
+            "enabled = true\n\n"
+            "[[projects]]\n"
+            'name = "splanc"\n'
+            'linear_project = "Splanc"\n'
+            'repo = "/repos/splanc"\n'
+            'claim = { strategy = "agent" }\n'
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_round_trips_and_preserves_comment(self):
+        p = config.parse_project(
+            {"name": "led-mapper", "linear_project": "LED Mapper",
+             "repo": "/repos/led_mapper", "git_url": "https://github.com/o/led_mapper",
+             "claim": {"strategy": "state", "value": "Ready for agent"}, "max_workers": 2},
+            "where",
+        )
+        config.append_project(self.path, p)
+        text = self.path.read_text()
+        self.assertIn("# my comment", text)  # untouched
+        cfg = config.load(self.path)
+        names = [pr.name for pr in cfg.projects]
+        self.assertEqual(names, ["splanc", "led-mapper"])
+        added = cfg.project("led-mapper")
+        self.assertEqual(added.claim.strategy, "state")
+        self.assertEqual(added.claim.value, "Ready for agent")
+        self.assertEqual(added.git_url, "https://github.com/o/led_mapper")
+        self.assertEqual(added.max_workers, 2)
+
+    def test_string_escaping(self):
+        # A value with a quote must survive the append/reload round-trip.
+        p = config.parse_project(
+            {"name": "q", "linear_project": 'A "Quoted" Board', "repo": "/r",
+             "claim": {"strategy": "label", "value": "needs agent"}},
+            "where",
+        )
+        config.append_project(self.path, p)
+        cfg = config.load(self.path)
+        self.assertEqual(cfg.project("q").linear_project, 'A "Quoted" Board')
+
+
 if __name__ == "__main__":
     unittest.main()

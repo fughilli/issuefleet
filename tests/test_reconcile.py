@@ -743,5 +743,103 @@ class ReconcileTest(unittest.TestCase):
         self.assertIsNotNone(self.worker(1))  # not torn down by the failure
 
 
+class AddProjectTest(unittest.TestCase):
+    """Dashboard-driven add-project: the tick thread clones, wires the forge,
+    grows cfg.projects, and persists — with the config file written last."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.config_path = self.root / "config.toml"
+        self.config_path.write_text(
+            "[daemon]\n"
+            f'state_dir = "{self.root / "state"}"\n'
+            f'worktree_root = "{self.root / "worktrees"}"\n\n'
+            "[[projects]]\n"
+            'name = "splanc"\n'
+            'linear_project = "Splanc"\n'
+            f'repo = "{self.root / "repo"}"\n'
+            'claim = { strategy = "agent" }\n'
+        )
+        self.cfg = config.load(self.config_path)
+        self.registry = Registry(self.cfg.state_dir)
+        self.tracker = FakeTracker()
+        self.git = FakeGit(self.root)
+        self.runner = FakeRunner()
+        self.rec = Reconciler(
+            self.cfg, self.registry, self.tracker, {"splanc": FakeForge()},
+            self.git, self.runner, token_source=lambda owner: "faketoken",
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def valid_spec(self, **kw):
+        spec = {
+            "name": "led-mapper",
+            "linear_project": "LED Mapper",
+            "repo": str(self.root / "led_mapper"),
+            "git_url": "https://github.com/o/led_mapper",
+            "claim": {"strategy": "state", "value": "Ready for agent"},
+        }
+        spec.update(kw)
+        return spec
+
+    def test_add_clones_wires_and_persists(self):
+        self.rec.enqueue_add_project(self.valid_spec())
+        self.rec.tick()
+        # Live in this process...
+        self.assertIn("led-mapper", [p.name for p in self.cfg.projects])
+        self.assertIn("led-mapper", self.rec.forges)
+        self.assertEqual(len(self.git.cloned), 1)
+        # ...and persisted, so a fresh load sees it.
+        reloaded = config.load(self.config_path)
+        self.assertIn("led-mapper", [p.name for p in reloaded.projects])
+        results = self.rec.project_results()
+        self.assertTrue(results[-1]["ok"])
+
+    def test_added_project_is_polled_same_tick(self):
+        # An issue matching the new project's claim is claimed the tick it lands.
+        issue = make_issue(5, labels=[], state_name="Ready for agent")
+        issue.project_id = "LED Mapper"
+        self.tracker.add_issue(issue)
+        self.rec.enqueue_add_project(self.valid_spec())
+        self.rec.tick()
+        self.assertIsNotNone(self.registry.get("issue-5"))
+
+    def test_duplicate_name_rejected(self):
+        self.rec.enqueue_add_project(self.valid_spec(name="splanc"))
+        self.rec.tick()
+        self.assertEqual([p.name for p in self.cfg.projects], ["splanc"])
+        self.assertEqual(self.git.cloned, [])
+        self.assertFalse(self.rec.project_results()[-1]["ok"])
+
+    def test_clone_failure_does_not_persist(self):
+        # No git_url and the repo doesn't exist -> ensure_checkout dead-ends.
+        spec = self.valid_spec()
+        del spec["git_url"]
+        self.rec.enqueue_add_project(spec)
+        self.rec.tick()
+        self.assertNotIn("led-mapper", [p.name for p in self.cfg.projects])
+        reloaded = config.load(self.config_path)
+        self.assertNotIn("led-mapper", [p.name for p in reloaded.projects])
+        self.assertFalse(self.rec.project_results()[-1]["ok"])
+
+    def test_no_token_source_reports_error(self):
+        rec = Reconciler(
+            self.cfg, self.registry, self.tracker, {"splanc": FakeForge()},
+            self.git, self.runner,  # token_source=None
+        )
+        rec.enqueue_add_project(self.valid_spec())
+        rec.tick()
+        self.assertNotIn("led-mapper", [p.name for p in self.cfg.projects])
+        self.assertFalse(rec.project_results()[-1]["ok"])
+
+    def test_invalid_spec_reports_error(self):
+        self.rec.enqueue_add_project({"name": "x", "linear_project": "", "repo": "/r"})
+        self.rec.tick()
+        self.assertFalse(self.rec.project_results()[-1]["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

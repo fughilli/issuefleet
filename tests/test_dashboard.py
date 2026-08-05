@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -243,6 +244,136 @@ class DashboardServerTest(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertNotIn("<script>alert(1)</script>", body)
         self.assertIn("&lt;script&gt;", body)
+
+
+class ProjectsPageTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state_dir = Path(self.tmp.name)
+        (self.state_dir / "logs").mkdir(exist_ok=True)
+        self.config_path = self.state_dir / "config.toml"
+        self.config_path.write_text(
+            "[[projects]]\n"
+            'name = "splanc"\n'
+            'linear_project = "Splanc"\n'
+            'repo = "/repos/splanc"\n'
+            'claim = { strategy = "agent" }\n'
+        )
+        self.enqueued: list[dict] = []
+        self.results: list[dict] = []
+        self.view = FleetView(
+            self.state_dir,
+            config_path=self.config_path,
+            allow_add_project=True,
+            add_project_cb=self.enqueued.append,
+            project_results_cb=lambda: self.results,
+        )
+        self.server = DashboardServer(bind="127.0.0.1", port=0, view=self.view).start()
+        self.base = f"http://127.0.0.1:{self.server.port}"
+
+    def tearDown(self):
+        self.server.stop()
+        self.tmp.cleanup()
+
+    def get(self, path):
+        with urllib.request.urlopen(self.base + path, timeout=5) as resp:
+            return resp.status, resp.read().decode(), resp.geturl()
+
+    def post_form(self, path, fields):
+        data = urllib.parse.urlencode(fields).encode()
+        req = urllib.request.Request(self.base + path, data=data, method="POST")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, resp.read().decode(), resp.geturl()
+
+    def test_index_links_to_projects(self):
+        _, body, _ = self.get("/")
+        self.assertIn("/projects", body)
+
+    def test_projects_page_lists_configured(self):
+        code, body, _ = self.get("/projects")
+        self.assertEqual(code, 200)
+        self.assertIn("splanc", body)
+        self.assertIn("Add a project", body)
+        # This page must NOT auto-refresh (it holds a form).
+        self.assertNotIn("http-equiv='refresh'", body)
+
+    def test_add_valid_enqueues(self):
+        code, body, final = self.post_form("/projects/add", {
+            "name": "led-mapper",
+            "linear_project": "LED Mapper",
+            "repo": "/repos/led_mapper",
+            "git_url": "https://github.com/o/led_mapper",
+            "base_ref": "main",
+            "claim_strategy": "state",
+            "claim_value": "Ready for agent",
+            "max_workers": "2",
+        })
+        self.assertEqual(code, 200)  # 303 -> followed to /projects
+        self.assertIn("/projects", final)
+        self.assertEqual(len(self.enqueued), 1)
+        spec = self.enqueued[0]
+        self.assertEqual(spec["name"], "led-mapper")
+        self.assertEqual(spec["claim"], {"strategy": "state", "value": "Ready for agent"})
+        self.assertEqual(spec["git_url"], "https://github.com/o/led_mapper")
+        self.assertEqual(spec["max_workers"], "2")
+
+    def test_add_agent_claim_omits_value(self):
+        self.post_form("/projects/add", {
+            "name": "foo", "linear_project": "Foo", "repo": "/repos/foo",
+            "claim_strategy": "agent", "claim_value": "",
+        })
+        self.assertEqual(self.enqueued[0]["claim"], {"strategy": "agent"})
+
+    def test_add_duplicate_name_rejected(self):
+        code, _, final = self.post_form("/projects/add", {
+            "name": "splanc", "linear_project": "Splanc", "repo": "/repos/splanc",
+            "claim_strategy": "agent",
+        })
+        self.assertIn("error=", final)
+        self.assertEqual(self.enqueued, [])
+
+    def test_add_missing_field_rejected(self):
+        _, _, final = self.post_form("/projects/add", {
+            "name": "x", "linear_project": "", "repo": "/repos/x",
+            "claim_strategy": "agent",
+        })
+        self.assertIn("error=", final)
+        self.assertEqual(self.enqueued, [])
+
+    def test_results_rendered(self):
+        self.results.append({"name": "led-mapper", "ok": True,
+                             "detail": "cloned from https://x", "ts": 0})
+        self.results.append({"name": "bad", "ok": False, "detail": "boom", "ts": 0})
+        _, body, _ = self.get("/projects")
+        self.assertIn("led-mapper", body)
+        self.assertIn("cloned from", body)
+        self.assertIn("boom", body)
+
+
+class ProjectsDisabledTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state_dir = Path(self.tmp.name)
+        (self.state_dir / "logs").mkdir(exist_ok=True)
+        self.enqueued: list[dict] = []
+        # No add_project_cb / allow_add_project -> add surface is off.
+        self.view = FleetView(self.state_dir)
+        self.server = DashboardServer(bind="127.0.0.1", port=0, view=self.view).start()
+        self.base = f"http://127.0.0.1:{self.server.port}"
+
+    def tearDown(self):
+        self.server.stop()
+        self.tmp.cleanup()
+
+    def test_page_renders_without_config(self):
+        with urllib.request.urlopen(self.base + "/projects", timeout=5) as resp:
+            body = resp.read().decode()
+        self.assertIn("Disabled", body)
+        self.assertNotIn("<form method='post' action='/projects/add'", body)
+
+    def test_add_when_disabled_returns_error(self):
+        # add_project on a view with no callback rejects rather than raising.
+        self.assertIsNotNone(self.view.add_project({"name": "x"}))
 
 
 if __name__ == "__main__":
