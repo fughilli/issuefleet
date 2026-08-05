@@ -321,6 +321,114 @@ class FleetManagerTest(unittest.TestCase):
         self.assertEqual(len(self.tracker.created), 1)
         self.assertIn("Filed", out)
 
+    def test_create_issue_tool_files_onto_a_named_project_board(self):
+        # The point of FUG-64: file directly onto a specific board (here the
+        # configured project "P"/"p"), not just the top-level goals board.
+        self.tracker.project_teams["P"] = "team-splanc"
+        fm = self._fm(agent_key="sk-test")
+
+        class M:
+            id = "m1"
+            author = "kevin"
+
+        tools = {t.name: t for t in fm._agent_tools(M())}
+        out = tools["create_issue"].run(
+            {"project": "p", "title": "flaky HITL test", "description": "fix it",
+             "priority": 2}
+        )
+        self.assertEqual(len(self.tracker.created), 1)
+        created = self.tracker.created[0]
+        self.assertEqual(created["title"], "flaky HITL test")
+        self.assertEqual(created["project_id"], "P")  # config name resolved to Linear
+        self.assertEqual(created["team"], "team-splanc")  # team came from the board
+        self.assertEqual(created["priority"], 2)
+        self.assertIn("Filed", out)
+        self.assertTrue(any("flaky HITL test" in s for s in self.signal.sent))
+        # not assigned unless asked
+        self.assertEqual(self.tracker.assigned, [])
+
+    def test_create_issue_tool_can_assign_to_the_fleet(self):
+        fm = self._fm(agent_key="sk-test")
+
+        class M:
+            id = "m1"
+            author = "kevin"
+
+        tools = {t.name: t for t in fm._agent_tools(M())}
+        tools["create_issue"].run({"project": "P", "title": "do it", "assign": True})
+        self.assertEqual([a[1] for a in self.tracker.assigned], [self.tracker.viewer_id])
+
+    def test_create_issue_tool_refuses_an_empty_title(self):
+        fm = self._fm(agent_key="sk-test")
+
+        class M:
+            id = "m1"
+            author = "kevin"
+
+        tools = {t.name: t for t in fm._agent_tools(M())}
+        self.assertIn("needs a title", tools["create_issue"].run({"project": "P", "title": ""}))
+        self.assertEqual(self.tracker.created, [])
+
+    def test_create_issue_project_is_enumerated_for_the_model(self):
+        fm = self._fm(agent_key="sk-test")
+
+        class M:
+            id = "m1"
+            author = "kevin"
+
+        tools = {t.name: t for t in fm._agent_tools(M())}
+        enum = tools["create_issue"].input_schema["properties"]["project"]["enum"]
+        self.assertIn("Fleet", enum)
+        self.assertIn("P", enum)
+        self.assertIn("p", enum)
+
+    def test_update_issue_tool_edits_content_and_state(self):
+        self.tracker.add_issue(
+            make_issue(key="FUG-9", id="issue-FUG-9", title="old title",
+                       description="old", project_id="P")
+        )
+        fm = self._fm(agent_key="sk-test")
+
+        class M:
+            id = "m1"
+            author = "kevin"
+
+        tools = {t.name: t for t in fm._agent_tools(M())}
+        out = tools["update_issue"].run(
+            {"issue_key": "FUG-9", "title": "new title", "priority": 1, "state": "Done"}
+        )
+        self.assertIn("Updated FUG-9", out)
+        self.assertEqual(self.tracker.issues["issue-FUG-9"].title, "new title")
+        self.assertEqual(self.tracker.issues["issue-FUG-9"].priority, 1)
+        self.assertIn(("issue-FUG-9", "Done"), self.tracker.state_changes)
+
+    def test_update_issue_tool_reports_an_unknown_key(self):
+        fm = self._fm(agent_key="sk-test")
+
+        class M:
+            id = "m1"
+            author = "kevin"
+
+        tools = {t.name: t for t in fm._agent_tools(M())}
+        out = tools["update_issue"].run({"issue_key": "FUG-404", "title": "x"})
+        self.assertIn("No open issue", out)
+        self.assertEqual(self.tracker.updated, [])
+
+    def test_update_issue_tool_needs_at_least_one_field(self):
+        self.tracker.add_issue(
+            make_issue(key="FUG-9", id="issue-FUG-9", title="t", project_id="P"))
+        fm = self._fm(agent_key="sk-test")
+
+        class M:
+            id = "m1"
+            author = "kevin"
+
+        tools = {t.name: t for t in fm._agent_tools(M())}
+        out = tools["update_issue"].run({"issue_key": "FUG-9"})
+        self.assertIn("Nothing to change", out)
+        self.assertEqual(self.tracker.updated, [])
+        self.assertEqual(self.tracker.state_changes, [])
+
     def test_reply_to_worker_tool_delivers_and_clears_pending(self):
         rec = self._worker(key="FUG-9")
         fm = self._fm(agent_key="sk-test")

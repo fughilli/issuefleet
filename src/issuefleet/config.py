@@ -130,7 +130,9 @@ class DashboardConfig:
 class FleetManagerConfig:
     """The fleet manager: a host-side singleton that bridges a Signal group
     (fronted by a sigbot service) to the fleet. It records user goals as issues
-    on a dedicated top-level board, watches the workers, unblocks agents whose
+    on a dedicated top-level board — and, with an Anthropic key, manages issues
+    across every project board it knows (filing onto and updating any of them,
+    not just the goals board) — watches the workers, unblocks agents whose
     questions the ticket/board context answers, and routes the rest to the
     human over Signal. Disabled by default — the daemon runs the reconcile loop
     with or without it."""

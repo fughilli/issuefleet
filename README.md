@@ -231,13 +231,18 @@ architecture keeps *out* of workers), and does three things each tick:
 
 - **Answers you.** With an Anthropic key it is itself an agent: your message goes
   to a tool loop that can inspect the fleet (`list_workers`, `list_open_issues`,
-  `get_issue`, `pending_escalations`) and act (`file_goal`, `reply_to_worker`),
-  then replies in plain English. So "what's going on in Splanc?" gets *answered*;
-  "make the HITL tests faster" gets filed as a goal; an answer to a blocked
-  worker gets delivered. It works out which from the message, not from prefixes.
-  Goals land on a dedicated top-level board (`board_project` / `board_team`);
-  with `assign_goals = true` they're assigned to the fleet's own identity, so
-  under the `agent` claim strategy a worker picks them up automatically.
+  `get_issue`, `pending_escalations`) and act (`file_goal`, `create_issue`,
+  `update_issue`, `reply_to_worker`), then replies in plain English. So "what's
+  going on in Splanc?" gets *answered*; "make the HITL tests faster" gets filed as
+  a goal; an answer to a blocked worker gets delivered. It works out which from
+  the message, not from prefixes. Goals land on a dedicated top-level board
+  (`board_project` / `board_team`); with `assign_goals = true` they're assigned to
+  the fleet's own identity, so under the `agent` claim strategy a worker picks
+  them up automatically. Beyond the goals board it manages **every** board it
+  knows: `create_issue` files a ticket directly onto a named project (Splanc,
+  IssueFleet, ...) — optionally assigning it to the fleet to be worked — and
+  `update_issue` edits any issue's title, description, priority, or workflow state
+  ("move FUG-30 to Done", "bump the Splanc caching ticket to urgent").
 
   **Without a key it degrades to a dispatch table** — `goal:`-prefixed and bare
   messages are filed as issues, `FUG-12:`-prefixed ones are relayed to that

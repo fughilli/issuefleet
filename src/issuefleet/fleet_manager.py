@@ -60,7 +60,11 @@ Work out what the message actually is and respond to that. It is usually one of:
 - A question about the fleet or the work ("what's going on in the Splanc \
 project?"). Investigate with your tools, then answer in plain English. Do not \
 file it as an issue.
-- New work the operator wants done. Record it with file_goal.
+- New work the operator wants done. Record it with file_goal for the top-level \
+goals board, or with create_issue when they name a specific project board \
+(Splanc, IssueFleet, ...).
+- A change to an existing ticket on any board — reword it, reprioritise it, or \
+move its workflow state (e.g. to Done). Use update_issue.
 - An answer to a blocked worker's question. Deliver it with reply_to_worker; \
 check pending_escalations to see who is waiting and, if more than one worker is, \
 ask which they mean instead of guessing.
@@ -347,19 +351,7 @@ class FleetManager:
 
         def get_issue(args):
             key = str(args.get("issue_key") or "").strip()
-            # The tracker has no by-key lookup, so scan the boards we know: the
-            # goals board plus every configured project (where worker issues live).
-            refs = [self.fm.board_project] + [p.linear_project for p in self.cfg.projects]
-            issue = None
-            for ref in refs:
-                try:
-                    found = [i for i in self.tracker.open_issues_in_project(ref)
-                             if i.key.lower() == key.lower()]
-                except Exception:
-                    continue  # a bad project ref shouldn't sink the whole lookup
-                if found:
-                    issue = found[0]
-                    break
+            issue = self._lookup_issue(key)
             if issue is None:
                 return (
                     f"No open issue {key!r} in the goals board or any configured project. "
@@ -386,6 +378,80 @@ class FleetManager:
             if after is None or after is before:
                 return "Filing the goal failed; the operator has been told."
             return f"Filed {after.key} on the board. Do not repeat this in your reply."
+
+        def create_issue(args):
+            project = self._resolve_project_ref(args.get("project"))
+            title = str(args.get("title") or "").strip()
+            if not title:
+                return "Refused: an issue needs a title."
+            description = str(args.get("description") or "").strip()
+            priority = args.get("priority")
+            try:
+                team = self.tracker.team_for_project(project)
+                issue, unknown = self.tracker.create_issue(
+                    title=title,
+                    description=description,
+                    priority=int(priority) if priority is not None else None,
+                    team=team,
+                    project=project,
+                    use_context_project=False,
+                )
+            except Exception as e:
+                return (
+                    f"Filing the issue on {project!r} failed: {e}. "
+                    f"Valid boards: {', '.join(self._project_names())}."
+                )
+            note = ""
+            if args.get("assign"):
+                try:
+                    self.tracker.assign_issue(issue.id, self.tracker.get_viewer_id())
+                    note = " and assigned it to the fleet"
+                except Exception:
+                    log.exception("fleet manager: assigning new issue %s failed", issue.key)
+                    note = " (couldn't assign it to the fleet — do it by hand)"
+            self.signal.send(f"📥 Filed {issue.key}: {title} — {issue.url}")
+            unknown_note = f" Unknown labels ignored: {', '.join(unknown)}." if unknown else ""
+            return (
+                f"Filed {issue.key} on {project}{note}.{unknown_note} "
+                "Do not repeat this in your reply."
+            )
+
+        def update_issue(args):
+            key = str(args.get("issue_key") or "").strip()
+            issue = self._lookup_issue(key)
+            if issue is None:
+                return (
+                    f"No open issue {key!r} on any board I watch; nothing was changed."
+                )
+            fields: dict = {}
+            changed: list[str] = []
+            title = args.get("title")
+            if title is not None and str(title).strip():
+                fields["title"] = str(title).strip()
+                changed.append("title")
+            description = args.get("description")
+            if description is not None:
+                fields["description"] = str(description)
+                changed.append("description")
+            priority = args.get("priority")
+            if priority is not None:
+                fields["priority"] = int(priority)
+                changed.append(f"priority={int(priority)}")
+            state = args.get("state")
+            if not fields and not (state and str(state).strip()):
+                return (
+                    f"Nothing to change on {issue.key}; pass at least one of "
+                    "title, description, priority, or state."
+                )
+            try:
+                if fields:
+                    self.tracker.update_issue(issue.id, **fields)
+                if state and str(state).strip():
+                    self.tracker.set_state(issue.id, str(state).strip())
+                    changed.append(f"state={str(state).strip()}")
+            except Exception as e:
+                return f"Updating {issue.key} failed: {e}."
+            return f"Updated {issue.key} ({', '.join(changed)}) — {issue.url}"
 
         def reply_to_worker(args):
             key = str(args.get("issue_key") or "").strip()
@@ -437,6 +503,43 @@ class FleetManager:
                                           "description": "The goal, in the operator's words"}},
                   "required": ["text"]},
                  file_goal),
+            Tool("create_issue",
+                 "File a NEW issue onto a SPECIFIC project board (e.g. Splanc or "
+                 "IssueFleet), not the goals board. Use when the operator wants a "
+                 "ticket recorded on a particular board. Set assign=true only if they "
+                 "want the fleet to pick it up and work it. For plain new work with no "
+                 "board named, prefer file_goal.",
+                 {"type": "object",
+                  "properties": {
+                      "project": {"type": "string", "enum": self._project_names(),
+                                  "description": "Which board to file on"},
+                      "title": {"type": "string"},
+                      "description": {"type": "string"},
+                      "priority": {"type": "integer",
+                                   "description": "Linear priority: 0 none, 1 urgent, "
+                                                  "2 high, 3 medium, 4 low"},
+                      "assign": {"type": "boolean",
+                                 "description": "Assign to the fleet so a worker claims "
+                                                "it (default false)"}},
+                  "required": ["project", "title"]},
+                 create_issue),
+            Tool("update_issue",
+                 "Edit an existing issue on any board: retitle it, rewrite its "
+                 "description, change its priority, or move it to another workflow "
+                 "state (e.g. 'In Progress', 'Done'). Pass only the fields you want to "
+                 "change.",
+                 {"type": "object",
+                  "properties": {
+                      "issue_key": {"type": "string", "description": "e.g. FUG-12"},
+                      "title": {"type": "string"},
+                      "description": {"type": "string"},
+                      "priority": {"type": "integer",
+                                   "description": "Linear priority: 0 none, 1 urgent, "
+                                                  "2 high, 3 medium, 4 low"},
+                      "state": {"type": "string",
+                                "description": "Target workflow state name"}},
+                  "required": ["issue_key"]},
+                 update_issue),
             Tool("reply_to_worker", "Deliver an answer into a blocked worker's mailbox, "
                  "unblocking it. Use when the operator is answering a pending question.",
                  {"type": "object",
@@ -459,6 +562,26 @@ class FleetManager:
         return next(
             (w for w in self.registry.all() if w.issue_key.lower() == key.lower()), None
         )
+
+    def _lookup_issue(self, key: str):
+        """Find an open issue by its human key across every board the manager
+        watches — the goals board plus each configured project (where worker
+        issues live). The tracker has no by-key lookup, so we scan; a bad
+        project ref shouldn't sink the whole search. Returns the Issue or None.
+        """
+        key = key.strip()
+        refs = [self.fm.board_project] + [p.linear_project for p in self.cfg.projects]
+        for ref in refs:
+            try:
+                found = [
+                    i for i in self.tracker.open_issues_in_project(ref)
+                    if i.key.lower() == key.lower()
+                ]
+            except Exception:
+                continue
+            if found:
+                return found[0]
+        return None
 
     # ------------------------------------------------------------- goals
 
