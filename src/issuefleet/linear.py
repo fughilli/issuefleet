@@ -407,6 +407,23 @@ class LinearTracker:
     def resolve_project_id(self, project: ProjectConfig) -> str:
         return self._project_id(project.linear_project)
 
+    def team_for_project(self, ref: str) -> str:
+        """Team UUID to file a new issue under when the only anchor is a
+        *project* (not an existing issue). A Linear issue always belongs to a
+        team, but a board is a project — so the fleet manager, asked to file
+        onto the Splanc board, resolves the project and takes its first team.
+        Projects can span teams; the first is the sensible default, and the
+        operator can move an issue afterwards."""
+        pid = self._project_id(ref)
+        data = self.client.graphql(
+            "query($id: String!) { project(id: $id) { teams(first: 1) { nodes { id } } } }",
+            {"id": pid},
+        )
+        nodes = data["project"]["teams"]["nodes"]
+        if not nodes:
+            raise LinearError(f"Linear project {ref!r} has no team to file an issue under")
+        return nodes[0]["id"]
+
     # -- issue authoring ---------------------------------------------------
 
     def team_for_issue(self, issue_id: str) -> str:
@@ -541,6 +558,36 @@ class LinearTracker:
         )
         if not data["issueUpdate"]["success"]:
             raise LinearError(f"issueUpdate (assign) on {issue_id} reported failure")
+
+    def update_issue(
+        self,
+        issue_id: str,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        priority: int | None = None,
+    ) -> None:
+        """Edit an existing issue's content. Only the fields that are passed
+        are touched; a None leaves that field alone. State changes go through
+        ``set_state`` and assignment through ``assign_issue`` — this is for the
+        plain content fields the fleet manager edits when the operator asks it
+        to reword or reprioritise a ticket on any board."""
+        inp: dict = {}
+        if title is not None:
+            inp["title"] = title
+        if description is not None:
+            inp["description"] = description
+        if priority is not None:
+            inp["priority"] = priority
+        if not inp:
+            return
+        data = self.client.graphql(
+            "mutation($id: String!, $input: IssueUpdateInput!) {"
+            " issueUpdate(id: $id, input: $input) { success } }",
+            {"id": issue_id, "input": inp},
+        )
+        if not data["issueUpdate"]["success"]:
+            raise LinearError(f"issueUpdate on {issue_id} reported failure")
 
     # -- workflow states ---------------------------------------------------
 

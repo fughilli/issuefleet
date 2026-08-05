@@ -43,7 +43,9 @@ class FakeTracker:
         self.activities: list[tuple[str, dict]] = []  # (session_id, content)
         self.sessions: dict[str, str] = {}  # issue_id -> discoverable session id
         self.created: list[dict] = []  # issueCreate inputs the bot filed
+        self.updated: list[dict] = []  # issueUpdate inputs the bot applied
         self.issue_team: dict[str, str] = {}  # issue_id -> team_id
+        self.project_teams: dict[str, str] = {}  # project ref -> team_id
         self.team_labels: dict[str, dict[str, str]] = {}  # team_id -> {name: id}
         self.fail_next_create = 0
         self._comment_seq = 0
@@ -141,6 +143,25 @@ class FakeTracker:
 
     def team_for_issue(self, issue_id: str) -> str:
         return self.issue_team.get(issue_id, "team-1")
+
+    def team_for_project(self, ref: str) -> str:
+        # Mirror LinearTracker: a board (project) resolves to a team. Test code
+        # can seed project_teams to assert routing; default keeps it simple.
+        return self.project_teams.get(ref, "team-1")
+
+    def update_issue(self, issue_id, *, title=None, description=None, priority=None) -> None:
+        self.updated.append(
+            {"issue_id": issue_id, "title": title,
+             "description": description, "priority": priority}
+        )
+        issue = self.issues.get(issue_id)
+        if issue is not None:
+            if title is not None:
+                issue.title = title
+            if description is not None:
+                issue.description = description
+            if priority is not None:
+                issue.priority = priority
 
     def find_issue_by_marker(self, needle: str) -> Issue | None:
         for i in self.issues.values():
