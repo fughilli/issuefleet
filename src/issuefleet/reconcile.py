@@ -15,12 +15,15 @@ from __future__ import annotations
 import logging
 import shutil
 import threading
+import time
 from pathlib import Path
 
 from issuefleet import marker, MARKER_PREFIX
+from issuefleet import config as config_mod
 from issuefleet import gitops
 from issuefleet import worker as worker_mod
 from issuefleet.config import Config, ProjectConfig
+from issuefleet.github import GithubForge, parse_repo_slug
 from issuefleet.mailbox import Mailbox
 from issuefleet.model import (
     PHASE_ACTIVE,
@@ -60,6 +63,33 @@ def _is_user_prompt(evt) -> bool:
     return True
 
 
+def build_forge_and_checkout(project: ProjectConfig, git, token_source):
+    """Build a project's Forge and make sure its main checkout exists (cloning
+    over HTTPS with the forge's scoped token when it doesn't). Shared by the
+    daemon's startup (``cli.build_stack``) and the dashboard's add-project path,
+    so a project added at runtime is brought up exactly like one present at
+    boot. Returns ``(forge, action)`` where ``action`` describes any clone (or
+    None). Raises ``ValueError``/``gitops.GitError`` on a dead end — the caller
+    decides whether that's fatal (startup) or reportable (dashboard).
+
+    ``token_source`` is ``owner -> (callable | token)``: the forge and its
+    scoped token must exist BEFORE the clone, which uses it, so no SSH key is
+    ever needed."""
+    if git.is_repo(project.repo):
+        slug = parse_repo_slug(git.remote_url(project.repo))
+    elif project.git_url:
+        slug = parse_repo_slug(project.git_url)
+    else:
+        raise ValueError(
+            f"repo {project.repo} does not exist and the project has no "
+            "git_url to clone from"
+        )
+    forge = GithubForge(token_source(slug.split("/")[0]), slug)
+    clone_url, clone_auth = forge.push_spec()
+    action = gitops.ensure_checkout(git, project, clone_url=clone_url, auth_header=clone_auth)
+    return forge, action
+
+
 def slugify(title: str, max_len: int = 32) -> str:
     out = []
     for ch in title.lower():
@@ -79,6 +109,7 @@ class Reconciler:
         forges: dict[str, object],  # project name -> Forge
         git,
         runner,
+        token_source=None,  # owner -> (callable | token); enables add-project
     ):
         self.cfg = config
         self.registry = registry
@@ -86,6 +117,10 @@ class Reconciler:
         self.forges = forges
         self.git = git
         self.runner = runner
+        # How to mint a forge for a project added at runtime. None when the
+        # stack was built without it (some tests) — add-project then no-ops
+        # with an error result rather than raising.
+        self.token_source = token_source
         # Linear agent sessions: fed by the webhook thread, drained at tick.
         self._session_lock = threading.Lock()
         self._session_events: list = []
@@ -95,6 +130,13 @@ class Reconciler:
         # tick so all git/registry mutation stays on the single tick thread.
         self._stop_lock = threading.Lock()
         self._stop_requests: list[str] = []  # issue keys
+        # Dashboard-requested new projects: same discipline — the web thread
+        # enqueues a validated project spec, the tick thread does the clone,
+        # the cfg/forges mutation, and the config-file write. Results (one per
+        # attempt, newest last, bounded) are read back by the dashboard.
+        self._add_lock = threading.Lock()
+        self._add_requests: list[dict] = []  # raw project tables
+        self._project_results: list[dict] = []  # {name, ok, detail, ts}
 
     # ------------------------------------------------------------------ tick
 
@@ -132,6 +174,83 @@ class Reconciler:
                 self._wind_down(rec, project, mailbox, reason="stopped from dashboard", done=False)
             except Exception:
                 log.exception("dashboard stop of %s failed; will not retry", key)
+
+    # ------------------------------------------- dashboard add-project requests
+
+    def enqueue_add_project(self, spec: dict) -> None:
+        """Thread-safe intake for a dashboard 'add project' submission. Like a
+        stop request, the web thread never touches the fleet itself: cloning the
+        repo, mutating ``cfg.projects``/``forges``, and writing the config file
+        all belong to the single tick thread (``_drain_add_project_requests``),
+        so nothing races the reconcile loop over the project list it iterates."""
+        with self._add_lock:
+            self._add_requests.append(spec)
+
+    def project_results(self) -> list[dict]:
+        """Snapshot of recent add-project outcomes, for the dashboard."""
+        with self._add_lock:
+            return list(self._project_results)
+
+    def _record_result(self, name: str, ok: bool, detail: str) -> None:
+        with self._add_lock:
+            self._project_results.append(
+                {"name": name, "ok": ok, "detail": detail, "ts": int(time.time())}
+            )
+            # A handful is plenty — this is a transient "did my add land?" note.
+            self._project_results = self._project_results[-10:]
+
+    def _drain_add_project_requests(self) -> None:
+        with self._add_lock:
+            specs, self._add_requests = self._add_requests, []
+        for spec in specs:
+            self._add_project(spec)
+
+    def _add_project(self, spec: dict) -> None:
+        """Bring a new project into the fleet: validate, clone, wire up its
+        forge, and persist. Every failure is caught and recorded (never raised)
+        so one bad submission can't take the tick down. The config file is
+        written LAST, only once the clone succeeded, so it never grows an entry
+        the next daemon start can't stand up."""
+        name = str(spec.get("name") or "?")
+        try:
+            project = config_mod.parse_project(spec, "dashboard add-project")
+        except config_mod.ConfigError as e:
+            self._record_result(name, False, str(e))
+            return
+        if any(p.name == project.name for p in self.cfg.projects):
+            self._record_result(project.name, False, "a project with this name already exists")
+            return
+        if self.token_source is None:
+            self._record_result(
+                project.name, False, "this daemon can't add projects (no forge credentials wired up)"
+            )
+            return
+        try:
+            forge, action = build_forge_and_checkout(project, self.git, self.token_source)
+        except (ValueError, gitops.GitError) as e:
+            self._record_result(project.name, False, f"could not set up the repo: {e}")
+            return
+        except Exception as e:
+            log.exception("add-project %s: unexpected failure", project.name)
+            self._record_result(project.name, False, f"unexpected error: {e}")
+            return
+
+        # Clone succeeded — now it's safe to make it live and persist it.
+        self.forges[project.name] = forge
+        self.cfg.projects.append(project)
+        detail = action or f"repo {project.repo} already present"
+        if self.cfg.source_path is not None:
+            try:
+                config_mod.append_project(self.cfg.source_path, project)
+                detail += f"; written to {self.cfg.source_path}"
+            except OSError as e:
+                # It's live for this run but won't survive a restart — say so
+                # rather than pretend the write happened.
+                detail += f"; NOT persisted (config write failed: {e})"
+        else:
+            detail += "; not persisted (no config file backing this run)"
+        log.info("dashboard: added project %r (%s)", project.name, detail)
+        self._record_result(project.name, True, detail)
 
     def _drain_session_events(self) -> None:
         with self._session_lock:
@@ -250,6 +369,9 @@ class Reconciler:
         # dashboard this tick must not also be serviced (or re-adopted) off
         # the pre-stop snapshot.
         self._drain_stop_requests()
+        # New projects before the claim pass below, so a project added this
+        # tick is polled for claimable work the same tick it lands.
+        self._drain_add_project_requests()
         for rec in self.registry.all():
             try:
                 self._service(rec)

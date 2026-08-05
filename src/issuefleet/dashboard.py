@@ -180,10 +180,26 @@ class FleetView:
     write path — Stop — is delegated to ``stop_cb`` (which enqueues on the
     reconciler); the view itself mutates nothing."""
 
-    def __init__(self, state_dir: str | Path, stop_cb=None):
+    def __init__(
+        self,
+        state_dir: str | Path,
+        stop_cb=None,
+        config_path: str | Path | None = None,
+        allow_add_project: bool = False,
+        add_project_cb=None,
+        project_results_cb=None,
+    ):
         self.state_dir = Path(state_dir)
         self.runner = TmuxRunner(log_dir=self.state_dir / "logs")
         self.stop_cb = stop_cb
+        # Add-project surface. Reads come from the config file on disk (the
+        # persisted source of truth, like registry.json) so the view stays
+        # independent of the tick thread's mutable cfg; the one write path is
+        # delegated to add_project_cb (which enqueues on the reconciler).
+        self.config_path = Path(config_path) if config_path else None
+        self.allow_add_project = bool(allow_add_project and add_project_cb)
+        self.add_project_cb = add_project_cb
+        self.project_results_cb = project_results_cb
 
     def _registry(self) -> Registry:
         # Fresh read each request: registry.json is the source of truth and
@@ -259,6 +275,62 @@ class FleetView:
         self.stop_cb(key)
         return True
 
+    # ---------------------------------------------------------- projects
+
+    def projects(self) -> list[dict]:
+        """The configured projects, read fresh from the config file on disk —
+        the persisted truth, so a dashboard-added project shows up here once the
+        tick thread has cloned it and written the entry. Empty (never raising)
+        if there's no config file or it can't be read."""
+        if self.config_path is None:
+            return []
+        from issuefleet import config as config_mod
+
+        try:
+            cfg = config_mod.load(self.config_path)
+        except config_mod.ConfigError:
+            return []
+        out = []
+        for p in cfg.projects:
+            claim = (
+                p.claim.strategy
+                if p.claim.strategy == "agent"
+                else f"{p.claim.strategy}={p.claim.value}"
+            )
+            out.append({
+                "name": p.name,
+                "linear_project": p.linear_project,
+                "repo": str(p.repo),
+                "git_url": p.git_url or "",
+                "base_ref": p.base_ref,
+                "claim": claim,
+                "max_workers": p.max_workers,
+            })
+        return out
+
+    def project_results(self) -> list[dict]:
+        return list(self.project_results_cb()) if self.project_results_cb else []
+
+    def add_project(self, spec: dict) -> str | None:
+        """Validate a submitted project and, if it's well-formed, enqueue it for
+        the tick thread to clone and persist. Returns None on success (queued),
+        or a human-readable error string to show the operator. The heavy work
+        (clone, config write) and its outcome land asynchronously in
+        ``project_results``; this only rejects what we can see is wrong up front
+        so the form can complain immediately."""
+        if not self.allow_add_project:
+            return "adding projects from the dashboard is disabled"
+        from issuefleet import config as config_mod
+
+        try:
+            project = config_mod.parse_project(spec, "add-project form")
+        except config_mod.ConfigError as e:
+            return str(e)
+        if any(p["name"] == project.name for p in self.projects()):
+            return f"a project named {project.name!r} already exists"
+        self.add_project_cb(spec)
+        return None
+
 
 # ------------------------------------------------------------------- HTML
 
@@ -296,6 +368,14 @@ dt { color: #6b7686; } dd { margin: 0; word-break: break-all; }
 button.danger { background: #3a1414; color: #ff9a9a; border: 1px solid #6a2626;
   padding: 8px 16px; border-radius: 6px; font: inherit; cursor: pointer; }
 button.danger:hover { background: #521818; }
+button.primary { background: #14243a; color: #9ac4ff; border: 1px solid #26466a;
+  padding: 8px 16px; border-radius: 6px; font: inherit; cursor: pointer; }
+button.primary:hover { background: #183052; }
+label { display: block; color: #8a97a8; font-size: 13px; }
+input, select { width: 100%; max-width: 460px; margin-top: 4px; padding: 7px 9px;
+  background: #0e141c; color: #d6dee8; border: 1px solid #23303d; border-radius: 5px;
+  font: inherit; }
+form p { margin: 0 0 12px; }
 .ev { border-left: 3px solid #2b3644; padding: 6px 0 6px 14px; margin: 10px 0; }
 .ev .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
   color: #6b7686; margin-bottom: 3px; }
@@ -346,8 +426,12 @@ def render_index(snaps: list[dict], stopped: str | None = None) -> str:
             f"<div class='banner'>Stop requested for <b>{_h(stopped)}</b> — it will "
             "wind down on the next reconcile tick. Refresh in a moment.</div>"
         )
+    nav = "<div class='nav'><a href='/projects'>manage projects →</a></div>"
     if not snaps:
-        return _page("issuefleet", banner + "<p class='muted'>Fleet empty — no workers claimed.</p>")
+        return _page(
+            "issuefleet",
+            banner + nav + "<p class='muted'>Fleet empty — no workers claimed.</p>",
+        )
     rows = []
     for s in snaps:
         turn = (
@@ -380,7 +464,7 @@ def render_index(snaps: list[dict], stopped: str | None = None) -> str:
     # Meta-refresh keeps the list live without JS; individual pages don't refresh
     # so reading a transcript is never yanked out from under you. Refresh to a
     # clean "/" so a one-shot ?stopped= banner doesn't stick on every reload.
-    return _page("issuefleet", banner + table + note).replace(
+    return _page("issuefleet", banner + nav + table + note).replace(
         "<head>", "<head><meta http-equiv='refresh' content='5; url=/'>", 1
     )
 
@@ -516,6 +600,124 @@ def render_transcript(key: str, n: int, events: list[dict]) -> str:
     return _page(f"{key} turn {n}", nav + f"<h2 style='margin-top:0'>{_h(key)} · turn {n}</h2>" + "".join(blocks))
 
 
+_CLAIM_HELP = (
+    "agent — claim only when the issue is delegated/@-mentioned to the bot; "
+    "label / assignee / state — poll-claim by that field's value."
+)
+
+
+def render_projects(
+    projects: list[dict],
+    results: list[dict],
+    allow_add: bool,
+    error: str | None = None,
+    added: str | None = None,
+    form: dict | None = None,
+) -> str:
+    """The projects page: what the fleet manages now, recent add outcomes, and
+    (unless disabled) a form to add one. No auto-refresh — a half-typed form
+    must never be yanked out from under the operator."""
+    form = form or {}
+    nav = "<div class='nav'><a href='/'>← fleet</a></div>"
+
+    banners = []
+    if added:
+        banners.append(
+            f"<div class='banner'>Queued <b>{_h(added)}</b> — the daemon will clone it "
+            "on the next tick; watch for the outcome below.</div>"
+        )
+    if error:
+        banners.append(
+            f"<div class='banner' style='background:#2a1616;border-color:#5a2b2b;"
+            f"color:#ffb0b0'>Couldn't add project: {_h(error)}</div>"
+        )
+
+    if results:
+        items = []
+        for r in reversed(results):  # newest first
+            cls = "ok" if r["ok"] else "dead"
+            verb = "added" if r["ok"] else "rejected"
+            items.append(
+                f"<div class='ev'><div class='lbl'><span class='pill {cls}'>{verb}</span> "
+                f"{_h(r['name'])}</div><pre>{_h(r['detail'])}</pre></div>"
+            )
+        results_card = f"<div class='card'><h2>Recent add attempts</h2>{''.join(items)}</div>"
+    else:
+        results_card = ""
+
+    if projects:
+        rows = "".join(
+            "<tr>"
+            f"<td>{_h(p['name'])}</td>"
+            f"<td>{_h(p['linear_project'])}</td>"
+            f"<td>{_h(p['repo'])}</td>"
+            f"<td>{_h(p['claim'])}</td>"
+            f"<td>{_h(p['base_ref'])}</td>"
+            f"<td>{_h(p['max_workers']) if p['max_workers'] is not None else '<span class=muted>—</span>'}</td>"
+            "</tr>"
+            for p in projects
+        )
+        table = (
+            "<table><thead><tr><th>Name</th><th>Linear project</th><th>Repo</th>"
+            "<th>Claim</th><th>Base</th><th>Max</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table>"
+        )
+        projects_card = f"<div class='card'><h2>Projects ({len(projects)})</h2>{table}</div>"
+    else:
+        projects_card = (
+            "<div class='card'><h2>Projects</h2>"
+            "<p class='muted'>None visible (no config file backing this run, or it "
+            "couldn't be read).</p></div>"
+        )
+
+    if not allow_add:
+        form_card = (
+            "<div class='card'><h2>Add a project</h2>"
+            "<p class='muted'>Disabled ([dashboard] allow_add_project = false).</p></div>"
+        )
+    else:
+        def val(k):
+            return _h(form.get(k, ""))
+
+        def opt(v, label):
+            sel = " selected" if form.get("claim_strategy") == v else ""
+            return f"<option value='{v}'{sel}>{label}</option>"
+
+        form_card = (
+            "<div class='card'><h2>Add a project</h2>"
+            "<form method='post' action='/projects/add'>"
+            f"<p><label>name<br><input name='name' value=\"{val('name')}\" "
+            "placeholder='short-handle' required></label></p>"
+            f"<p><label>linear_project<br><input name='linear_project' "
+            f"value=\"{val('linear_project')}\" placeholder='Linear project name or UUID' required></label></p>"
+            f"<p><label>repo<br><input name='repo' value=\"{val('repo')}\" "
+            "placeholder='~/Projects/foo (clone the daemon owns)' required></label></p>"
+            f"<p><label>git_url <span class='muted'>(clone from here if repo is absent)</span><br>"
+            f"<input name='git_url' value=\"{val('git_url')}\" placeholder='https://github.com/owner/repo'></label></p>"
+            f"<p><label>base_ref<br><input name='base_ref' value=\"{val('base_ref') or 'main'}\"></label></p>"
+            "<p><label>claim strategy<br><select name='claim_strategy'>"
+            + opt("agent", "agent (delegation/@-mention only)")
+            + opt("label", "label")
+            + opt("assignee", "assignee")
+            + opt("state", "state")
+            + "</select></label></p>"
+            f"<p><label>claim value <span class='muted'>(label/user/state; leave blank for agent)</span><br>"
+            f"<input name='claim_value' value=\"{val('claim_value')}\"></label></p>"
+            f"<p><label>max_workers <span class='muted'>(optional per-project cap)</span><br>"
+            f"<input name='max_workers' value=\"{val('max_workers')}\" placeholder='(global cap)'></label></p>"
+            "<button type='submit' class='primary'>Add project</button>"
+            f"<p class='muted' style='margin-top:10px'>{_h(_CLAIM_HELP)} The repo is cloned "
+            "host-side and the entry written to the config file; it goes live on the next tick.</p>"
+            "</form></div>"
+        )
+
+    return _page(
+        "projects — issuefleet",
+        nav + "<h2 style='margin-top:0'>Projects</h2>"
+        + "".join(banners) + projects_card + results_card + form_card,
+    )
+
+
 # ----------------------------------------------------------------- server
 
 
@@ -579,6 +781,14 @@ class DashboardServer:
                     return self._send(200, render_index(outer.view.workers(), qs.get("stopped", [None])[0]))
                 if path == "/api/workers":
                     return self._send(200, json.dumps(outer.view.workers(), indent=2), "application/json")
+                if path == "/projects":
+                    return self._send(200, render_projects(
+                        outer.view.projects(),
+                        outer.view.project_results(),
+                        outer.view.allow_add_project,
+                        error=qs.get("error", [None])[0],
+                        added=qs.get("added", [None])[0],
+                    ))
                 route = _parse_worker_path(path)
                 if route is None:
                     return self._send(404, _page("not found", "<p class='muted'>Not found. <a href='/'>Fleet</a></p>"))
@@ -609,11 +819,14 @@ class DashboardServer:
                 return self._send(404, _page("not found", "<p class='muted'>Not found.</p>"))
 
             def do_POST(self):
-                # Drain any body so the connection can be reused/closed cleanly.
+                # Read the body first so the connection can be reused/closed
+                # cleanly and so form posts (add-project) can parse it.
                 length = int(self.headers.get("Content-Length", 0) or 0)
-                if length:
-                    self.rfile.read(length)
-                route = _parse_worker_path(urllib.parse.urlparse(self.path).path)
+                body = self.rfile.read(length) if length else b""
+                path = urllib.parse.urlparse(self.path).path
+                if path == "/projects/add":
+                    return self._add_project(body)
+                route = _parse_worker_path(path)
                 if route is None or route.sub != "stop":
                     return self._send(404, "not found", "text/plain")
                 if outer.view.request_stop(route.key):
@@ -621,6 +834,34 @@ class DashboardServer:
                     return self._redirect(f"/?stopped={urllib.parse.quote(route.key)}")
                 return self._send(404, _page("not found",
                     f"<p class='muted'>No worker <b>{_h(route.key)}</b> to stop.</p>"))
+
+            def _add_project(self, body: bytes):
+                form = {
+                    k: v[0].strip()
+                    for k, v in urllib.parse.parse_qs(body.decode("utf-8", "replace")).items()
+                }
+                # Assemble the project table parse_project expects. Empty
+                # optional fields are dropped so their defaults apply.
+                spec: dict = {
+                    "name": form.get("name", ""),
+                    "linear_project": form.get("linear_project", ""),
+                    "repo": form.get("repo", ""),
+                }
+                for opt_key in ("git_url", "base_ref", "max_workers"):
+                    if form.get(opt_key):
+                        spec[opt_key] = form[opt_key]
+                strategy = form.get("claim_strategy", "agent")
+                claim = {"strategy": strategy}
+                if strategy != "agent":
+                    claim["value"] = form.get("claim_value", "")
+                spec["claim"] = claim
+                err = outer.view.add_project(spec)
+                if err is None:
+                    log.info("dashboard: add-project queued for %r", spec["name"])
+                    return self._redirect(
+                        f"/projects?added={urllib.parse.quote(spec['name'])}"
+                    )
+                return self._redirect(f"/projects?error={urllib.parse.quote(err)}")
 
         self._server = ThreadingHTTPServer((bind, port), Handler)
         self._thread: threading.Thread | None = None
