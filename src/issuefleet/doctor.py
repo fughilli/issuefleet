@@ -204,8 +204,9 @@ def _check_dashboard(cfg: Config) -> list[Check]:
     d = cfg.dashboard
     if not d.enabled:
         return [Check(OK, "dashboard", "disabled")]
+    control = "stop workers" + (" + add projects" if d.allow_add_project else "")
     return [Check(OK, "dashboard", f"will bind {d.bind}:{d.port} — introspection web UI; "
-                  "loopback + a private tunnel (it can stop workers)")]
+                  f"keep it on the tailnet (it can {control})")]
 
 
 def _check_fleet_manager(cfg: Config) -> list[Check]:

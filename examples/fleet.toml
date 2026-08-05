@@ -39,15 +39,19 @@ port = 8787
 github_secret_file = "~/.config/issuefleet/github_webhook.secret"
 linear_secret_file = "~/.config/issuefleet/linear_webhook.secret"
 
-# Introspection web UI served by the running daemon: lists every worker, shows
-# each one's live transcript + mailbox, and can wind a worker down (POST +
-# confirm dialog). Read-mostly control plane — bind loopback and put a PRIVATE
-# tunnel (Tailscale serve, not a public Funnel) in front. Disable with
-# enabled = false.
+# Introspection + light-control web UI served by the running daemon: lists
+# every worker, shows each one's live transcript + mailbox, can wind a worker
+# down, and (under /projects) add a new project to the fleet — clone the repo
+# and append a [[projects]] entry to THIS file. It's a control plane, so keep
+# it on the tailnet: bind defaults to 0.0.0.0 (reachable from other tailnet
+# machines) — never point a public Funnel at it. Set bind = "127.0.0.1" to keep
+# it loopback-only, allow_add_project = false for a look-but-don't-touch UI, or
+# enabled = false to turn it off.
 [dashboard]
 enabled = true
-bind = "127.0.0.1"
+bind = "0.0.0.0"
 port = 8788
+allow_add_project = true
 
 [agent]
 max_auto_turns = 50
