@@ -95,6 +95,12 @@ class Git(Protocol):
 
     def has_commits_ahead(self, worktree: Path, base_ref: str) -> bool: ...
 
+    def diff(self, worktree: Path, base_ref: str) -> str:
+        """The unified diff HEAD contributes over its merge-base with the base
+        ref (``base...HEAD``) — what a `ready` would push. Used by the security
+        gate to scan for leaked credentials before the push."""
+        ...
+
     def sync_to_remote(self, worktree: Path, branch: str) -> str:
         """Fast-forward an adopted branch onto origin/<branch> before its agent
         starts. Returns "no-remote" | "up-to-date" | "fast-forwarded" |

@@ -160,6 +160,27 @@ class FleetManagerConfig:
 
 
 @dataclass
+class SecurityConfig:
+    """The security gate: scans the diff a worker's `ready` would push for
+    leaked credentials before the branch leaves the host. On by default (in
+    ``block`` mode) — it is deterministic, stdlib-only, and cheap, and a leaked
+    credential in a pushed branch is the one mistake this whole architecture
+    exists to prevent.
+
+    - ``mode = "block"`` (default): a hit rejects the `ready` and wakes the
+      agent with a redacted rationale to fix and resubmit.
+    - ``mode = "warn"``: the finding is logged and delivered, but the PR still
+      goes out.
+    - ``mode = "off"``: no scanning.
+    - ``deep_scan = "claude"``: additionally run an LLM pass (reusing the
+      Anthropic key) that can catch secrets the regexes miss; additive only and
+      degrades to the deterministic scanner if the key/API is unavailable."""
+
+    mode: str = "block"
+    deep_scan: str = "off"
+
+
+@dataclass
 class Config:
     projects: list[ProjectConfig]
     poll_interval_s: int = 60
@@ -225,6 +246,7 @@ class Config:
     webhooks: WebhookConfig = field(default_factory=WebhookConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     fleet_manager: FleetManagerConfig = field(default_factory=FleetManagerConfig)
+    security: SecurityConfig = field(default_factory=SecurityConfig)
 
     def project(self, name: str) -> ProjectConfig:
         for p in self.projects:
@@ -300,6 +322,25 @@ def _parse_worker_env(table: object, source: str) -> dict[str, EnvSource]:
 
 
 _ADVISOR_KINDS = ("conservative", "claude")
+_SECURITY_MODES = ("block", "warn", "off")
+_DEEP_SCAN_KINDS = ("off", "claude")
+
+
+def _parse_security(table: dict, source: str) -> SecurityConfig:
+    sec = SecurityConfig(
+        mode=str(table.get("mode", "block")),
+        deep_scan=str(table.get("deep_scan", "off")),
+    )
+    if sec.mode not in _SECURITY_MODES:
+        raise ConfigError(
+            f"{source} [security]: mode must be one of {_SECURITY_MODES}, got {sec.mode!r}"
+        )
+    if sec.deep_scan not in _DEEP_SCAN_KINDS:
+        raise ConfigError(
+            f"{source} [security]: deep_scan must be one of {_DEEP_SCAN_KINDS}, "
+            f"got {sec.deep_scan!r}"
+        )
+    return sec
 
 
 def _parse_fleet_manager(table: dict, source: str) -> FleetManagerConfig:
@@ -380,6 +421,7 @@ def parse(data: dict, source: str = "<config>") -> Config:
     hooks = data.get("webhooks", {})
     dash = data.get("dashboard", {})
     fleet = data.get("fleet_manager", {})
+    security = data.get("security", {})
     for name, table in (
         ("daemon", daemon),
         ("credentials", creds),
@@ -387,6 +429,7 @@ def parse(data: dict, source: str = "<config>") -> Config:
         ("webhooks", hooks),
         ("dashboard", dash),
         ("fleet_manager", fleet),
+        ("security", security),
     ):
         if not isinstance(table, dict):
             raise ConfigError(f"{source}: [{name}] must be a table")
@@ -511,6 +554,7 @@ def parse(data: dict, source: str = "<config>") -> Config:
     )
 
     cfg.fleet_manager = _parse_fleet_manager(fleet, source)
+    cfg.security = _parse_security(security, source)
 
     if cfg.poll_interval_s < 5:
         raise ConfigError(f"{source}: poll_interval_s must be >= 5")
