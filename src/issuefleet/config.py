@@ -7,11 +7,14 @@ literal key in the config is rejected outright.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+
+log = logging.getLogger("issuefleet")
 
 # "agent" = no poll-based claiming; issues are claimed only by delegating
 # (assigning) them to the Linear agent or @-mentioning it (agent sessions).
@@ -128,7 +131,7 @@ class DashboardConfig:
     bind: str = "0.0.0.0"
     port: int = 8788
     # Whether the dashboard may add a project to the fleet (clone the repo and
-    # persist a new [[projects]] entry to the config file). On by default —
+    # persist a new [[projects]] entry to the add-project drop-in). On by default —
     # anyone who can reach the dashboard can already stop workers — but can be
     # turned off for a look-but-don't-touch deployment.
     allow_add_project: bool = True
@@ -195,6 +198,13 @@ class Config:
     max_workers: int = 4
     state_dir: Path = Path("~/.local/state/issuefleet").expanduser()
     worktree_root: Path = Path("~/worktrees").expanduser()
+    # Where dashboard-added projects are persisted (see append_project). A
+    # daemon-owned drop-in the loader merges into the fleet on every start —
+    # deliberately NOT config.toml, so the operator's hand-authored config (and
+    # the read-only bind-mount it lives on in the container) stays untouched.
+    # None -> state_dir/added-projects.toml, which is already writable in every
+    # deployment (the registry, lock, and logs live there too).
+    added_projects_file: Path | None = None
     # agent behavior
     max_auto_turns: int = 50
     max_restarts: int = 3
@@ -255,9 +265,10 @@ class Config:
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     fleet_manager: FleetManagerConfig = field(default_factory=FleetManagerConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
-    # The file this config was loaded from, when it came from disk. The daemon
-    # writes back here when a project is added in-band (see append_project);
-    # None for a config built straight from a dict (tests, `parse`).
+    # The file this config was loaded from, when it came from disk. Marks a
+    # file-backed daemon run: a project added in-band is persisted (to the
+    # add-project drop-in, NOT here — see added_projects_path) only when this is
+    # set. None for a config built straight from a dict (tests, `parse`).
     source_path: Path | None = None
 
     def project(self, name: str) -> ProjectConfig:
@@ -265,6 +276,14 @@ class Config:
             if p.name == name:
                 return p
         raise ConfigError(f"no [[projects]] entry named {name!r}")
+
+    def added_projects_path(self) -> Path:
+        """The drop-in file runtime-added projects are persisted to and reloaded
+        from. Under state_dir by default (writable in every deployment), never
+        config.toml — see ``added_projects_file``."""
+        if self.added_projects_file is not None:
+            return self.added_projects_file
+        return self.state_dir / "added-projects.toml"
 
 
 def _reject_secrets(table: dict, where: str) -> None:
@@ -473,9 +492,9 @@ def _toml_str(v: str) -> str:
 
 def project_to_toml(p: ProjectConfig) -> str:
     """Render a project back to a ``[[projects]]`` block. Used to append a
-    dashboard-added project to the config file; kept minimal and canonical
-    (only the fields the project carries), not a faithful echo of hand-written
-    formatting."""
+    dashboard-added project to the add-project drop-in; kept minimal and
+    canonical (only the fields the project carries), not a faithful echo of
+    hand-written formatting."""
     lines = [
         "[[projects]]",
         f"name = {_toml_str(p.name)}",
@@ -502,17 +521,31 @@ def project_to_toml(p: ProjectConfig) -> str:
     return "\n".join(lines) + "\n"
 
 
-def append_project(config_path: str | Path, p: ProjectConfig) -> None:
+_ADDED_PROJECTS_HEADER = (
+    "# Projects added at runtime from the dashboard. This file is daemon-owned\n"
+    "# and merged into the fleet on every start; your hand-authored config.toml\n"
+    "# (which may sit on a read-only mount) is never touched. Safe to hand-edit\n"
+    "# or delete when the daemon is stopped.\n"
+)
+
+
+def append_project(drop_in_path: str | Path, p: ProjectConfig) -> None:
     """Persist a newly added project by appending its ``[[projects]]`` block to
-    the config file. Appending (rather than rewriting) keeps every existing
-    comment and hand-formatting intact — the file stays the operator's, we only
-    add to the end. The caller appends only after the clone succeeds, so the
-    file never grows an entry the daemon can't bring up on the next start."""
-    path = Path(config_path).expanduser()
-    existing = path.read_text() if path.exists() else ""
-    sep = "" if existing.endswith("\n\n") or not existing else ("\n" if existing.endswith("\n") else "\n\n")
-    with open(path, "a") as f:
-        f.write(sep + project_to_toml(p))
+    the daemon-owned drop-in file (Config.added_projects_path()), NOT config.toml
+    — so the operator's config, and the read-only mount it lives on in the
+    container, stay untouched. The write is atomic: the whole file is rewritten
+    to a temp sibling and ``os.replace``d into place, so a crash mid-write can
+    never leave a half-written drop-in that wedges the next daemon start. The
+    caller appends only after the clone succeeds, so the file never grows an
+    entry the daemon can't bring up."""
+    path = Path(drop_in_path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = path.read_text() if path.exists() else _ADDED_PROJECTS_HEADER
+    sep = "" if existing.endswith("\n\n") else ("\n" if existing.endswith("\n") else "\n\n")
+    new_text = existing + sep + project_to_toml(p)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(new_text)
+    os.replace(tmp, path)
 
 
 def load(path: str | Path) -> Config:
@@ -526,7 +559,40 @@ def load(path: str | Path) -> Config:
         raise ConfigError(f"{path}: invalid TOML: {e}")
     cfg = parse(data, source=str(path))
     cfg.source_path = path
+    _merge_added_projects(cfg)
     return cfg
+
+
+def _merge_added_projects(cfg: Config) -> None:
+    """Fold the runtime add-project drop-in into the loaded fleet. config.toml
+    is the source of truth: a name present there wins, and the drop-in entry is
+    skipped with a warning (rather than silently double-registered). A malformed
+    drop-in is logged and skipped, never fatal — the whole point of writing it
+    atomically, after the clone, is that it can't wedge the next start."""
+    path = cfg.added_projects_path()
+    if not path.exists():
+        return
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        log.warning("ignoring unreadable add-project drop-in %s: %s", path, e)
+        return
+    known = {p.name for p in cfg.projects}
+    for i, raw in enumerate(data.get("projects", [])):
+        try:
+            p = parse_project(raw, f"{path} [[projects]] #{i + 1}")
+        except ConfigError as e:
+            log.warning("skipping invalid project in drop-in %s: %s", path, e)
+            continue
+        if p.name in known:
+            log.warning(
+                "drop-in %s: project %r also defined in config.toml — keeping the "
+                "config.toml entry", path, p.name
+            )
+            continue
+        known.add(p.name)
+        cfg.projects.append(p)
 
 
 def parse(data: dict, source: str = "<config>") -> Config:
@@ -579,6 +645,8 @@ def parse(data: dict, source: str = "<config>") -> Config:
         cfg.state_dir = _path(daemon["state_dir"])
     if "worktree_root" in daemon:
         cfg.worktree_root = _path(daemon["worktree_root"])
+    if "added_projects_file" in daemon:
+        cfg.added_projects_file = _path(daemon["added_projects_file"])
     if "container_config_dir" in agent:
         cfg.container_config_dir = _path(agent["container_config_dir"])
     cfg.worker_env = _parse_worker_env(agent.get("env", {}), source)

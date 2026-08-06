@@ -707,7 +707,7 @@ def render_projects(
             f"<input name='max_workers' value=\"{val('max_workers')}\" placeholder='(global cap)'></label></p>"
             "<button type='submit' class='primary'>Add project</button>"
             f"<p class='muted' style='margin-top:10px'>{_h(_CLAIM_HELP)} The repo is cloned "
-            "host-side and the entry written to the config file; it goes live on the next tick.</p>"
+            "host-side and the entry saved to the daemon's add-project drop-in; it goes live on the next tick.</p>"
             "</form></div>"
         )
 

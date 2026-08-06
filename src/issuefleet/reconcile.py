@@ -188,7 +188,7 @@ class Reconciler:
     def enqueue_add_project(self, spec: dict) -> None:
         """Thread-safe intake for a dashboard 'add project' submission. Like a
         stop request, the web thread never touches the fleet itself: cloning the
-        repo, mutating ``cfg.projects``/``forges``, and writing the config file
+        repo, mutating ``cfg.projects``/``forges``, and writing the drop-in file
         all belong to the single tick thread (``_drain_add_project_requests``),
         so nothing races the reconcile loop over the project list it iterates."""
         with self._add_lock:
@@ -216,7 +216,7 @@ class Reconciler:
     def _add_project(self, spec: dict) -> None:
         """Bring a new project into the fleet: validate, clone, wire up its
         forge, and persist. Every failure is caught and recorded (never raised)
-        so one bad submission can't take the tick down. The config file is
+        so one bad submission can't take the tick down. The drop-in file is
         written LAST, only once the clone succeeded, so it never grows an entry
         the next daemon start can't stand up."""
         name = str(spec.get("name") or "?")
@@ -248,13 +248,14 @@ class Reconciler:
         self.cfg.projects.append(project)
         detail = action or f"repo {project.repo} already present"
         if self.cfg.source_path is not None:
+            drop_in = self.cfg.added_projects_path()
             try:
-                config_mod.append_project(self.cfg.source_path, project)
-                detail += f"; written to {self.cfg.source_path}"
+                config_mod.append_project(drop_in, project)
+                detail += f"; written to {drop_in}"
             except OSError as e:
                 # It's live for this run but won't survive a restart — say so
                 # rather than pretend the write happened.
-                detail += f"; NOT persisted (config write failed: {e})"
+                detail += f"; NOT persisted (drop-in write failed: {e})"
         else:
             detail += "; not persisted (no config file backing this run)"
         log.info("dashboard: added project %r (%s)", project.name, detail)
