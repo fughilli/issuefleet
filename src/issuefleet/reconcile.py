@@ -541,14 +541,24 @@ class Reconciler:
                 )
                 return
             log.warning("worker %s: session dead, restarting (%d so far)", rec.issue_key, rec.restarts)
-            mailbox.ensure().put_inbox(
-                "info", {"text": "Your session was restarted after a crash; check `git status` and continue."}
-            )
             self._sync_branch(rec, project, mailbox)
             self.runner.start(rec, self.cfg)
             rec.restarts += 1
             rec.touch()
             self.registry.save()
+            # Write the "you were restarted" note only once the session is
+            # actually live. A worker that can never start (the macOS script(1)
+            # bug, e.g.) otherwise accrues one identical unread note per tick,
+            # burying genuine replies in chaff no agent ever reads. The counter
+            # above still climbs, so max_restarts eventually parks it as crashed.
+            # coalesce guards the rare case of a live worker restarted repeatedly
+            # before it reads the note.
+            if self.runner.alive(rec):
+                mailbox.ensure().put_inbox(
+                    "info",
+                    {"text": "Your session was restarted after a crash; check `git status` and continue."},
+                    coalesce=True,
+                )
 
         self._bind_agent_session(rec)
         self._drain_outbox(rec, project, mailbox)
@@ -914,7 +924,7 @@ class Reconciler:
             )
         else:
             return
-        mailbox.ensure().put_inbox("info", {"text": text})
+        mailbox.ensure().put_inbox("info", {"text": text}, coalesce=True)
 
     def _sync_branch(self, rec: WorkerRecord, project: ProjectConfig, mailbox: Mailbox) -> None:
         """Fast-forward a restarting worker's branch onto origin before its

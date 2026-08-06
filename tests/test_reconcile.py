@@ -584,6 +584,33 @@ class ReconcileTest(unittest.TestCase):
         self.rec.tick()
         self.assertEqual(self.runner.started, [w.tmux_session])
 
+    def test_restart_note_written_only_once_a_session_is_live(self):
+        # A worker that can never start (e.g. the macOS script(1) bug) must not
+        # accrue one identical unread restart note per tick — that buries real
+        # replies. No live session => no note, but the counter still climbs.
+        self.claim_one()
+        w = self.worker()
+        for _ in range(2):
+            self.runner.dead.add(w.tmux_session)
+            self.runner.fail_start.add(w.tmux_session)
+            self.rec.tick()
+        notes = [m.payload.get("text", "") for m in self.mailbox().pending_inbox()]
+        self.assertFalse(any("restarted after a crash" in t for t in notes), notes)
+        self.assertEqual(self.worker().restarts, 2)  # attempts still counted
+
+    def test_repeated_live_restarts_leave_a_single_restart_note(self):
+        # When the worker does come back but is restarted again before it reads
+        # (the note is never consumed in these tests), coalescing keeps exactly
+        # one copy rather than a per-restart pile.
+        self.claim_one()
+        w = self.worker()
+        for _ in range(3):
+            self.runner.dead.add(w.tmux_session)
+            self.rec.tick()
+        notes = [m.payload.get("text", "") for m in self.mailbox().pending_inbox()
+                 if "restarted after a crash" in m.payload.get("text", "")]
+        self.assertEqual(len(notes), 1, notes)
+
     # -- inbound comments --------------------------------------------------
 
     def test_human_comment_ingested_own_posts_filtered(self):

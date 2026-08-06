@@ -73,9 +73,19 @@ class Mailbox:
 
     # -- writing ----------------------------------------------------------
 
-    def put_inbox(self, kind: str, payload: dict[str, Any]) -> Message:
+    def put_inbox(self, kind: str, payload: dict[str, Any], *, coalesce: bool = False) -> Message:
         if kind not in INBOX_KINDS:
             raise MailboxError(f"unknown inbox kind {kind!r}")
+        # Coalesce against the *unread* queue only: if an identical message is
+        # still pending (not yet consumed), a second copy adds noise without
+        # information — return the one already queued. Once the agent has read
+        # and consumed it, a fresh copy is legitimate again, so consumed/ is
+        # deliberately not scanned. Guards repeated info (restart/branch-sync
+        # notes) from burying genuine replies in identical chaff.
+        if coalesce:
+            for existing in self.pending_inbox():
+                if existing.kind == kind and existing.payload == payload:
+                    return existing
         return self._put(self.inbox, self.inbox_consumed, kind, payload)
 
     def put_outbox(self, kind: str, payload: dict[str, Any]) -> Message:

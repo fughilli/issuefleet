@@ -68,6 +68,35 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0].payload["text"], "good")
 
+    def test_coalesce_dedupes_identical_pending_info(self):
+        text = {"text": "Your session was restarted after a crash; continue."}
+        m1 = self.mb.put_inbox("info", text, coalesce=True)
+        m2 = self.mb.put_inbox("info", text, coalesce=True)
+        pending = self.mb.pending_inbox()
+        self.assertEqual(len(pending), 1)  # the second copy was not appended
+        self.assertEqual(m2.id, m1.id)     # it returned the queued message
+
+    def test_coalesce_writes_again_after_consume(self):
+        # Once the agent has read (consumed) the note, a fresh copy is a real
+        # event again — coalescing only suppresses *unread* duplicates.
+        text = {"text": "restarted"}
+        m1 = self.mb.put_inbox("info", text, coalesce=True)
+        self.mb.consume_inbox(m1)
+        m2 = self.mb.put_inbox("info", text, coalesce=True)
+        self.assertNotEqual(m2.id, m1.id)
+        self.assertEqual(len(self.mb.pending_inbox()), 1)
+
+    def test_coalesce_leaves_distinct_payloads_and_kinds_alone(self):
+        self.mb.put_inbox("info", {"text": "one"}, coalesce=True)
+        self.mb.put_inbox("info", {"text": "two"}, coalesce=True)
+        self.mb.put_inbox("reply", {"text": "one"}, coalesce=True)
+        self.assertEqual(len(self.mb.pending_inbox()), 3)
+
+    def test_coalesce_off_by_default_appends(self):
+        self.mb.put_inbox("info", {"text": "dup"})
+        self.mb.put_inbox("info", {"text": "dup"})
+        self.assertEqual(len(self.mb.pending_inbox()), 2)
+
     def test_boxes_are_independent(self):
         self.mb.put_outbox("status", {"text": "out"})
         self.mb.put_inbox("reply", {"text": "in"})

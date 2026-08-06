@@ -432,10 +432,16 @@ class FakeRunner:
         self.started: list[str] = []
         self.stopped: list[str] = []
         self.dead: set[str] = set()  # tmux_session names reported not-alive
+        self.fail_start: set[str] = set()  # sessions that die immediately on start
 
     def start(self, rec, config) -> None:
         self.started.append(rec.tmux_session)
-        self.dead.discard(rec.tmux_session)
+        # A real start(1s)-and-check can find the session already gone (e.g. the
+        # macOS script(1) bug): the attempt is recorded but the session is dead.
+        if rec.tmux_session in self.fail_start:
+            self.dead.add(rec.tmux_session)
+        else:
+            self.dead.discard(rec.tmux_session)
 
     def alive(self, rec) -> bool:
         return rec.tmux_session in self.started and rec.tmux_session not in self.dead
