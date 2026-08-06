@@ -13,6 +13,7 @@ from pathlib import Path
 from issuefleet.dashboard import (
     DashboardServer,
     FleetView,
+    diagnose,
     parse_transcript,
     turn_files,
     worker_snapshot,
@@ -114,6 +115,43 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(turn_files(wt / ".agent"), [1, 2, 10])
 
 
+class DiagnoseTest(unittest.TestCase):
+    """The 'why it isn't running' explanation is pure over a snapshot dict, so
+    each case is a one-liner to pin."""
+
+    def snap(self, **kw):
+        base = {"phase": "active", "alive": True, "restarts": 0, "turn_phase": "running"}
+        base.update(kw)
+        return base
+
+    def test_crashed_is_reset_worthy(self):
+        d = diagnose(self.snap(phase="crashed", alive=False, restarts=3), max_restarts=3)
+        self.assertEqual(d["case"], "crashed")
+        self.assertTrue(d["needs_reset"])
+        self.assertIn("3/3", d["detail"])
+
+    def test_dead_with_budget_will_restart(self):
+        d = diagnose(self.snap(alive=False, restarts=1), max_restarts=3)
+        self.assertEqual(d["case"], "will_restart")
+        self.assertTrue(d["needs_reset"])
+        self.assertIn("attempt 2 of 3", d["detail"])
+
+    def test_dead_at_ceiling_about_to_crash(self):
+        d = diagnose(self.snap(alive=False, restarts=3), max_restarts=3)
+        self.assertEqual(d["case"], "about_to_crash")
+        self.assertTrue(d["needs_reset"])
+
+    def test_alive_waiting_on_human_is_not_stuck(self):
+        d = diagnose(self.snap(turn_phase="waiting"), max_restarts=3)
+        self.assertEqual(d["case"], "waiting")
+        self.assertFalse(d["needs_reset"])
+
+    def test_alive_running_needs_no_explanation(self):
+        d = diagnose(self.snap(), max_restarts=3)
+        self.assertEqual(d["case"], "running")
+        self.assertFalse(d["needs_reset"])
+
+
 class TranscriptTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -156,7 +194,10 @@ class DashboardServerTest(unittest.TestCase):
         (self.state_dir / "logs" / "issuefleet-splanc-FUG-1.log").write_text("pane output here")
 
         self.stopped: list[str] = []
-        self.view = FleetView(self.state_dir, stop_cb=self.stopped.append)
+        self.reset: list[str] = []
+        self.view = FleetView(
+            self.state_dir, stop_cb=self.stopped.append, reset_cb=self.reset.append
+        )
         # Never shell to tmux in tests.
         self.view.runner.alive = lambda r: True
         self.server = DashboardServer(bind="127.0.0.1", port=0, view=self.view).start()
@@ -233,6 +274,33 @@ class DashboardServerTest(unittest.TestCase):
         code, _, _ = self.get("/worker/FUG-999/stop", method="POST")
         self.assertEqual(code, 404)
         self.assertEqual(self.stopped, [])
+
+    def test_reset_is_post_only(self):
+        code, _, _ = self.get("/worker/FUG-1/reset")
+        self.assertEqual(code, 404)
+        self.assertEqual(self.reset, [])
+
+    def test_reset_post_enqueues(self):
+        code, body, final = self.get("/worker/FUG-1/reset", method="POST")
+        self.assertEqual(code, 200)  # 303 -> followed to the worker page
+        self.assertEqual(self.reset, ["FUG-1"])
+        self.assertIn("Reset queued", body)
+
+    def test_reset_unknown_worker_does_not_enqueue(self):
+        code, _, _ = self.get("/worker/FUG-999/reset", method="POST")
+        self.assertEqual(code, 404)
+        self.assertEqual(self.reset, [])
+
+    def test_reset_control_shown_only_for_a_stuck_worker(self):
+        # Alive + running: no diagnosis card, no reset button.
+        _, body, _ = self.get("/worker/FUG-1")
+        self.assertNotIn("Reset worker", body)
+        self.assertNotIn("Why it isn't running", body)
+        # Dead session: the diagnosis explains why and offers the reset.
+        self.view.runner.alive = lambda r: False
+        _, body, _ = self.get("/worker/FUG-1")
+        self.assertIn("Why it isn't running", body)
+        self.assertIn("Reset worker", body)
 
     def test_html_is_escaped(self):
         # Inject a worker whose title carries markup; it must be escaped.

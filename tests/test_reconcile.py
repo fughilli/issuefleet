@@ -10,6 +10,7 @@ from fakes import FakeForge, FakeGit, FakeRunner, FakeTracker, make_issue
 
 from issuefleet import MARKER_PREFIX, config
 from issuefleet.mailbox import Mailbox
+from issuefleet.model import PHASE_ACTIVE, PHASE_CRASHED
 from issuefleet.reconcile import Reconciler, slugify
 from issuefleet.registry import Registry
 
@@ -427,6 +428,54 @@ class ReconcileTest(unittest.TestCase):
         self.claim_one()
         self.rec.enqueue_stop("FUG-404")
         self.rec._drain_stop_requests()  # must not raise
+        self.assertIsNotNone(self.worker())
+
+    # -- dashboard reset request -------------------------------------------
+
+    def _crash_worker(self, n=1):
+        """Drive a claimed worker to phase=crashed by killing its session and
+        ticking past max_restarts, exactly as the daemon does."""
+        w = self.claim_one(n)
+        for _ in range(self.cfg.max_restarts + 1):
+            self.runner.dead.add(w.tmux_session)
+            self.rec.tick()
+        self.assertEqual(self.worker(n).phase, PHASE_CRASHED)
+        return self.worker(n)
+
+    def test_reset_clears_crashed_phase_and_zeroes_restarts(self):
+        w = self._crash_worker()
+        self.assertGreater(w.restarts, 0)
+        self.rec.enqueue_reset("fug-1")  # case-insensitive
+        self.assertEqual(self.worker().phase, PHASE_CRASHED)  # queued only
+        self.rec._drain_reset_requests()
+        self.assertEqual(self.worker().phase, PHASE_ACTIVE)
+        self.assertEqual(self.worker().restarts, 0)
+        # The reset persists across a reload — it went through the registry
+        # save, not just the in-memory object (the whole point vs hand-editing).
+        self.registry.reload()
+        self.assertEqual(self.worker().phase, PHASE_ACTIVE)
+        self.assertEqual(self.worker().restarts, 0)
+        # It leaves a note for the agent so a revived worker knows why.
+        info = [m for m in self.mailbox().pending_inbox() if m.kind == "info"]
+        self.assertTrue(any("reset" in m.payload.get("text", "").lower() for m in info))
+
+    def test_reset_revives_a_crashed_worker_on_the_next_tick(self):
+        w = self._crash_worker()
+        # Crashed workers are not serviced: a tick alone won't restart it.
+        self.runner.started.clear()
+        self.rec.tick()
+        self.assertEqual(self.runner.started, [])
+        # After a reset the very next tick restarts the dead session (the
+        # two-edit trap encoded: clearing phase is what actually revives it).
+        self.rec.enqueue_reset("FUG-1")
+        self.rec.tick()
+        self.assertIn(w.tmux_session, self.runner.started)
+        self.assertEqual(self.worker().phase, PHASE_ACTIVE)
+
+    def test_dashboard_reset_of_unknown_worker_is_a_noop(self):
+        self.claim_one()
+        self.rec.enqueue_reset("FUG-404")
+        self.rec._drain_reset_requests()  # must not raise
         self.assertIsNotNone(self.worker())
 
     def test_pr_closed_without_merge_notifies_agent_once(self):

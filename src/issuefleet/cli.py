@@ -212,6 +212,10 @@ def _start_dashboard(cfg: Config, reconciler: Reconciler, wake: threading.Event)
         reconciler.enqueue_stop(issue_key)
         wake.set()
 
+    def reset_cb(issue_key: str) -> None:
+        reconciler.enqueue_reset(issue_key)
+        wake.set()
+
     def add_project_cb(spec: dict) -> None:
         reconciler.enqueue_add_project(spec)
         wake.set()
@@ -219,6 +223,8 @@ def _start_dashboard(cfg: Config, reconciler: Reconciler, wake: threading.Event)
     view = FleetView(
         cfg.state_dir,
         stop_cb=stop_cb,
+        reset_cb=reset_cb,
+        max_restarts=cfg.max_restarts,
         config_path=cfg.source_path,
         allow_add_project=dcfg.allow_add_project,
         add_project_cb=add_project_cb,
