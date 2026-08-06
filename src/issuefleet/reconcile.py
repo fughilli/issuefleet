@@ -138,6 +138,12 @@ class Reconciler:
         # tick so all git/registry mutation stays on the single tick thread.
         self._stop_lock = threading.Lock()
         self._stop_requests: list[str] = []  # issue keys
+        # Dashboard-requested resets: same single-thread discipline as stops.
+        # The web thread enqueues a key; the tick thread clears phase/restarts
+        # so the reset goes through the daemon and can't race a registry save
+        # the way a hand-edit of registry.json under a live daemon does.
+        self._reset_lock = threading.Lock()
+        self._reset_requests: list[str] = []  # issue keys
         # Dashboard-requested new projects: same discipline — the web thread
         # enqueues a validated project spec, the tick thread does the clone,
         # the cfg/forges mutation, and the config-file write. Results (one per
@@ -182,6 +188,49 @@ class Reconciler:
                 self._wind_down(rec, project, mailbox, reason="stopped from dashboard", done=False)
             except Exception:
                 log.exception("dashboard stop of %s failed; will not retry", key)
+
+    # ---------------------------------------------- dashboard reset requests
+
+    def enqueue_reset(self, issue_key: str) -> None:
+        """Thread-safe intake for a dashboard 'reset this worker' click. Like a
+        stop, the web thread only queues the key and wakes the loop;
+        `_drain_reset_requests` does the mutation next tick so nothing races the
+        registry save."""
+        with self._reset_lock:
+            self._reset_requests.append(issue_key)
+
+    def _drain_reset_requests(self) -> None:
+        with self._reset_lock:
+            keys, self._reset_requests = self._reset_requests, []
+        for key in keys:
+            rec = next(
+                (w for w in self.registry.all() if w.issue_key.lower() == key.lower()), None
+            )
+            if rec is None:
+                log.info("dashboard reset for %s: no such worker (already gone)", key)
+                continue
+            # Clear BOTH: _service returns early on phase==crashed *before* the
+            # restart logic reads the counter, so zeroing restarts without
+            # clearing the phase leaves a crashed worker just as stuck (the
+            # two-edit trap this control exists to encode). Back to active +
+            # zero restarts means the next liveness check restarts it clean.
+            was = f"phase={rec.phase} restarts={rec.restarts}"
+            rec.phase = PHASE_ACTIVE
+            rec.restarts = 0
+            rec.touch()
+            self.registry.save()
+            log.info("dashboard: reset %s (%s -> active, restarts 0); next tick will "
+                     "restart it if its session is dead", rec.issue_key, was)
+            mailbox = Mailbox(Path(rec.worktree) / ".agent" / "mailbox")
+            try:
+                mailbox.ensure().put_inbox(
+                    "info",
+                    {"text": "This worker was reset from the dashboard (crash state cleared, "
+                     "restart counter zeroed). If your session is up, continue; if it was "
+                     "restarted, check `git status` first."},
+                )
+            except OSError:
+                pass  # worktree may be gone; the phase/restart reset still stands
 
     # ------------------------------------------- dashboard add-project requests
 
@@ -378,6 +427,10 @@ class Reconciler:
         # dashboard this tick must not also be serviced (or re-adopted) off
         # the pre-stop snapshot.
         self._drain_stop_requests()
+        # Resets before servicing too: a worker reset this tick must be
+        # serviced off its cleared state (active, restarts 0), so a dead
+        # session is restarted this same tick rather than staying parked.
+        self._drain_reset_requests()
         # New projects before the claim pass below, so a project added this
         # tick is polled for claimable work the same tick it lands.
         self._drain_add_project_requests()

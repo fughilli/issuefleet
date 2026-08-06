@@ -86,6 +86,87 @@ def worker_snapshot(rec: WorkerRecord, runner: TmuxRunner) -> dict:
     }
 
 
+def diagnose(snap: dict, max_restarts: int) -> dict:
+    """Explain, from local state alone, why a worker is or isn't running — the
+    thing the bare alive/dead pill can't. Returns
+    ``{case, headline, detail, needs_reset}``.
+
+    Cases mirror reconcile's own decision points so the explanation matches
+    what the next tick will actually do:
+      * ``crashed``       — gave up after restarts/max_restarts; worktree kept,
+                            no further action until an operator resets it.
+      * ``about_to_crash``— session dead and restarts == max_restarts; the next
+                            tick marks it crashed.
+      * ``will_restart``  — session dead, restarts < max_restarts; the next tick
+                            restarts it (attempt restarts+1 of max_restarts).
+      * ``waiting``       — session up but the agent asked a question and is
+                            idling on a human; not stuck, just blocked on you.
+      * ``running``       — session up and working; nothing to explain.
+
+    ``needs_reset`` is True only for the states a reset addresses (crashed /
+    dead), so the caller shows the control exactly where it helps."""
+    phase = snap.get("phase")
+    alive = snap.get("alive")
+    restarts = snap.get("restarts") or 0
+    counts = f"{restarts}/{max_restarts} restarts"
+
+    if phase == "crashed":
+        return {
+            "case": "crashed",
+            "headline": "Crashed — the daemon gave up restarting it.",
+            "detail": (
+                f"It hit the restart ceiling ({counts}) and was parked. The worktree and "
+                "branch are kept for inspection; the daemon will not touch it again on its "
+                "own. Reset it to clear the crash and let the next tick restart the session. "
+                "Reset does not fix the underlying cause — if it dies the same way it will "
+                "climb straight back to crashed, which you'll see here as the restart count "
+                "rising again with no fresh pane output."
+            ),
+            "needs_reset": True,
+        }
+    if not alive:
+        if restarts >= max_restarts:
+            return {
+                "case": "about_to_crash",
+                "headline": "Session dead — about to be marked crashed.",
+                "detail": (
+                    f"The tmux session isn't running and it's already used its restart budget "
+                    f"({counts}). The next reconcile tick will mark it crashed rather than "
+                    "restart it again. Reset now (clears the counter) if you want it to keep "
+                    "trying; otherwise let it crash and inspect the pane log below for why."
+                ),
+                "needs_reset": True,
+            }
+        return {
+            "case": "will_restart",
+            "headline": "Session dead — will be restarted on the next tick.",
+            "detail": (
+                f"The tmux session isn't running but it still has restart budget ({counts}); "
+                f"the next reconcile tick will restart it (attempt {restarts + 1} of "
+                f"{max_restarts}). No action needed unless it keeps dying — a reset zeroes the "
+                "counter so a transient crash doesn't count against the ceiling."
+            ),
+            "needs_reset": True,
+        }
+    if snap.get("turn_phase") == "waiting":
+        return {
+            "case": "waiting",
+            "headline": "Waiting on a human — not stuck.",
+            "detail": (
+                "The session is up; the agent asked a question and is idling until someone "
+                "replies on the Linear issue. This is the healthy blocked state, not a crash — "
+                "answer on the issue and it resumes. No reset needed."
+            ),
+            "needs_reset": False,
+        }
+    return {
+        "case": "running",
+        "headline": "Running.",
+        "detail": "The session is up and working.",
+        "needs_reset": False,
+    }
+
+
 def turn_files(agent_dir: Path) -> list[int]:
     """Sorted turn indices with a log on disk (turn-0001.jsonl -> 1)."""
     out = []
@@ -184,6 +265,8 @@ class FleetView:
         self,
         state_dir: str | Path,
         stop_cb=None,
+        reset_cb=None,
+        max_restarts: int = 3,
         config_path: str | Path | None = None,
         allow_add_project: bool = False,
         add_project_cb=None,
@@ -192,6 +275,11 @@ class FleetView:
         self.state_dir = Path(state_dir)
         self.runner = TmuxRunner(log_dir=self.state_dir / "logs")
         self.stop_cb = stop_cb
+        # Reset (crash-clear) delegates to the reconciler exactly like stop —
+        # the view mutates nothing. max_restarts is the daemon's ceiling, shown
+        # in the diagnosis so "2/3 restarts" reads against the real limit.
+        self.reset_cb = reset_cb
+        self.max_restarts = max_restarts
         # Add-project surface. Reads come from the config file on disk (the
         # persisted source of truth, like registry.json) so the view stays
         # independent of the tick thread's mutable cfg; the one write path is
@@ -267,12 +355,35 @@ class FleetView:
             return ""
         return data[-max_bytes:].decode("utf-8", "replace")
 
+    def pane_log_age_s(self, key: str) -> int | None:
+        """Seconds since the pane log was last written, or None if it doesn't
+        exist yet. An empty-or-absent log on a dead worker is itself a
+        diagnosis: it died before the agent wrote anything."""
+        rec = self.find(key)
+        if rec is None:
+            return None
+        try:
+            mtime = self.runner.log_path(rec).stat().st_mtime
+        except OSError:
+            return None
+        return int(time.time() - mtime)
+
     def request_stop(self, key: str) -> bool:
         """Queue a wind-down for the tick thread. Returns False if there is no
         such worker or no stop channel wired up."""
         if self.stop_cb is None or self.find(key) is None:
             return False
         self.stop_cb(key)
+        return True
+
+    def request_reset(self, key: str) -> bool:
+        """Queue a crash-clear (phase->active, restarts->0) for the tick thread.
+        Mirrors request_stop: goes through the daemon so it can't race a
+        registry save. Returns False if there is no such worker or no reset
+        channel wired up."""
+        if self.reset_cb is None or self.find(key) is None:
+            return False
+        self.reset_cb(key)
         return True
 
     # ---------------------------------------------------------- projects
@@ -489,7 +600,57 @@ def _mailbox_html(mailbox: dict | None) -> str:
     )
 
 
-def render_worker(snap: dict, mailbox: dict | None, turns: list[int], pane_tail: str) -> str:
+def _diag_card(diag: dict) -> str:
+    """The 'why it isn't running' card. Rendered for everything except a plain
+    running worker; a crashed/dead one also carries the reset control."""
+    if diag["case"] == "running":
+        return ""
+    cls = "dead" if diag["needs_reset"] else "warn"
+    if diag["case"] == "waiting":
+        cls = "ok"
+    return (
+        "<div class='card'><h2>Why it isn't running</h2>"
+        f"<p><span class='pill {cls}'>{_h(diag['case'])}</span> "
+        f"<b>{_h(diag['headline'])}</b></p>"
+        f"<p class='muted'>{_h(diag['detail'])}</p></div>"
+    )
+
+
+def _pane_card(pane_tail: str, pane_age_s: int | None, diag: dict) -> str:
+    """Pane-log tail with an honesty note: a stale or empty log on a worker
+    that isn't running is itself the diagnosis — it died before the agent wrote
+    anything, so there's nothing to read but that fact."""
+    callout = "color:#ffd479;background:#201c0f;border:1px solid #5a4b2b;border-radius:6px;padding:8px 12px;margin:0 0 10px"
+    note = ""
+    if not pane_tail.strip():
+        if diag["needs_reset"]:
+            note = (
+                f"<p style='{callout}'>The pane log is empty. A worker that dies before its "
+                "agent starts writes nothing — that emptiness is the diagnosis: look at the "
+                "daemon log for why the session never came up (script wrapper, container start, "
+                "provisioning), not here.</p>"
+            )
+        body = "<span class='muted'>empty</span>"
+    else:
+        if pane_age_s is not None and pane_age_s >= 120 and diag["needs_reset"]:
+            note = (
+                f"<p style='{callout}'>This log hasn't been written to in {pane_age_s}s — it is "
+                "stale. What you see below is from before the session stopped, not live "
+                "output.</p>"
+            )
+        body = _h(pane_tail)
+    return f"<div class='card'><h2>Pane log (tail)</h2>{note}<pre>{body}</pre></div>"
+
+
+def render_worker(
+    snap: dict,
+    mailbox: dict | None,
+    turns: list[int],
+    pane_tail: str,
+    diag: dict,
+    pane_age_s: int | None = None,
+    reset_queued: bool = False,
+) -> str:
     kv = {
         "Title": snap["issue_title"],
         "Linear": f"<a href='{_h(snap['issue_url'])}'>{_h(snap['issue_url'])}</a>",
@@ -521,19 +682,38 @@ def render_worker(snap: dict, mailbox: dict | None, turns: list[int], pane_tail:
     else:
         turns_card = "<div class='card'><h2>Transcript</h2><p class='muted'>No turns logged yet.</p></div>"
 
-    pane_card = (
-        "<div class='card'><h2>Pane log (tail)</h2>"
-        f"<pre>{_h(pane_tail) or '<span class=muted>empty</span>'}</pre></div>"
-    )
+    diag_card = _diag_card(diag)
+    pane_card = _pane_card(pane_tail, pane_age_s, diag)
 
     key = _h(snap["issue_key"])
     confirm = (
         f"Stop worker {snap['issue_key']}? This winds it down: the container is killed "
         "and the worktree removed. The branch and an archived transcript are kept."
     )
+    # Reset is offered only for a worker a reset would actually help (crashed or
+    # session-dead); a healthy worker has nothing to clear.
+    reset_html = ""
+    if diag["needs_reset"]:
+        reset_confirm = (
+            f"Reset worker {snap['issue_key']}? This clears the crash state and zeroes the "
+            "restart counter so the daemon restarts the session on its next tick. It does not "
+            "fix why it stopped — if the cause remains, it will crash again."
+        )
+        reset_html = (
+            f"<form method='post' action='/worker/{key}/reset' style='margin-bottom:12px' "
+            f"onsubmit=\"return confirm('{_h(reset_confirm)}')\">"
+            "<button type='submit' class='primary'>Reset worker</button>"
+            "</form>"
+            "<p class='muted' style='margin-top:0'>Clears <code>crashed</code> and zeroes "
+            "<code>restarts</code> through the daemon (never by hand-editing registry.json, "
+            "which races the daemon's own save). Honest caveat: reset revives the worker, it "
+            "does not fix the root cause — watch the restart count and pane log above to tell "
+            "a recovery from an immediate re-crash.</p>"
+        )
     stop_card = (
         "<div class='card'><h2>Lifecycle</h2>"
-        f"<form method='post' action='/worker/{key}/stop' "
+        + reset_html
+        + f"<form method='post' action='/worker/{key}/stop' "
         f"onsubmit=\"return confirm('{_h(confirm)}')\">"
         "<button type='submit' class='danger'>Stop worker</button>"
         "</form>"
@@ -543,10 +723,17 @@ def render_worker(snap: dict, mailbox: dict | None, turns: list[int], pane_tail:
     )
 
     nav = f"<div class='nav'><a href='/'>← fleet</a></div>"
+    banner = ""
+    if reset_queued:
+        banner = (
+            "<div class='banner'>Reset queued — the crash state is cleared and the restart "
+            "counter zeroed on the next reconcile tick; a dead session is restarted then. "
+            "Refresh in a moment, and watch the restart count to confirm it stays down.</div>"
+        )
     return _page(
         f"{snap['issue_key']} — issuefleet",
-        nav + f"<h2 style='margin-top:0'>{key}</h2>"
-        + status_card + _mailbox_html(mailbox) + turns_card + pane_card + stop_card,
+        nav + banner + f"<h2 style='margin-top:0'>{key}</h2>"
+        + status_card + diag_card + _mailbox_html(mailbox) + turns_card + pane_card + stop_card,
     )
 
 
@@ -736,8 +923,8 @@ def _parse_worker_path(path: str) -> _Route | None:
     key = urllib.parse.unquote(parts[1])
     if len(parts) == 2:
         return _Route(key=key)
-    if len(parts) == 3 and parts[2] == "stop":
-        return _Route(key=key, sub="stop")
+    if len(parts) == 3 and parts[2] in ("stop", "reset"):
+        return _Route(key=key, sub=parts[2])
     if len(parts) == 4 and parts[2] in ("turn", "raw"):
         try:
             return _Route(key=key, n=int(parts[3]), sub=parts[2])
@@ -792,9 +979,9 @@ class DashboardServer:
                 route = _parse_worker_path(path)
                 if route is None:
                     return self._send(404, _page("not found", "<p class='muted'>Not found. <a href='/'>Fleet</a></p>"))
-                return self._get_worker(route)
+                return self._get_worker(route, reset=bool(qs.get("reset")))
 
-            def _get_worker(self, route: _Route):
+            def _get_worker(self, route: _Route, reset: bool = False):
                 snap = outer.view.snapshot(route.key)
                 if snap is None:
                     return self._send(404, _page("not found",
@@ -815,6 +1002,9 @@ class DashboardServer:
                         outer.view.mailbox(route.key),
                         outer.view.turns(route.key) or [],
                         outer.view.pane_log_tail(route.key) or "",
+                        diagnose(snap, outer.view.max_restarts),
+                        outer.view.pane_log_age_s(route.key),
+                        reset_queued=reset,
                     ))
                 return self._send(404, _page("not found", "<p class='muted'>Not found.</p>"))
 
@@ -827,8 +1017,14 @@ class DashboardServer:
                 if path == "/projects/add":
                     return self._add_project(body)
                 route = _parse_worker_path(path)
-                if route is None or route.sub != "stop":
+                if route is None or route.sub not in ("stop", "reset"):
                     return self._send(404, "not found", "text/plain")
+                if route.sub == "reset":
+                    if outer.view.request_reset(route.key):
+                        log.info("dashboard: reset requested for %s", route.key)
+                        return self._redirect(f"/worker/{urllib.parse.quote(route.key)}?reset=1")
+                    return self._send(404, _page("not found",
+                        f"<p class='muted'>No worker <b>{_h(route.key)}</b> to reset.</p>"))
                 if outer.view.request_stop(route.key):
                     log.info("dashboard: stop requested for %s", route.key)
                     return self._redirect(f"/?stopped={urllib.parse.quote(route.key)}")
