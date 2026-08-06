@@ -104,7 +104,12 @@ services:
       - ${ISSUEFLEET_PROJECTS:?not set - run via bazel (defaults to HOME/Projects) or export it}:${ISSUEFLEET_PROJECTS:?not set - run via bazel (defaults to HOME/Projects) or export it}
       # Config + secrets: the SAME ~/.config/issuefleet as a laptop setup,
       # mounted at the container's home path so plain ~/... paths in
-      # config.toml resolve identically in both worlds.
+      # config.toml resolve identically in both worlds. READ-ONLY on purpose:
+      # this holds the operator's hand-authored config AND the secret files, so
+      # the daemon never gets write access to it. Dashboard-added projects are
+      # persisted to a drop-in in the read-WRITE state mount above
+      # (<state_dir>/added-projects.toml), which the loader merges on start —
+      # so growing the fleet from the dashboard needs no write here.
       - ${ISSUEFLEET_CONFIG:?not set - run via bazel (defaults to HOME/.config/issuefleet)}:/home/fleet/.config/issuefleet:ro
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/bin/claude-container:/usr/local/bin/claude-container:ro
 

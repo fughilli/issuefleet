@@ -222,11 +222,17 @@ name, Linear project, repo path, an optional `git_url` to clone from, and a
 claim rule, then submit. As with Stop, the web thread never touches the fleet:
 it validates the form, enqueues the request, and the reconcile loop (the single
 writer) clones the repo, wires up its forge, adds it to the live fleet, and
-**appends a `[[projects]]` block to your config file** so it survives a restart
-— the file is written only after the clone succeeds, so a bad entry can never
-wedge the next daemon start. The new project is polled for claimable work the
-same tick it lands. Turn the form off with `[dashboard] allow_add_project =
-false` for a look-but-don't-touch deployment.
+**records it in a daemon-owned drop-in file** (`<state_dir>/added-projects.toml`
+by default; override with `[daemon] added_projects_file`) so it survives a
+restart — the loader merges that drop-in into the fleet on every start. Your
+hand-authored `config.toml` is **never** touched, so it can sit on a read-only
+mount (the container bind-mounts it `:ro`); the drop-in lives in the already
+read-write `state_dir` and is written atomically, only after the clone succeeds,
+so a bad or half-written entry can never wedge the next daemon start. If a name
+in the drop-in later reappears in `config.toml`, the `config.toml` entry wins.
+The new project is polled for claimable work the same tick it lands. Turn the
+form off with `[dashboard] allow_add_project = false` for a look-but-don't-touch
+deployment.
 
 The dashboard is a **control plane**, so treat it like one. It binds `0.0.0.0`
 by default so you can reach it from other machines **on your tailnet**; keep it
@@ -348,6 +354,8 @@ poll_interval_s = 60                       # reconcile tick interval
 max_workers = 4                            # global concurrency cap
 state_dir = "~/.local/state/issuefleet"    # registry, worker archives, logs
 worktree_root = "~/worktrees"              # worktrees live OUTSIDE the repos
+# added_projects_file = "..."              # where /projects add-project persists
+#                                          # (default <state_dir>/added-projects.toml)
 
 [credentials]                              # lookup locations, never secrets
 linear_api_key_env = "LINEAR_API_KEY"

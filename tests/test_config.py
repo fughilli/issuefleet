@@ -403,11 +403,17 @@ class ParseProjectTest(unittest.TestCase):
 
 
 class AppendProjectTest(unittest.TestCase):
+    """append_project persists to the daemon-owned drop-in, NOT config.toml, and
+    load() merges the drop-in back into the fleet on every start."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.path = Path(self.tmp.name) / "config.toml"
-        self.path.write_text(
+        self.root = Path(self.tmp.name)
+        self.path = self.root / "config.toml"
+        self.original = (
             "# my comment\n"
+            "[daemon]\n"
+            f'state_dir = "{self.root / "state"}"\n\n'
             "[dashboard]\n"
             "enabled = true\n\n"
             "[[projects]]\n"
@@ -416,20 +422,23 @@ class AppendProjectTest(unittest.TestCase):
             'repo = "/repos/splanc"\n'
             'claim = { strategy = "agent" }\n'
         )
+        self.path.write_text(self.original)
+        self.drop_in = config.load(self.path).added_projects_path()
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_round_trips_and_preserves_comment(self):
+    def test_round_trips_and_leaves_config_untouched(self):
         p = config.parse_project(
             {"name": "led-mapper", "linear_project": "LED Mapper",
              "repo": "/repos/led_mapper", "git_url": "https://github.com/o/led_mapper",
              "claim": {"strategy": "state", "value": "Ready for agent"}, "max_workers": 2},
             "where",
         )
-        config.append_project(self.path, p)
-        text = self.path.read_text()
-        self.assertIn("# my comment", text)  # untouched
+        config.append_project(self.drop_in, p)
+        # config.toml is never touched — it can sit on a read-only mount.
+        self.assertEqual(self.path.read_text(), self.original)
+        self.assertNotIn("led-mapper", self.path.read_text())
         cfg = config.load(self.path)
         names = [pr.name for pr in cfg.projects]
         self.assertEqual(names, ["splanc", "led-mapper"])
@@ -446,9 +455,38 @@ class AppendProjectTest(unittest.TestCase):
              "claim": {"strategy": "label", "value": "needs agent"}},
             "where",
         )
-        config.append_project(self.path, p)
+        config.append_project(self.drop_in, p)
         cfg = config.load(self.path)
         self.assertEqual(cfg.project("q").linear_project, 'A "Quoted" Board')
+
+    def test_config_wins_on_name_conflict(self):
+        # A drop-in entry whose name also lives in config.toml is skipped; the
+        # config.toml definition (repo /repos/splanc) is the one that survives.
+        p = config.parse_project(
+            {"name": "splanc", "linear_project": "Splanc", "repo": "/somewhere/else",
+             "claim": {"strategy": "agent"}},
+            "where",
+        )
+        config.append_project(self.drop_in, p)
+        cfg = config.load(self.path)
+        self.assertEqual([pr.name for pr in cfg.projects], ["splanc"])
+        self.assertEqual(str(cfg.project("splanc").repo), "/repos/splanc")
+
+    def test_malformed_drop_in_is_skipped_not_fatal(self):
+        self.drop_in.parent.mkdir(parents=True, exist_ok=True)
+        self.drop_in.write_text("this is not valid toml =\n")
+        cfg = config.load(self.path)  # must not raise
+        self.assertEqual([pr.name for pr in cfg.projects], ["splanc"])
+
+    def test_append_is_atomic_no_temp_left_behind(self):
+        p = config.parse_project(
+            {"name": "led-mapper", "linear_project": "LED Mapper", "repo": "/r",
+             "claim": {"strategy": "agent"}},
+            "where",
+        )
+        config.append_project(self.drop_in, p)
+        leftovers = list(self.drop_in.parent.glob("*.tmp"))
+        self.assertEqual(leftovers, [])
 
 
 if __name__ == "__main__":
