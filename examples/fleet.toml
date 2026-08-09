@@ -76,6 +76,8 @@ claude_container = "claude-container"
 # container_config_dir: shared Claude creds dir for workers. In the homelab
 # stack set it to your live ~/.config/claude-container/config (never a copy —
 # copies get revoked when the host rotates its OAuth token).
+# If the repo ships no .claude-container-overlay, issuefleet stages a default
+# one per worktree (git-excluded) that installs the python3 the worker needs.
 copy_from_repo = [".claude", ".claude-container-overlay"]
 launcher_args = ["--skills-ignore-new"]   # needs claude-container > 1.6.12
 # docker_platform = "auto"   # default: pin linux/amd64 on arm64 docker hosts (amd64-only images)

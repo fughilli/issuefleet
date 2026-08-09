@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from issuefleet.worker import inherit_repo_files
+from issuefleet.worker import ensure_container_overlay, inherit_repo_files
 
 DEFAULTS = [".claude", ".claude-container-overlay"]
 
@@ -64,6 +64,33 @@ class InheritRepoFilesTest(unittest.TestCase):
         (self.wt / ".claude" / "a.json").write_text("agent-modified")
         inherit_repo_files(self.repo, self.wt, DEFAULTS)  # re-adopt after restart
         self.assertEqual((self.wt / ".claude" / "a.json").read_text(), "agent-modified")
+
+
+class EnsureContainerOverlayTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.wt = Path(self.tmp.name) / "wt"
+        self.wt.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_writes_default_python_overlay(self):
+        """The file must carry real Dockerfile line continuations — a non-raw
+        Python literal silently eats backslash-newlines."""
+        self.assertTrue(ensure_container_overlay(self.wt))
+        text = (self.wt / ".claude-container-overlay").read_text()
+        self.assertIn("python3", text)
+        self.assertIn("apk", text)
+        self.assertIn("\\\n", text)
+        self.assertFalse(ensure_container_overlay(self.wt))
+
+    def test_leaves_directory_overlay_alone(self):
+        overlay = self.wt / ".claude-container-overlay"
+        overlay.mkdir()
+        (overlay / "overlay.json").write_text("{}")
+        self.assertFalse(ensure_container_overlay(self.wt))
+        self.assertTrue(overlay.is_dir())
 
 
 if __name__ == "__main__":

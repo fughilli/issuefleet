@@ -2,6 +2,7 @@
 relay → ready → PR → feedback → merge → teardown, plus un-claim,
 crash-restart, retry-after-API-failure, isolation, and capacity."""
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -429,6 +430,35 @@ class ReconcileTest(unittest.TestCase):
         self.rec.enqueue_stop("FUG-404")
         self.rec._drain_stop_requests()  # must not raise
         self.assertIsNotNone(self.worker())
+
+    def test_restart_stages_missing_overlay_and_excludes_it(self):
+        """Restarting a pre-overlay worktree stages the fragment
+        (git-excluded); one that already has it gets no duplicate exclude."""
+        w = self.claim_one()
+        overlay = Path(w.worktree) / ".claude-container-overlay"
+        overlay.unlink()
+        self.git.excludes.clear()
+        self.runner.dead.add(w.tmux_session)
+        self.rec.tick()
+        self.assertTrue(overlay.is_file())
+        self.assertIn((w.worktree, ".claude-container-overlay"), self.git.excludes)
+        self.git.excludes.clear()
+        self.runner.dead.add(w.tmux_session)
+        self.rec.tick()
+        self.assertNotIn((w.worktree, ".claude-container-overlay"), self.git.excludes)
+
+    def test_restart_survives_an_unwritable_worktree(self):
+        """An unwritable worktree must not escape past restarts += 1 — that
+        would retry forever instead of parking as crashed."""
+        w = self.claim_one()
+        (Path(w.worktree) / ".claude-container-overlay").unlink()
+        os.chmod(w.worktree, 0o555)
+        self.runner.dead.add(w.tmux_session)
+        try:
+            self.rec.tick()
+        finally:
+            os.chmod(w.worktree, 0o755)
+        self.assertEqual(self.worker().restarts, 1)
 
     # -- dashboard reset request -------------------------------------------
 
