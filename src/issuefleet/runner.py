@@ -81,7 +81,12 @@ class TmuxRunner:
     def command(self, rec: WorkerRecord, config: Config) -> list[str]:
         """The host command a worker session runs. The launcher word-splits
         its command argument, so the in-container part must be plain
-        space-separated words — ``/workspace/.agent/bin/turnloop run`` is."""
+        space-separated words — ``/workspace/.agent/bin/turnloop run`` is.
+
+        A resolved docker platform rides argv as ``env
+        DOCKER_DEFAULT_PLATFORM=...``: it survives tmux's environment
+        isolation and covers pull, run, and the launcher's overlay build.
+        Secrets never ride argv (see _write_env_file)."""
         cmd = [config.claude_container, "-w", rec.worktree]
         if config.container_config_dir is not None:
             cmd += ["-c", str(config.container_config_dir)]
@@ -90,6 +95,9 @@ class TmuxRunner:
         cmd += list(config.launcher_args)
         cmd += self._sibling_mount_args(rec, config)
         cmd += ["/workspace/.agent/bin/turnloop", "run"]
+        platform = config.resolved_docker_platform()
+        if platform:
+            cmd = ["env", f"DOCKER_DEFAULT_PLATFORM={platform}", *cmd]
         return cmd
 
     @staticmethod
