@@ -328,6 +328,170 @@ class ConfigTest(unittest.TestCase):
             config.parse(data)
 
 
+class ModelAndEffortSelectionTest(unittest.TestCase):
+    def test_model_defaults_to_none(self):
+        cfg = config.parse(MINIMAL)
+        self.assertIsNone(cfg.model)
+        self.assertIsNone(cfg.projects[0].model)
+        self.assertEqual(cfg.projects[0].branch_models, {})
+
+    def test_parses_model_at_each_level(self):
+        cfg = config.parse(
+            dict(
+                MINIMAL,
+                agent={"model": "claude-opus-4-8"},
+                projects=[
+                    dict(
+                        MINIMAL["projects"][0],
+                        model="claude-sonnet-5",
+                        branch_models={"agent/fable-*": "claude-fable-5"},
+                    )
+                ],
+            )
+        )
+        self.assertEqual(cfg.model, "claude-opus-4-8")
+        self.assertEqual(cfg.projects[0].model, "claude-sonnet-5")
+        self.assertEqual(cfg.projects[0].branch_models, {"agent/fable-*": "claude-fable-5"})
+
+    def test_resolve_precedence_branch_over_project_over_global(self):
+        cfg = config.parse(
+            dict(
+                MINIMAL,
+                agent={"model": "global-m"},
+                projects=[
+                    dict(
+                        MINIMAL["projects"][0],
+                        model="project-m",
+                        branch_models={"agent/plan-*": "branch-m"},
+                    )
+                ],
+            )
+        )
+        p = cfg.projects[0]
+        self.assertEqual(config.resolve_model(cfg, p, "agent/plan-77-x"), "branch-m")
+        self.assertEqual(config.resolve_model(cfg, p, "agent/other-1"), "project-m")
+        self.assertEqual(config.resolve_model(cfg, None, "agent/plan-1"), "global-m")
+        self.assertEqual(config.resolve_model(cfg, p, None), "project-m")
+
+    def test_resolve_is_none_when_nothing_set(self):
+        cfg = config.parse(MINIMAL)
+        self.assertIsNone(config.resolve_model(cfg, cfg.projects[0], "agent/x"))
+
+    def test_worker_claude_args_appends_resolved_model(self):
+        cfg = config.parse(dict(MINIMAL, agent={"claude_args": ["--foo"], "model": "global-m"}))
+        self.assertEqual(
+            config.worker_claude_args(cfg, cfg.projects[0], "agent/x"),
+            ["--foo", "--model", "global-m"],
+        )
+
+    def test_worker_claude_args_respects_explicit_pin(self):
+        cfg = config.parse(
+            dict(MINIMAL, agent={"claude_args": ["--model", "pinned"], "model": "global-m"})
+        )
+        self.assertEqual(
+            config.worker_claude_args(cfg, cfg.projects[0], "agent/x"), ["--model", "pinned"]
+        )
+
+    def test_worker_claude_args_no_model_when_unset(self):
+        cfg = config.parse(MINIMAL)
+        self.assertEqual(config.worker_claude_args(cfg, cfg.projects[0], "agent/x"), [])
+
+    def test_branch_models_must_be_table_of_nonempty_strings(self):
+        with self.assertRaisesRegex(config.ConfigError, "branch_models"):
+            config.parse(dict(MINIMAL, projects=[dict(MINIMAL["projects"][0], branch_models=["x"])]))
+        with self.assertRaisesRegex(config.ConfigError, "branch_models"):
+            config.parse(
+                dict(MINIMAL, projects=[dict(MINIMAL["projects"][0], branch_models={"agent/*": ""})])
+            )
+
+    def test_project_to_toml_roundtrips_model_fields(self):
+        cfg = config.parse(
+            dict(
+                MINIMAL,
+                projects=[
+                    dict(
+                        MINIMAL["projects"][0],
+                        model="claude-sonnet-5",
+                        branch_models={"agent/plan-*": "claude-fable-5"},
+                    )
+                ],
+            )
+        )
+        rendered = config.project_to_toml(cfg.projects[0])
+        reparsed = config.parse(config.tomllib.loads(rendered))
+        self.assertEqual(reparsed.projects[0].model, "claude-sonnet-5")
+        self.assertEqual(reparsed.projects[0].branch_models, {"agent/plan-*": "claude-fable-5"})
+
+    def test_parses_effort_at_each_level(self):
+        cfg = config.parse(
+            dict(
+                MINIMAL,
+                agent={"effort": "medium"},
+                projects=[
+                    dict(
+                        MINIMAL["projects"][0],
+                        effort="high",
+                        branch_efforts={"agent/plan-*": "max"},
+                    )
+                ],
+            )
+        )
+        self.assertEqual(cfg.effort, "medium")
+        self.assertEqual(cfg.projects[0].effort, "high")
+        self.assertEqual(cfg.projects[0].branch_efforts, {"agent/plan-*": "max"})
+
+    def test_resolve_effort_precedence(self):
+        cfg = config.parse(
+            dict(
+                MINIMAL,
+                agent={"effort": "low"},
+                projects=[
+                    dict(
+                        MINIMAL["projects"][0],
+                        effort="medium",
+                        branch_efforts={"agent/plan-*": "max"},
+                    )
+                ],
+            )
+        )
+        p = cfg.projects[0]
+        self.assertEqual(config.resolve_effort(cfg, p, "agent/plan-1"), "max")
+        self.assertEqual(config.resolve_effort(cfg, p, "agent/other-1"), "medium")
+        self.assertEqual(config.resolve_effort(cfg, None, "agent/plan-1"), "low")
+
+    def test_worker_claude_args_includes_model_and_effort(self):
+        cfg = config.parse(dict(MINIMAL, agent={"model": "m", "effort": "high"}))
+        self.assertEqual(
+            config.worker_claude_args(cfg, cfg.projects[0], "agent/x"),
+            ["--model", "m", "--effort", "high"],
+        )
+
+    def test_worker_claude_args_respects_explicit_effort_pin(self):
+        cfg = config.parse(
+            dict(MINIMAL, agent={"claude_args": ["--effort", "pinned"], "effort": "high"})
+        )
+        self.assertEqual(
+            config.worker_claude_args(cfg, cfg.projects[0], "agent/x"), ["--effort", "pinned"]
+        )
+
+    def test_project_to_toml_roundtrips_effort_fields(self):
+        cfg = config.parse(
+            dict(
+                MINIMAL,
+                projects=[
+                    dict(
+                        MINIMAL["projects"][0],
+                        effort="high",
+                        branch_efforts={"agent/plan-*": "max"},
+                    )
+                ],
+            )
+        )
+        reparsed = config.parse(config.tomllib.loads(config.project_to_toml(cfg.projects[0])))
+        self.assertEqual(reparsed.projects[0].effort, "high")
+        self.assertEqual(reparsed.projects[0].branch_efforts, {"agent/plan-*": "max"})
+
+
 class FleetManagerConfigTest(unittest.TestCase):
     def test_defaults_disabled(self):
         fm = config.parse(MINIMAL).fleet_manager

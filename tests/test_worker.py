@@ -5,7 +5,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from issuefleet.worker import ensure_container_overlay, inherit_repo_files
+from issuefleet import config
+from issuefleet.agent_runtime.turns import TurnState
+from issuefleet.model import Issue
+from issuefleet.worker import ensure_container_overlay, inherit_repo_files, provision
 
 DEFAULTS = [".claude", ".claude-container-overlay"]
 
@@ -91,6 +94,62 @@ class EnsureContainerOverlayTest(unittest.TestCase):
         (overlay / "overlay.json").write_text("{}")
         self.assertFalse(ensure_container_overlay(self.wt))
         self.assertTrue(overlay.is_dir())
+
+
+class ProvisionModelEffortTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.wt = Path(self.tmp.name) / "wt"
+        self.wt.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _issue(self):
+        return Issue(
+            id="i1",
+            key="FUG-9",
+            title="Plan it",
+            description="",
+            url="",
+            priority=0,
+            state_name="Todo",
+            state_type="unstarted",
+        )
+
+    def _cfg(self, agent=None, **project_extra):
+        return config.parse(
+            {
+                "agent": agent or {},
+                "projects": [
+                    dict(
+                        name="p",
+                        linear_project="P",
+                        repo="/tmp/p",
+                        claim={"strategy": "label", "value": "agent"},
+                        **project_extra,
+                    )
+                ],
+            }
+        )
+
+    def test_branch_model_and_effort_baked_into_turnstate(self):
+        cfg = self._cfg(
+            agent={"claude_args": ["--foo"]},
+            branch_models={"agent/fable-*": "claude-fable-5"},
+            branch_efforts={"agent/fable-*": "high"},
+        )
+        provision(self.wt, self._issue(), "agent/fable-9-plan", "main", cfg, cfg.projects[0])
+        state = TurnState.load(self.wt / ".agent")
+        self.assertEqual(
+            state.claude_args, ["--foo", "--model", "claude-fable-5", "--effort", "high"]
+        )
+
+    def test_no_overrides_leaves_base_args(self):
+        cfg = self._cfg(agent={"claude_args": ["--foo"]})
+        provision(self.wt, self._issue(), "agent/x", "main", cfg, cfg.projects[0])
+        state = TurnState.load(self.wt / ".agent")
+        self.assertEqual(state.claude_args, ["--foo"])
 
 
 if __name__ == "__main__":
