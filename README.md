@@ -407,12 +407,19 @@ claude_container = "claude-container"      # launcher binary
 # Untracked workspace-local state copied (copy-if-missing) from the parent
 # checkout into each fresh worktree — e.g. .claude/settings.local.json,
 # which a fresh worktree otherwise lacks. Git-excluded in the worktree.
+# When a repo ships no .claude-container-overlay, issuefleet stages a
+# default one per worktree (git-excluded) that installs python3 — the
+# stock images lack it and the worker entrypoint needs it.
 copy_from_repo = [".claude", ".claude-container-overlay"]
 # Host-side flags passed to claude-container before the in-container
 # command. --skills-ignore-new (launcher > 1.6.12) launches with only
 # already-accepted skills instead of prompting for undecided ones; set to
 # [] for older launchers (doctor verifies the launcher knows each flag).
 launcher_args = ["--skills-ignore-new"]
+# Worker container platform. "auto" (default) pins linux/amd64 when the
+# docker host is arm64 — published claude-container images are amd64-only.
+# "" disables (self-built multi-arch image); explicit values pass through.
+docker_platform = "auto"
 # container_config_dir = "~/.config/claude-container/config"  # default: launcher's shared dir
 
 [[projects]]                 # one block per (Linear project -> GitHub repo) pair

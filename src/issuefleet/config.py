@@ -7,9 +7,12 @@ literal key in the config is rejected outright.
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import os
+import platform
 import re
+import subprocess
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -104,6 +107,10 @@ class ProjectConfig:
     state_done: str = "Done"
     delete_remote_branch: bool = True
     max_workers: int | None = None  # per-project cap; None = only global cap
+    model: str | None = None
+    branch_models: dict[str, str] = field(default_factory=dict)
+    effort: str | None = None
+    branch_efforts: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -209,6 +216,8 @@ class Config:
     max_auto_turns: int = 50
     max_restarts: int = 3
     claude_args: list[str] = field(default_factory=list)
+    model: str | None = None
+    effort: str | None = None
     # Workspace-local state copied from the parent checkout into each fresh
     # worktree (copy-if-missing), e.g. .claude/settings.local.json, which is
     # untracked and would otherwise be absent there. Git-excluded in the
@@ -233,6 +242,7 @@ class Config:
     # didn't ask. The motivating case is TS_AUTHKEY: led_mapper's overlay joins
     # the tailnet at container start so workers can reach the HITL rigs.
     worker_env: dict[str, EnvSource] = field(default_factory=dict)
+    docker_platform: str = "auto"
     # credential lookup (values are env var names / file paths, never secrets)
     linear_api_key_env: str = "LINEAR_API_KEY"
     linear_api_key_file: Path = Path("~/.config/issuefleet/linear.key").expanduser()
@@ -284,6 +294,102 @@ class Config:
         if self.added_projects_file is not None:
             return self.added_projects_file
         return self.state_dir / "added-projects.toml"
+
+    def resolved_docker_platform(self) -> str | None:
+        """Platform passed to Docker for worker containers, or None to leave
+        the daemon's default alone. Published claude-container images are
+        amd64-only: "auto" pins linux/amd64 on arm64 docker hosts, "" turns
+        the pin off, anything else passes through verbatim."""
+        raw = (self.docker_platform or "").strip()
+        if not raw:
+            return None
+        if raw == "auto":
+            if docker_host_arch() in ARM64_ARCHES:
+                return "linux/amd64"
+            return None
+        return raw
+
+
+def _resolve_tier(
+    global_val: str | None,
+    project: "ProjectConfig | None",
+    branch: str | None,
+    default_attr: str,
+    branch_attr: str,
+) -> str | None:
+    """Most-specific override wins: a per-branch glob on the project, then the
+    project default, then the fleet-wide value. ``None`` means no override."""
+    if project is not None and branch:
+        for pattern, val in getattr(project, branch_attr).items():
+            if fnmatch.fnmatch(branch, pattern):
+                return val or None
+    if project is not None and getattr(project, default_attr):
+        return getattr(project, default_attr)
+    return global_val
+
+
+def resolve_model(cfg: "Config", project: "ProjectConfig | None", branch: str | None) -> str | None:
+    return _resolve_tier(cfg.model, project, branch, "model", "branch_models")
+
+
+def resolve_effort(cfg: "Config", project: "ProjectConfig | None", branch: str | None) -> str | None:
+    return _resolve_tier(cfg.effort, project, branch, "effort", "branch_efforts")
+
+
+def worker_claude_args(
+    cfg: "Config", project: "ProjectConfig | None" = None, branch: str | None = None
+) -> list[str]:
+    """``claude_args`` plus a resolved ``--model`` / ``--effort``. Either flag
+    already present in ``claude_args`` is left untouched."""
+    args = list(cfg.claude_args)
+    for flag, value in (
+        ("--model", resolve_model(cfg, project, branch)),
+        ("--effort", resolve_effort(cfg, project, branch)),
+    ):
+        if value and flag not in args:
+            args += [flag, value]
+    return args
+
+
+ARM64_ARCHES = ("arm64", "aarch64")
+
+_docker_host_arch_cache: str | None = None
+
+
+def docker_host_arch() -> str:
+    """Arch of the docker server — the machine that actually runs worker
+    containers, which a containerized (possibly emulated) daemon is not.
+    Only successful probes are cached: a failure falls back to the local
+    arch uncached, so a daemon that raced docker's startup corrects itself
+    on the next call."""
+    global _docker_host_arch_cache
+    if _docker_host_arch_cache is None:
+        try:
+            out = subprocess.run(
+                ["docker", "version", "--format", "{{.Server.Arch}}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                _docker_host_arch_cache = out.stdout.strip().lower()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if _docker_host_arch_cache is not None:
+        return _docker_host_arch_cache
+    return platform.machine().lower()
+
+
+def _parse_docker_platform(agent: dict) -> str:
+    """Strict like the rest of parse(): a typo'd platform must fail here with
+    a named key, not at worker start as docker's opaque 'invalid platform'."""
+    v = agent.get("docker_platform", "auto")
+    if isinstance(v, str) and v.strip() in ("", "auto"):
+        return v.strip()
+    if isinstance(v, str) and re.fullmatch(r"[a-z0-9]+(/[a-z0-9]+){1,2}", v.strip()):
+        return v.strip()
+    raise ConfigError(
+        f'[agent] docker_platform {v!r} — expected "auto", "" (disable), '
+        'or an explicit platform like "linux/amd64"'
+    )
 
 
 def _reject_secrets(table: dict, where: str) -> None:
@@ -433,6 +539,24 @@ def _path(v: str) -> Path:
     return Path(os.path.expandvars(v)).expanduser()
 
 
+def _parse_branch_map(v: object, where: str, name: str) -> dict[str, str]:
+    """Validate a ``{branch-glob = value}`` table: every key and value a
+    non-empty string."""
+    if not v:
+        return {}
+    if not isinstance(v, dict):
+        raise ConfigError(f"{where}: {name} must be a table of glob = value")
+    out: dict[str, str] = {}
+    for pattern, val in v.items():
+        if not isinstance(pattern, str) or not isinstance(val, str) or not val:
+            raise ConfigError(
+                f"{where}: {name} entries must be non-empty strings "
+                f"(got {pattern!r} = {val!r})"
+            )
+        out[pattern] = val
+    return out
+
+
 def parse_project(p: dict, where: str) -> ProjectConfig:
     """Validate and build one ``[[projects]]`` entry. Shared by ``parse`` (the
     file loader) and the dashboard's add-project path, so a project typed into
@@ -479,6 +603,10 @@ def parse_project(p: dict, where: str) -> ProjectConfig:
         state_done=p.get("state_done") or "Done",
         delete_remote_branch=bool(p.get("delete_remote_branch", True)),
         max_workers=max_workers,
+        model=p.get("model") or None,
+        branch_models=_parse_branch_map(p.get("branch_models"), where, "branch_models"),
+        effort=p.get("effort") or None,
+        branch_efforts=_parse_branch_map(p.get("branch_efforts"), where, "branch_efforts"),
     )
 
 
@@ -518,6 +646,20 @@ def project_to_toml(p: ProjectConfig) -> str:
     lines.append(f"delete_remote_branch = {str(p.delete_remote_branch).lower()}")
     if p.max_workers is not None:
         lines.append(f"max_workers = {p.max_workers}")
+    if p.model:
+        lines.append(f"model = {_toml_str(p.model)}")
+    if p.branch_models:
+        inner = ", ".join(
+            f"{_toml_str(k)} = {_toml_str(v)}" for k, v in p.branch_models.items()
+        )
+        lines.append(f"branch_models = {{ {inner} }}")
+    if p.effort:
+        lines.append(f"effort = {_toml_str(p.effort)}")
+    if p.branch_efforts:
+        inner = ", ".join(
+            f"{_toml_str(k)} = {_toml_str(v)}" for k, v in p.branch_efforts.items()
+        )
+        lines.append(f"branch_efforts = {{ {inner} }}")
     return "\n".join(lines) + "\n"
 
 
@@ -635,11 +777,14 @@ def parse(data: dict, source: str = "<config>") -> Config:
         max_auto_turns=int(agent.get("max_auto_turns", 50)),
         max_restarts=int(agent.get("max_restarts", 3)),
         claude_args=list(agent.get("claude_args", [])),
+        model=agent.get("model") or None,
+        effort=agent.get("effort") or None,
         copy_from_repo=list(
             agent.get("copy_from_repo", [".claude", ".claude-container-overlay"])
         ),
         launcher_args=list(agent.get("launcher_args", ["--skills-ignore-new"])),
         claude_container=agent.get("claude_container", "claude-container"),
+        docker_platform=_parse_docker_platform(agent),
     )
     if "state_dir" in daemon:
         cfg.state_dir = _path(daemon["state_dir"])

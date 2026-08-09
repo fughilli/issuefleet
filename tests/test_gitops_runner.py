@@ -353,6 +353,8 @@ class ScriptWrapperTest(unittest.TestCase):
 @unittest.skipIf(shutil.which("tmux") is None, "tmux not available")
 class TmuxRunnerTest(unittest.TestCase):
     def setUp(self):
+        """docker_platform="" keeps command shapes independent of the host's
+        arch and docker daemon; the one platform-prefix test opts back in."""
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         # A stub "claude-container" that just sleeps, so start/alive/stop are
@@ -367,6 +369,7 @@ class TmuxRunnerTest(unittest.TestCase):
                 )
             ],
             claude_container=str(self.stub),
+            docker_platform="",
         )
         self.rec = WorkerRecord(
             issue_id="i1", issue_key="FUG-1", issue_title="t", issue_url="u",
@@ -455,6 +458,13 @@ class TmuxRunnerTest(unittest.TestCase):
         self.runner.start(self.rec, self.cfg)
         self.assertFalse(self.runner.env_path(self.rec).exists())
         self.runner.stop(self.rec)
+
+    def test_docker_platform_prefixes_env(self):
+        self.cfg.docker_platform = "linux/amd64"
+        self.cfg.launcher_args = []
+        cmd = self.runner.command(self.rec, self.cfg)
+        self.assertEqual(cmd[:2], ["env", "DOCKER_DEFAULT_PLATFORM=linux/amd64"])
+        self.assertEqual(cmd[2], str(self.stub))
 
     def test_start_alive_stop_idempotent(self):
         self.assertFalse(self.runner.alive(self.rec))

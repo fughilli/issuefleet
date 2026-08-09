@@ -15,6 +15,7 @@ from pathlib import Path
 
 import issuefleet
 from issuefleet.agent_runtime.turns import TurnState
+from issuefleet.config import worker_claude_args
 from issuefleet.mailbox import Mailbox
 from issuefleet.prompts import render_brief
 
@@ -28,6 +29,35 @@ from issuefleet.agent_runtime.{module} import main
 
 sys.exit(main())
 """
+
+OVERLAY_NAME = ".claude-container-overlay"
+
+_PYTHON_OVERLAY = """\
+# issuefleet: turnloop needs python3 inside the agent container
+RUN if command -v apk >/dev/null 2>&1; then \\
+      apk add --no-cache python3; \\
+    elif command -v apt-get >/dev/null 2>&1; then \\
+      apt-get update \\
+      && apt-get install -y --no-install-recommends python3 \\
+      && rm -rf /var/lib/apt/lists/*; \\
+    else \\
+      echo "issuefleet: no apk/apt-get to install python3" >&2; exit 1; \\
+    fi
+"""
+
+
+def ensure_container_overlay(worktree: Path) -> bool:
+    """Write a default OVERLAY_NAME Dockerfile fragment when the worktree
+    has none: stock images lack the python3 turnloop's shebang needs, and
+    the launcher builds a file by this exact name into a content-hash-tagged
+    image. Repo-provided overlays (file, or directory in the older layout)
+    are never clobbered. Returns True when this call created the file, so
+    the caller can git-exclude exactly what issuefleet wrote."""
+    overlay = Path(worktree) / OVERLAY_NAME
+    if overlay.exists():
+        return False
+    overlay.write_text(_PYTHON_OVERLAY)
+    return True
 
 
 def stage_runtime(bin_dir: Path) -> None:
@@ -82,10 +112,14 @@ def inherit_repo_files(repo: Path, worktree: Path, rel_paths: list[str]) -> list
     return inherited
 
 
-def provision(worktree: Path, issue, branch: str, base_ref: str, config) -> str:
+def provision(worktree: Path, issue, branch: str, base_ref: str, config, project=None) -> str:
     """Create/refresh the .agent dir. Idempotent: an existing state.json is
     preserved (re-adoption after an orchestrator restart must not reset the
     turn counters or the session), everything else is (re)staged.
+
+    ``project`` (when given) resolves the worker's model/effort per project or
+    branch via ``config.worker_claude_args``, baked into TurnState at first
+    provision.
 
     Returns the worker's Claude session UUID.
     """
@@ -103,7 +137,7 @@ def provision(worktree: Path, issue, branch: str, base_ref: str, config) -> str:
     state = TurnState(
         session_uuid=str(uuid.uuid4()),
         max_auto_turns=config.max_auto_turns,
-        claude_args=list(config.claude_args),
+        claude_args=worker_claude_args(config, project, branch),
     )
     state.save(agent_dir)
     return state.session_uuid
