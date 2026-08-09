@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 import re
+import subprocess
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -233,6 +235,7 @@ class Config:
     # didn't ask. The motivating case is TS_AUTHKEY: led_mapper's overlay joins
     # the tailnet at container start so workers can reach the HITL rigs.
     worker_env: dict[str, EnvSource] = field(default_factory=dict)
+    docker_platform: str = "auto"
     # credential lookup (values are env var names / file paths, never secrets)
     linear_api_key_env: str = "LINEAR_API_KEY"
     linear_api_key_file: Path = Path("~/.config/issuefleet/linear.key").expanduser()
@@ -284,6 +287,61 @@ class Config:
         if self.added_projects_file is not None:
             return self.added_projects_file
         return self.state_dir / "added-projects.toml"
+
+    def resolved_docker_platform(self) -> str | None:
+        """Platform passed to Docker for worker containers, or None to leave
+        the daemon's default alone. Published claude-container images are
+        amd64-only: "auto" pins linux/amd64 on arm64 docker hosts, "" turns
+        the pin off, anything else passes through verbatim."""
+        raw = (self.docker_platform or "").strip()
+        if not raw:
+            return None
+        if raw == "auto":
+            if docker_host_arch() in ARM64_ARCHES:
+                return "linux/amd64"
+            return None
+        return raw
+
+
+ARM64_ARCHES = ("arm64", "aarch64")
+
+_docker_host_arch_cache: str | None = None
+
+
+def docker_host_arch() -> str:
+    """Arch of the docker server — the machine that actually runs worker
+    containers, which a containerized (possibly emulated) daemon is not.
+    Only successful probes are cached: a failure falls back to the local
+    arch uncached, so a daemon that raced docker's startup corrects itself
+    on the next call."""
+    global _docker_host_arch_cache
+    if _docker_host_arch_cache is None:
+        try:
+            out = subprocess.run(
+                ["docker", "version", "--format", "{{.Server.Arch}}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                _docker_host_arch_cache = out.stdout.strip().lower()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if _docker_host_arch_cache is not None:
+        return _docker_host_arch_cache
+    return platform.machine().lower()
+
+
+def _parse_docker_platform(agent: dict) -> str:
+    """Strict like the rest of parse(): a typo'd platform must fail here with
+    a named key, not at worker start as docker's opaque 'invalid platform'."""
+    v = agent.get("docker_platform", "auto")
+    if isinstance(v, str) and v.strip() in ("", "auto"):
+        return v.strip()
+    if isinstance(v, str) and re.fullmatch(r"[a-z0-9]+(/[a-z0-9]+){1,2}", v.strip()):
+        return v.strip()
+    raise ConfigError(
+        f'[agent] docker_platform {v!r} — expected "auto", "" (disable), '
+        'or an explicit platform like "linux/amd64"'
+    )
 
 
 def _reject_secrets(table: dict, where: str) -> None:
@@ -640,6 +698,7 @@ def parse(data: dict, source: str = "<config>") -> Config:
         ),
         launcher_args=list(agent.get("launcher_args", ["--skills-ignore-new"])),
         claude_container=agent.get("claude_container", "claude-container"),
+        docker_platform=_parse_docker_platform(agent),
     )
     if "state_dir" in daemon:
         cfg.state_dir = _path(daemon["state_dir"])

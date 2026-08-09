@@ -248,6 +248,53 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(config.ConfigError, "looks like a secret"):
             parse_env({"TS_AUTHKEY": {"value": "tskey-auth-EXAMPLE-not-a-real-key"}})
 
+    def test_docker_platform_auto_default(self):
+        cfg = config.parse(MINIMAL)
+        self.assertEqual(cfg.docker_platform, "auto")
+        data = dict(MINIMAL)
+        data["agent"] = {"docker_platform": "linux/amd64"}
+        self.assertEqual(config.parse(data).docker_platform, "linux/amd64")
+        data["agent"] = {"docker_platform": ""}
+        self.assertIsNone(config.parse(data).resolved_docker_platform())
+
+    def test_docker_platform_auto_keys_on_docker_host_arch(self):
+        """The docker server's arch decides, not this process's — a daemon
+        containerized as emulated amd64 on an arm64 host must still pin."""
+        cfg = config.parse(MINIMAL)
+        with mock.patch.object(config, "docker_host_arch", return_value="arm64"):
+            self.assertEqual(cfg.resolved_docker_platform(), "linux/amd64")
+        with mock.patch.object(config, "docker_host_arch", return_value="amd64"):
+            self.assertIsNone(cfg.resolved_docker_platform())
+        cfg.docker_platform = "linux/arm64"
+        self.assertEqual(cfg.resolved_docker_platform(), "linux/arm64")
+
+    def test_docker_platform_rejects_garbage(self):
+        for bad in (True, 1, "Auto", "linux amd64", "LINUX/AMD64"):
+            data = dict(MINIMAL)
+            data["agent"] = {"docker_platform": bad}
+            with self.assertRaisesRegex(config.ConfigError, "docker_platform"):
+                config.parse(data)
+        data = dict(MINIMAL)
+        data["agent"] = {"docker_platform": "linux/arm64/v8"}
+        self.assertEqual(config.parse(data).docker_platform, "linux/arm64/v8")
+
+    def test_docker_host_arch_caches_success_but_not_fallback(self):
+        """A failed probe must retry next call; a successful one is cached."""
+        probe_ok = mock.Mock(returncode=0, stdout="arm64\n")
+        probe_bad = mock.Mock(returncode=1, stdout="")
+        config._docker_host_arch_cache = None
+        try:
+            with mock.patch.object(config.subprocess, "run", return_value=probe_bad) as r:
+                config.docker_host_arch()
+                config.docker_host_arch()
+                self.assertEqual(r.call_count, 2)
+            with mock.patch.object(config.subprocess, "run", return_value=probe_ok) as r:
+                self.assertEqual(config.docker_host_arch(), "arm64")
+                self.assertEqual(config.docker_host_arch(), "arm64")
+                self.assertEqual(r.call_count, 1)
+        finally:
+            config._docker_host_arch_cache = None
+
     def test_claim_rules(self):
         label = config.ClaimRule("label", "agent")
         self.assertTrue(label.matches(make_issue(labels=["agent", "bug"])))
