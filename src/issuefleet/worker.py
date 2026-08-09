@@ -15,6 +15,7 @@ from pathlib import Path
 
 import issuefleet
 from issuefleet.agent_runtime.turns import TurnState
+from issuefleet.config import worker_claude_args
 from issuefleet.mailbox import Mailbox
 from issuefleet.prompts import render_brief
 
@@ -111,10 +112,14 @@ def inherit_repo_files(repo: Path, worktree: Path, rel_paths: list[str]) -> list
     return inherited
 
 
-def provision(worktree: Path, issue, branch: str, base_ref: str, config) -> str:
+def provision(worktree: Path, issue, branch: str, base_ref: str, config, project=None) -> str:
     """Create/refresh the .agent dir. Idempotent: an existing state.json is
     preserved (re-adoption after an orchestrator restart must not reset the
     turn counters or the session), everything else is (re)staged.
+
+    ``project`` (when given) resolves the worker's model/effort per project or
+    branch via ``config.worker_claude_args``, baked into TurnState at first
+    provision.
 
     Returns the worker's Claude session UUID.
     """
@@ -132,7 +137,7 @@ def provision(worktree: Path, issue, branch: str, base_ref: str, config) -> str:
     state = TurnState(
         session_uuid=str(uuid.uuid4()),
         max_auto_turns=config.max_auto_turns,
-        claude_args=list(config.claude_args),
+        claude_args=worker_claude_args(config, project, branch),
     )
     state.save(agent_dir)
     return state.session_uuid
