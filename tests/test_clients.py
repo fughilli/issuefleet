@@ -245,7 +245,7 @@ class GithubForgeTest(unittest.TestCase):
             "html_url": f"https://github.com/o/r/pull/{n}",
             "state": state,
             "merged_at": merged_at,
-            "head": {"ref": "agent/fug-1-x"},
+            "head": {"ref": "agent/fug-1-x", "sha": "deadbeef"},
             "base": {"ref": "main"},
         }
 
@@ -289,6 +289,69 @@ class GithubForgeTest(unittest.TestCase):
         self.assertEqual([f.id for f in fb], ["ic-1", "rv-2", "rc-4"])  # empty review dropped
         self.assertEqual(fb[1].body, "[CHANGES_REQUESTED] please fix")
         self.assertEqual(fb[2].path, "src/x.py")
+
+    def test_get_pr_carries_head_sha(self):
+        t = RecordingTransport([self._pr_json()])
+        forge = GithubForge("tok", "o/r", transport=t)
+        self.assertEqual(forge.get_pr(5).head_sha, "deadbeef")
+
+    def test_ci_status_folds_checks_and_statuses_to_success(self):
+        t = RecordingTransport(
+            [
+                {"check_runs": [
+                    {"name": "build", "status": "completed", "conclusion": "success"},
+                    {"name": "lint", "status": "completed", "conclusion": "skipped"},
+                ]},
+                {"statuses": [{"context": "ci/legacy", "state": "success"}]},
+            ]
+        )
+        forge = GithubForge("tok", "o/r", transport=t)
+        ci = forge.ci_status("abc123")
+        self.assertIn("/commits/abc123/check-runs", t.calls[0]["url"])
+        self.assertIn("/commits/abc123/status", t.calls[1]["url"])
+        self.assertTrue(ci.settled)
+        self.assertEqual(ci.state, "success")
+        self.assertEqual(ci.total, 3)
+        self.assertEqual(ci.failing, [])
+
+    def test_ci_status_collects_failing_checks_from_both_surfaces(self):
+        t = RecordingTransport(
+            [
+                {"check_runs": [
+                    {"name": "tests", "status": "completed", "conclusion": "failure",
+                     "html_url": "u-tests"},
+                    {"name": "cancelled-job", "status": "completed", "conclusion": "cancelled"},
+                ]},
+                {"statuses": [
+                    {"context": "deploy", "state": "error", "target_url": "u-deploy"},
+                    {"context": "ok", "state": "success"},
+                ]},
+            ]
+        )
+        ci = GithubForge("tok", "o/r", transport=t).ci_status("abc123")
+        self.assertEqual(ci.state, "failure")
+        self.assertEqual(
+            [(c.name, c.url) for c in ci.failing],
+            [("tests", "u-tests"), ("deploy", "u-deploy")],  # cancelled/success excluded
+        )
+
+    def test_ci_status_pending_until_all_settle(self):
+        t = RecordingTransport(
+            [
+                {"check_runs": [{"name": "build", "status": "in_progress", "conclusion": None}]},
+                {"statuses": []},
+            ]
+        )
+        ci = GithubForge("tok", "o/r", transport=t).ci_status("abc123")
+        self.assertFalse(ci.settled)
+        self.assertEqual(ci.state, "pending")
+
+    def test_ci_status_none_when_no_ci_configured(self):
+        t = RecordingTransport([{"check_runs": []}, {"statuses": []}])
+        ci = GithubForge("tok", "o/r", transport=t).ci_status("abc123")
+        self.assertTrue(ci.settled)
+        self.assertEqual(ci.state, "none")
+        self.assertEqual(ci.total, 0)
 
 
 class FakeClock:

@@ -543,6 +543,74 @@ class ReconcileTest(unittest.TestCase):
         self.rec.tick()  # retry succeeds
         self.assertTrue(self.worker().conflict_notified)
 
+    # -- CI results --------------------------------------------------------
+
+    def _ci_msgs(self):
+        return [m for m in self.mailbox().pending_inbox() if m.kind == "ci_status"]
+
+    def test_ci_success_notifies_agent_once(self):
+        n = self._open_pr()
+        self.forge.set_ci(n, "success", total=3)
+        self.rec.tick()
+        self.rec.tick()  # same result must not re-notify
+        msgs = self._ci_msgs()
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0].payload["state"], "success")
+        self.assertEqual(msgs[0].payload["pr_number"], n)
+        self.assertIn("3 checks green", msgs[0].payload["text"])
+
+    def test_ci_failure_lists_failing_checks(self):
+        n = self._open_pr()
+        self.forge.set_ci(n, "failure", failing=[("lint", "http://ci/lint")])
+        self.rec.tick()
+        msgs = self._ci_msgs()
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0].payload["state"], "failure")
+        self.assertEqual(msgs[0].payload["failing"], [{"name": "lint", "url": "http://ci/lint"}])
+        self.assertIn("lint", msgs[0].payload["text"])
+        self.assertIn("http://ci/lint", msgs[0].payload["text"])
+
+    def test_ci_pending_does_not_notify(self):
+        n = self._open_pr()
+        self.forge.set_ci(n, "pending", settled=False, total=2)
+        self.rec.tick()
+        self.assertEqual(self._ci_msgs(), [])
+
+    def test_ci_no_checks_does_not_notify(self):
+        self._open_pr()
+        self.rec.tick()  # FakeForge default is state "none"
+        self.assertEqual(self._ci_msgs(), [])
+
+    def test_ci_rerun_flip_failure_to_success_renotifies(self):
+        n = self._open_pr()
+        self.forge.set_ci(n, "failure", failing=[("test", None)])
+        self.rec.tick()
+        self.forge.set_ci(n, "success", total=1)  # same SHA, re-run went green
+        self.rec.tick()
+        msgs = self._ci_msgs()
+        self.assertEqual([m.payload["state"] for m in msgs], ["failure", "success"])
+
+    def test_ci_new_commit_renotifies(self):
+        n = self._open_pr()
+        self.forge.set_ci(n, "failure", failing=[("test", None)])
+        self.rec.tick()
+        self.forge.bump_head_sha(n, "sha-after-push")  # agent pushed a fix
+        self.forge.set_ci(n, "success", total=1)
+        self.rec.tick()
+        msgs = self._ci_msgs()
+        self.assertEqual(len(msgs), 2)
+        self.assertEqual(msgs[1].payload["sha"], "sha-after-push")
+
+    def test_ci_fetch_failure_is_soft_and_retries(self):
+        n = self._open_pr()
+        self.forge.set_ci(n, "failure", failing=[("test", None)])
+        self.forge.fail_next_ci = 1
+        self.rec.tick()  # checks call fails: no message, worker survives
+        self.assertEqual(self._ci_msgs(), [])
+        self.assertIsNotNone(self.worker())
+        self.rec.tick()  # retry succeeds
+        self.assertEqual(len(self._ci_msgs()), 1)
+
     # -- un-claim ----------------------------------------------------------
 
     def test_label_removed_unclaims_cleanly(self):

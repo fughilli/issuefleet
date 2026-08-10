@@ -56,12 +56,41 @@ class PullRequest:
     merged: bool
     head: str
     base: str
+    head_sha: str = ""  # head commit SHA — the ref CI results attach to
     # GitHub computes these asynchronously and only returns them on the
     # single-PR GET (never the list endpoint), so both are None until a
     # verdict lands: `mergeable` is False and `mergeable_state` == "dirty"
     # exactly when the branch conflicts with its base.
     mergeable: bool | None = None
     mergeable_state: str | None = None
+
+
+@dataclass
+class CiCheck:
+    """One CI signal on a commit: a Checks-API check run or a legacy commit
+    status, normalized to a common shape."""
+
+    name: str
+    passed: bool
+    url: str | None = None
+
+
+@dataclass
+class CiStatus:
+    """The aggregate CI verdict for a commit, folded from the check-runs and
+    the combined commit-status endpoints.
+
+    ``settled`` is False while anything is still queued/in_progress/pending —
+    the daemon holds off notifying until the run has actually finished, so the
+    agent hears one terminal result per commit rather than a stream of
+    intermediate states. ``total`` is 0 when no CI is configured on the repo
+    (nothing to report). ``state`` is "success" or "failure" once settled."""
+
+    sha: str
+    settled: bool
+    state: str  # "success" | "failure" | "pending" | "none"
+    total: int = 0
+    failing: list[CiCheck] = field(default_factory=list)
 
 
 @dataclass

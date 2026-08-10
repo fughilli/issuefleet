@@ -26,7 +26,7 @@ get none.**
 │                                  │            │      │   <worktree>/.agent/mailbox/     │
 │   registry.json (durable fleet state)         │◄─────┼── outbox/ status|question|ready| │
 │                                               │      │           file_issue             │
-│   inbox writes ──────────────────────────────►│──────┼─► inbox/  reply|pr_feedback|...  │
+│   inbox writes ──────────────────────────────►│──────┼─► inbox/  reply|pr_feedback|ci|.. │
 └───────────────────────────────────────────────┘      └──────────────────────────────────┘
 ```
 
@@ -467,6 +467,17 @@ to `git rebase origin/<base_ref>`, resolve, and re-run `agentctl ready`. The
 worker rebases with no network of its own. The nudge fires once per conflict
 episode (re-armed when the PR next reads mergeable), so a stuck-dirty PR isn't
 nagged every tick, but a fresh conflict after a resolution is caught.
+
+**CI results** are watched on the same PR poll. Each tick the daemon folds the
+head commit's check runs and commit statuses into one verdict; once CI has
+*settled* (nothing still queued/in-progress) it wakes the agent with a
+`ci_status` message carrying the pass/fail and, on failure, the failing check
+names and their log URLs — so the agent gets another turn to investigate, push
+a fix (CI re-runs and the next settled result comes back the same way, letting
+it confirm a hypothesis on the CI itself), or flag a flake. Dedupe is keyed on
+the head SHA and the verdict, so a completed run notifies exactly once, a fresh
+push earns a new notification, and a re-run that flips failure→success tells the
+agent its fix landed.
 
 Teardown (merge, un-claim, or `stop`): signal the agent via a `shutdown`
 mailbox message → archive the mailbox + turn transcripts to
