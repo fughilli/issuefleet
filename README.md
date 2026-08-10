@@ -44,8 +44,11 @@ sender is never left wondering whether it landed: the orchestrator drops a
 👀 into the agent session the instant it routes a prompt or comment to a
 worker (before any turn runs, so busy/restarting workers still ack
 immediately), the worker emits ⚙️ when it starts taking turns on it, and ✅
-when it settles. In personal-key/comment mode the 👀 falls back to a deduped
-comment; the ⚙️/✅ are session-only to avoid thread spam.
+when it settles. The ⚙️ is a `thought` (the session reads "Working…"); the ✅
+is a `response`, which settles the Linear session to `complete` — so an idle
+worker shows as done, not stuck "Working…" until Linear times it out to
+"Error". In personal-key/comment mode the 👀 falls back to a deduped comment;
+the ⚙️/✅ are session-only to avoid thread spam.
 
 **Authoring issues.** Delegate (or @-mention) the bot on an issue such as
 "turn the WORKLOG backlog into tickets"; the worker reads the source, then

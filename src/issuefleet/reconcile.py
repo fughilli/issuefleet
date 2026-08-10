@@ -724,10 +724,17 @@ class Reconciler:
                     # the agent-session stream; in comment mode the substantive
                     # status/ready relays already signal progress, so drop it
                     # rather than spam the thread. Archived either way.
+                    #
+                    # The payload picks the activity type that drives Linear's
+                    # session state: ⚙️ is a `thought` (stays "Working…"), ✅ is
+                    # a `response` (settles the session to `complete`, so an
+                    # idle worker doesn't hang active and time out to "Error" —
+                    # FUG-98). Default `thought` keeps older/queued acks safe.
                     if rec.agent_session_id:
                         self.tracker.emit_activity(
                             rec.agent_session_id,
-                            {"type": "thought", "body": msg.payload["text"]},
+                            {"type": msg.payload.get("activity", "thought"),
+                             "body": msg.payload["text"]},
                         )
                         mailbox.archive_outbox(msg, receipt={"relayed": "agent-session"})
                     else:
