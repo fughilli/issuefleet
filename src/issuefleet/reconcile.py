@@ -24,6 +24,7 @@ from issuefleet import gitops
 from issuefleet import worker as worker_mod
 from issuefleet.config import Config, ProjectConfig
 from issuefleet.github import GithubForge, parse_repo_slug
+from issuefleet.httpx import ApiError
 from issuefleet.mailbox import Mailbox
 from issuefleet.model import (
     PHASE_ACTIVE,
@@ -1059,6 +1060,7 @@ class Reconciler:
                 self.registry.save()
         else:
             self._check_merge_conflict(rec, project, mailbox, pr)
+            self._check_ci(rec, project, mailbox, pr)
 
     def _check_merge_conflict(self, rec: WorkerRecord, project: ProjectConfig, mailbox: Mailbox, pr):
         """Drive an open PR that has stopped merging cleanly (other work landed
@@ -1118,6 +1120,67 @@ class Reconciler:
             },
         )
         rec.conflict_notified = True
+        rec.touch()
+        self.registry.save()
+
+    def _check_ci(self, rec: WorkerRecord, project: ProjectConfig, mailbox: Mailbox, pr):
+        """Give the agent another turn whenever CI settles on its PR.
+
+        We poll the head commit's checks each tick and notify only once CI has
+        finished (``settled``) — the agent hears one terminal pass/fail per run,
+        not a stream of in-progress states. Dedupe is keyed on the head SHA and
+        the verdict (``ci-<sha>-<state>``), so: a completed run notifies exactly
+        once; a fresh push (new SHA) earns a new notification; and a re-run that
+        flips failure→success re-notifies (the agent learns its fix landed).
+        The SHA-keyed sentinel means a repo with no CI, or a still-running one,
+        stays quiet."""
+        if not pr.head_sha:
+            return  # find_pr's list payload can omit it; get_pr always carries it
+        try:
+            ci = self.forges[project.name].ci_status(pr.head_sha)
+        except ApiError as e:
+            # A flaky/rate-limited checks call is a soft signal — retry next
+            # tick quietly rather than escalate to the tick-level "reconcile
+            # failed" path, which would also skip nothing else useful here.
+            log.warning("worker %s: CI status fetch failed (%s); will retry", rec.issue_key, e)
+            return
+        if not ci.settled or ci.state == "none":
+            return
+        sentinel = f"ci-{ci.sha[:12]}-{ci.state}"
+        if sentinel in rec.seen_feedback_ids:
+            return
+
+        if ci.state == "success":
+            text = (
+                f"CI passed on PR #{pr.number} ({ci.total} "
+                f"check{'s' if ci.total != 1 else ''} green)."
+            )
+        else:
+            lines = "\n".join(
+                f"  - {c.name}" + (f" — {c.url}" if c.url else "") for c in ci.failing
+            )
+            text = (
+                f"CI failed on PR #{pr.number}. Failing "
+                f"check{'s' if len(ci.failing) != 1 else ''}:\n{lines}\n\n"
+                "Investigate the failure (open the logs at the links above), then decide: "
+                "push a fix and CI will re-run so you can confirm it on the next result, "
+                "post a status if it's a flake or environmental, or ask if it needs a human "
+                "call. You'll be given another turn when CI settles again."
+            )
+        log.info("worker %s: CI %s on PR #%d; notifying", rec.issue_key, ci.state, pr.number)
+        mailbox.ensure().put_inbox(
+            "ci_status",
+            {
+                "state": ci.state,
+                "pr_number": pr.number,
+                "pr_url": pr.url,
+                "sha": ci.sha,
+                "failing": [{"name": c.name, "url": c.url} for c in ci.failing],
+                "text": text,
+            },
+        )
+        rec.seen_feedback_ids.append(sentinel)
+        rec.seen_feedback_ids = rec.seen_feedback_ids[-_SEEN_IDS_CAP:]
         rec.touch()
         self.registry.save()
 

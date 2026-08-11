@@ -6,7 +6,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from issuefleet import MARKER_PREFIX
-from issuefleet.model import Comment, Issue, PrFeedback, PullRequest
+from issuefleet.httpx import ApiError
+from issuefleet.model import CiCheck, CiStatus, Comment, Issue, PrFeedback, PullRequest
 from issuefleet.sigbot import SignalMessage
 
 
@@ -218,6 +219,8 @@ class FakeForge:
         self.opened: list[dict] = []
         self.updated: list[dict] = []
         self.closed: list[int] = []
+        self.ci: dict[str, CiStatus] = {}  # keyed by head SHA
+        self.fail_next_ci = 0
         self.fail_next_open = 0
         self._next = 100
 
@@ -268,6 +271,7 @@ class FakeForge:
             merged=False,
             head=head,
             base=base,
+            head_sha=f"sha-{self._next}",
         )
         self.prs[pr.number] = pr
         self.opened.append({"number": pr.number, "head": head, "title": title, "body": body})
@@ -281,6 +285,27 @@ class FakeForge:
 
     def pr_feedback(self, number: int) -> list[PrFeedback]:
         return list(self.feedback.get(number, []))
+
+    def set_ci(self, number: int, state: str, *, settled=True, failing=None, total=None):
+        """Test helper: attach a CI verdict to a PR's head SHA. `state` is one
+        of success/failure/pending/none; `failing` is a list of (name, url)."""
+        pr = self.prs[number]
+        checks = [CiCheck(name=n, passed=False, url=u) for n, u in (failing or [])]
+        if total is None:
+            total = 0 if state == "none" else max(1, len(checks))
+        self.ci[pr.head_sha] = CiStatus(
+            sha=pr.head_sha, settled=settled, state=state, total=total, failing=checks
+        )
+
+    def bump_head_sha(self, number: int, sha: str) -> None:
+        """Test helper: simulate the agent pushing a new commit."""
+        self.prs[number].head_sha = sha
+
+    def ci_status(self, ref: str) -> CiStatus:
+        if self.fail_next_ci > 0:
+            self.fail_next_ci -= 1
+            raise ApiError(0, "checks", "fake checks outage")
+        return self.ci.get(ref, CiStatus(sha=ref, settled=True, state="none", total=0))
 
     def repo_accessible(self) -> bool:
         return True

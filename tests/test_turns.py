@@ -140,6 +140,19 @@ class TurnsTest(unittest.TestCase):
         self.assertEqual(d.exit_code, turns.EXIT_CONTINUE)
         self.assertIn("rebase needed", d.prompt)
 
+    def test_ci_status_wakes_the_agent(self):
+        state = self.reload()
+        state.phase = turns.PHASE_READY  # sitting on a submitted PR
+        state.save(self.agent_dir)
+        self.mb.put_inbox(
+            "ci_status",
+            {"state": "failure", "text": "CI failed on PR #7. Failing checks:\n  - lint"},
+        )
+        d = self.decide()
+        self.assertEqual(d.exit_code, turns.EXIT_CONTINUE)
+        self.assertIn("CI failure on your PR", d.prompt)
+        self.assertIn("lint", d.prompt)
+
     def test_info_alone_does_not_wake(self):
         state = self.reload()
         state.phase = turns.PHASE_READY

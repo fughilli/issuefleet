@@ -13,11 +13,18 @@ import logging
 import re
 
 from issuefleet.httpx import ApiError, urllib_transport
-from issuefleet.model import PrFeedback, PullRequest
+from issuefleet.model import CiCheck, CiStatus, PrFeedback, PullRequest
 
 log = logging.getLogger("issuefleet.github")
 
 API_ROOT = "https://api.github.com"
+
+# Check-run conclusions that count as a failure worth surfacing. neutral,
+# skipped, and stale are benign; cancelled is usually a human/superseded stop,
+# not a code failure, so it's left out to avoid false alarms.
+_FAILING_CONCLUSIONS = frozenset(
+    {"failure", "timed_out", "action_required", "startup_failure"}
+)
 
 _SSH_RE = re.compile(r"^(?:ssh://)?git@[^:/]+[:/](?P<slug>[^/]+/[^/]+?)(?:\.git)?/?$")
 _HTTPS_RE = re.compile(r"^https?://[^/]+/(?P<slug>[^/]+/[^/]+?)(?:\.git)?/?$")
@@ -41,6 +48,7 @@ def _to_pr(d: dict) -> PullRequest:
         merged=bool(d.get("merged")) or d.get("merged_at") is not None,
         head=d["head"]["ref"],
         base=d["base"]["ref"],
+        head_sha=d["head"].get("sha", ""),
         # Present only on the single-PR GET; absent (-> None) from the list
         # endpoint find_pr() uses, which is fine — conflict detection reads
         # the PR fetched by get_pr().
@@ -147,6 +155,61 @@ class GithubForge:
                 )
             )
         return out
+
+    def ci_status(self, ref: str) -> CiStatus:
+        """Fold the check-runs API and the combined commit-status API for
+        ``ref`` into one verdict.
+
+        GitHub carries CI on two independent surfaces — the modern Checks API
+        (``check_runs``) and legacy commit statuses (``statuses``) — and a repo
+        can use either or both, so both are consulted and merged. A run is
+        ``settled`` only when nothing is still queued/in_progress (check runs)
+        or pending (statuses); until then the caller shouldn't notify. A
+        check run counts as failing on any non-passing *conclusion* except the
+        benign neutral/skipped/stale/cancelled ones; a status fails on
+        failure/error. With no checks or statuses at all, ``total`` is 0 and
+        ``state`` is "none"."""
+        failing: list[CiCheck] = []
+        total = 0
+        pending = False
+
+        runs = self._call("GET", f"/repos/{self.slug}/commits/{ref}/check-runs")
+        for r in runs.get("check_runs", []):
+            total += 1
+            if r.get("status") != "completed":
+                pending = True
+                continue
+            if r.get("conclusion") in _FAILING_CONCLUSIONS:
+                failing.append(
+                    CiCheck(
+                        name=r.get("name") or "check",
+                        passed=False,
+                        url=r.get("html_url") or r.get("details_url"),
+                    )
+                )
+
+        combined = self._call("GET", f"/repos/{self.slug}/commits/{ref}/status")
+        for s in combined.get("statuses", []):
+            total += 1
+            st = s.get("state")
+            if st == "pending":
+                pending = True
+                continue
+            if st in ("failure", "error"):
+                failing.append(
+                    CiCheck(
+                        name=s.get("context") or "status",
+                        passed=False,
+                        url=s.get("target_url"),
+                    )
+                )
+
+        if total == 0:
+            return CiStatus(sha=ref, settled=True, state="none", total=0)
+        if pending:
+            return CiStatus(sha=ref, settled=False, state="pending", total=total)
+        state = "failure" if failing else "success"
+        return CiStatus(sha=ref, settled=True, state=state, total=total, failing=failing)
 
     # -- doctor support ----------------------------------------------------
 

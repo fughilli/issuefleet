@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from issuefleet.model import Comment, Issue, PrFeedback, PullRequest, WorkerRecord
+from issuefleet.model import CiStatus, Comment, Issue, PrFeedback, PullRequest, WorkerRecord
 
 
 class Tracker(Protocol):
@@ -68,6 +68,12 @@ class Forge(Protocol):
     def pr_feedback(self, number: int) -> list[PrFeedback]:
         """Issue comments, review bodies, and inline review comments,
         normalized. Caller dedupes by id."""
+        ...
+
+    def ci_status(self, ref: str) -> CiStatus:
+        """Aggregate CI verdict (check runs + commit statuses) for a commit.
+        `settled` is False while anything is still running; caller notifies
+        the agent only on a settled pass/fail."""
         ...
 
     def push_spec(self) -> tuple[str, str]:
