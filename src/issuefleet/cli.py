@@ -103,17 +103,33 @@ def build_publishers(cfg: Config) -> list:
     """The roadmap bot's publish surfaces, built from config with their secrets
     resolved host-side. A surface whose secret is missing is skipped with a
     warning rather than failing the whole bot — the others still publish."""
-    from issuefleet.publish import DiscordWebhookPublisher
+    from issuefleet.publish import DiscordBotPublisher, DiscordWebhookPublisher
 
     publishers = []
     d = cfg.roadmap.discord
-    if d.enabled:
+    if d.enabled and d.mode == "bot":
+        token = creds.resolve_discord_bot_token(d)
+        if token:
+            publishers.append(DiscordBotPublisher(token, d.channel_id))
+            if d.username:
+                log.warning(
+                    "roadmap: [roadmap.discord] username is ignored in bot mode — "
+                    "the bot posts under its own account name (change it in the "
+                    "Discord Developer Portal)"
+                )
+        else:
+            log.warning(
+                "roadmap: Discord bot surface enabled but no bot token resolves "
+                "(set $%s or write %s); skipping it",
+                d.bot_token_env, d.bot_token_file,
+            )
+    elif d.enabled:
         url = creds.resolve_discord_webhook(d)
         if url:
             publishers.append(DiscordWebhookPublisher(url, username=d.username or None))
         else:
             log.warning(
-                "roadmap: Discord surface enabled but no webhook URL resolves "
+                "roadmap: Discord webhook surface enabled but no webhook URL resolves "
                 "(set $%s or write %s); skipping it",
                 d.webhook_url_env, d.webhook_url_file,
             )

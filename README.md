@@ -336,33 +336,55 @@ Each tick it checks its cadence; when `interval_s` has elapsed it:
 - **Writes the update.** With an Anthropic key (the same one the advisor and
   security deep-scan use) Claude turns that into a stakeholder-ready summary using
   a **configurable `system_prompt`** — the default is a "daily workstream summary"
-  persona that produces 1–2 sentences per workstream plus any Mermaid/Markdown
-  diagrams it needs. **Without a key it degrades to a deterministic grouped
-  listing**, so the bot still reports something offline; the same fallback catches
-  a failed API call.
+  persona that produces 1–2 sentences per workstream, formatted for a chat client:
+  headings, bold, and bullets, and explicitly *no* tables or Mermaid, since chat
+  clients render neither and would show the raw source instead. **Without a key it
+  degrades to a deterministic grouped listing**, so the bot still reports something
+  offline; the same fallback catches a failed API call.
 - **Publishes it.** To every enabled surface. **Discord** is the first surface
-  built out — a plain incoming webhook, so no bot token or gateway connection is
-  needed. Summaries over Discord's 2000-character limit are chunked across
-  messages. (Discord renders standard Markdown but not tables or Mermaid; those
-  arrive as legible raw source. The `Publisher` seam in `publish.py` is small on
-  purpose, so Slack or a Linear document can be added the same way.)
+  built out, in either of two modes: as a **bot account** (default — the update
+  comes from a named member of your server, posting to a channel by id) or via a
+  plain **incoming webhook** (no bot account at all). Either way it's a REST
+  call; no gateway/websocket connection is involved. Summaries over Discord's
+  2000-character limit are chunked across messages. (The `Publisher` seam in
+  `publish.py` is small on purpose, so Slack or a Linear document can be added
+  the same way. A surface that renders more than chat Markdown — a Linear
+  document, say — wants its own `system_prompt`; the default assumes it doesn't.)
 
 The run's timestamp is committed only after a surface accepts the report, so a
 transient webhook outage retries next tick rather than skipping a whole interval.
 
 Setup:
 
-1. In Discord, create an incoming webhook (Server Settings → Integrations →
-   Webhooks → New Webhook → Copy Webhook URL). The URL carries a token, so it's a
-   secret: write it to `~/.config/issuefleet/discord_webhook.url` (chmod 600) or
-   set `$ISSUEFLEET_DISCORD_WEBHOOK_URL` — never the config file.
+1. Give it a way into the channel — pick one:
+
+   **Bot account** (`mode = "bot"`, the default). At
+   <https://discord.com/developers/applications>: create an application, add a
+   **Bot** user, and hit **Reset Token** to get its token. Invite it with
+   OAuth2 → URL Generator → scope `bot`, permission **Send Messages** (this is
+   the only thing the OAuth2 client id is for; the client *secret* is not used
+   at all). Then grab the target channel's id — enable Developer Mode (User
+   Settings → Advanced), right-click the channel → **Copy Channel ID** — and
+   make sure the bot has **View Channel** + **Send Messages** there, or Discord
+   answers 403. Write the bot token to
+   `~/.config/issuefleet/discord.token` (chmod 600) or set
+   `$ISSUEFLEET_DISCORD_BOT_TOKEN`; the channel id isn't a secret and goes in
+   the config.
+
+   **Incoming webhook** (`mode = "webhook"`). No bot account: Server Settings →
+   Integrations → Webhooks → New Webhook → Copy Webhook URL. The whole URL is
+   the credential, so write it to `~/.config/issuefleet/discord_webhook.url`
+   (chmod 600) or set `$ISSUEFLEET_DISCORD_WEBHOOK_URL` — never the config file.
+
 2. Set `[roadmap] enabled = true`, list the Linear `projects` to summarize, and
-   set `[roadmap.discord] enabled = true`. Optionally override `system_prompt`,
-   `model`, `interval_s` (`0` = publish only on demand), and the Discord
-   `username`.
+   set `[roadmap.discord] enabled = true` with the `mode` you chose (plus
+   `channel_id` in bot mode). Optionally override `system_prompt`, `model`, and
+   `interval_s` (`0` = publish only on demand). In webhook mode `username`
+   overrides the per-message display name; a bot always posts under its own
+   account name, so it's ignored there.
 3. Provide an `ANTHROPIC_API_KEY` (or `~/.config/issuefleet/anthropic.key`) for
    LLM-written updates; without it you get the plain listing.
-4. `issuefleet doctor` verifies the projects, the webhook secret, and the key.
+4. `issuefleet doctor` verifies the projects, the surface's secret, and the key.
    **Preview the summary any time with `issuefleet roadmap`** (prints it, publishes
    nothing) or push it now with `issuefleet roadmap --publish` — handy from cron,
    or to sanity-check the prompt before turning the daemon cadence on.
@@ -458,8 +480,11 @@ interval_s = 86400                         # publish cadence; 0 = on demand only
 # system_prompt = "..."                     # the persona; defaults to a daily-summary prompt
 [roadmap.discord]
 enabled = true
-webhook_url_file = "~/.config/issuefleet/discord_webhook.url"   # or $ISSUEFLEET_DISCORD_WEBHOOK_URL
-# username = "Roadmap Bot"                  # optional display-name override
+mode = "bot"                               # bot (post as your bot account) | webhook
+channel_id = "000000000000000000"          # bot mode: right-click channel -> Copy Channel ID
+bot_token_file = "~/.config/issuefleet/discord.token"        # or $ISSUEFLEET_DISCORD_BOT_TOKEN
+# webhook_url_file = "~/.config/issuefleet/discord_webhook.url"  # or $ISSUEFLEET_DISCORD_WEBHOOK_URL
+# username = "Roadmap Bot"                  # webhook-only display-name override
 
 [security]                                 # scan each `ready` diff for leaked credentials; on by default
 mode = "block"                             # block (reject the ready) | warn (log + notify, still push) | off

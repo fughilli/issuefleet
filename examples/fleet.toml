@@ -77,7 +77,10 @@ deep_scan = "off"
 #   projects   — Linear project names (or UUIDs) to summarize.
 #   interval_s — publish cadence; 0 means on-demand only (no daemon publishing).
 #   system_prompt — the persona/instructions; defaults to the daily-summary
-#                   prompt. Override for a different tone or surface.
+#                   prompt, which asks for chat-shaped output (headings, bold,
+#                   bullets — no tables or Mermaid, which chat clients show as
+#                   raw source). Override for a different tone, or for a surface
+#                   that renders more than chat Markdown.
 [roadmap]
 enabled = false
 projects = ["Splanc"]
@@ -88,13 +91,34 @@ interval_s = 86400   # daily
 # group of stakeholders on a daily basis. ...
 # """
 
-# Discord surface: an incoming webhook (Server Settings → Integrations →
-# Webhooks → New Webhook → Copy URL). The URL carries a token, so it's a secret:
-# put it in $ISSUEFLEET_DISCORD_WEBHOOK_URL or a chmod-600 file, never here.
+# Discord surface, in one of two modes.
+#
+# mode = "bot" (default) posts as your bot account, so the update comes from a
+# named member of the server. You need:
+#   1. An application with a bot user (https://discord.com/developers/applications
+#      → Bot). Bot → Reset Token gives the *bot token* — that's the credential,
+#      NOT the OAuth2 client id/secret.
+#   2. The bot invited to the server: OAuth2 → URL Generator → scope `bot`,
+#      permission `Send Messages` (the client id is used only to build that link).
+#   3. The target channel's id: enable Developer Mode (User Settings → Advanced),
+#      then right-click the channel → Copy Channel ID. The bot needs View Channel
+#      + Send Messages there.
+# The token is a secret: put it in $ISSUEFLEET_DISCORD_BOT_TOKEN or a chmod-600
+# file, never here. The channel id is not a secret.
 [roadmap.discord]
 enabled = true
-webhook_url_file = "~/.config/issuefleet/discord_webhook.url"
-# username = "Roadmap Bot"   # optional display-name override for these posts
+mode = "bot"
+channel_id = "000000000000000000"
+bot_token_file = "~/.config/issuefleet/discord.token"
+
+# mode = "webhook" is the no-bot-account alternative: one incoming webhook per
+# channel (Server Settings → Integrations → Webhooks → New Webhook → Copy URL).
+# The whole URL is the credential, so it's a secret too — $ISSUEFLEET_DISCORD_
+# WEBHOOK_URL or a chmod-600 file, never here.
+# mode = "webhook"
+# webhook_url_file = "~/.config/issuefleet/discord_webhook.url"
+# username = "Roadmap Bot"   # webhook-only: per-message display name. A bot
+#                            # always posts under its own account name.
 
 [agent]
 max_auto_turns = 50

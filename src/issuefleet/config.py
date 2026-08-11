@@ -26,7 +26,12 @@ _FORBIDDEN_SECRET_KEYS = (
     "gh_token",
     "token",
     "api_key",
+    "bot_token",
+    "webhook_url",
 )
+
+# How the roadmap bot reaches a Discord channel. See DiscordSurfaceConfig.
+DISCORD_MODES = ("bot", "webhook")
 
 
 class ConfigError(Exception):
@@ -170,28 +175,59 @@ class FleetManagerConfig:
     advisor: str = "conservative"
 
 
-# The default roadmap system prompt (the brief's example). Configurable via
-# [roadmap] system_prompt.
+# The default roadmap system prompt. The persona is the brief's; the formatting
+# half deliberately departs from it. The brief invited Mermaid and Markdown
+# tables, but every surface the bot publishes to so far is a chat client, and
+# chat clients render neither — a table arrives as a wall of pipes and a diagram
+# as a fenced block of source, which is worse than the prose it replaced. So the
+# default asks for chat-shaped output only. A surface that *can* render richer
+# output should override [roadmap] system_prompt rather than change this.
 DEFAULT_ROADMAP_SYSTEM_PROMPT = (
     "You are a workstream summarization agent that provides crisp updates to a "
-    "group of stakeholders on a daily basis. Please write succinct updates for "
-    "each outstanding workstream (no more than 1-2 sentences per workstream). "
-    "Produce any diagrams or tables you may need to explain the workstreams "
-    "using Mermaid and standard Markdown."
+    "group of stakeholders on a daily basis. "
+    "Open with a 1-4 sentence summary in a chipper, informal tone: greet the "
+    "readers by the project's own name, call out the most exciting thing the "
+    "team is working on right now, and hand off to the detail below. For "
+    "example: \"Hey, what's up Splanc'ers! Today the team is hard at work "
+    "shipping X and is excited to share it with you! See below for a summary on "
+    "progress:\" — match that energy, but write it fresh for the actual project "
+    "and the actual work, and never invent progress that isn't in the issues. "
+    "Then write succinct updates for each outstanding workstream (no more than "
+    "1-2 sentences per workstream); those stay factual and to the point. "
+    "Your update is posted to a chat client, so format it with headings, bold "
+    "text, and bullet lists only. Do NOT emit Markdown tables, Mermaid, or any "
+    "other diagram source: they are not rendered there and arrive as unreadable "
+    "raw text. Convey anything you would have tabulated or drawn in prose "
+    "instead. Keep the whole update under 1800 characters so it lands as a "
+    "single message."
 )
 
 
 @dataclass
 class DiscordSurfaceConfig:
-    """A Discord publish surface for the roadmap bot: an incoming webhook. The
-    URL carries a secret token, so it follows the usual env-then-file rule and
-    never sits in the config file. ``username`` optionally overrides the
-    webhook's display name for these posts."""
+    """A Discord publish surface for the roadmap bot, in one of two ``mode``s:
+
+    - ``"bot"`` — post as the application's bot account into ``channel_id``.
+      The update comes from an identifiable server member with its own name and
+      avatar, and the bot is granted access per channel. Needs the bot token
+      (a secret) and the numeric channel id (not one).
+    - ``"webhook"`` — post through a channel's incoming webhook. No bot account
+      needed; the whole URL is the credential, and ``username`` may override the
+      per-message display name (bots always post under their own name).
+
+    Either way the credential follows the usual env-then-file rule and never
+    sits in the config file."""
 
     enabled: bool = False
+    mode: str = "bot"
+    # mode = "bot"
+    bot_token_env: str = "ISSUEFLEET_DISCORD_BOT_TOKEN"
+    bot_token_file: Path = Path("~/.config/issuefleet/discord.token").expanduser()
+    channel_id: str = ""
+    # mode = "webhook"
     webhook_url_env: str = "ISSUEFLEET_DISCORD_WEBHOOK_URL"
     webhook_url_file: Path = Path("~/.config/issuefleet/discord_webhook.url").expanduser()
-    username: str = ""
+    username: str = ""  # webhook-only display-name override
 
 
 @dataclass
@@ -473,12 +509,16 @@ def _parse_roadmap(table: dict, source: str) -> RoadmapConfig:
     _reject_secrets(discord_raw, f"{source} [roadmap.discord]")
     discord = DiscordSurfaceConfig(
         enabled=bool(discord_raw.get("enabled", False)),
+        mode=str(discord_raw.get("mode", "bot")).strip().lower(),
+        channel_id=str(discord_raw.get("channel_id", "")).strip(),
         username=str(discord_raw.get("username", "")),
     )
-    if "webhook_url_env" in discord_raw:
-        discord.webhook_url_env = str(discord_raw["webhook_url_env"])
-    if "webhook_url_file" in discord_raw:
-        discord.webhook_url_file = _path(str(discord_raw["webhook_url_file"]))
+    for key in ("bot_token_env", "webhook_url_env"):
+        if key in discord_raw:
+            setattr(discord, key, str(discord_raw[key]))
+    for key in ("bot_token_file", "webhook_url_file"):
+        if key in discord_raw:
+            setattr(discord, key, _path(str(discord_raw[key])))
 
     rm = RoadmapConfig(
         enabled=bool(table.get("enabled", False)),
@@ -503,6 +543,20 @@ def _parse_roadmap(table: dict, source: str) -> RoadmapConfig:
                 f"{source} [roadmap]: enabled but no publish surface is on — "
                 "set [roadmap.discord] enabled = true"
             )
+        if discord.enabled:
+            if discord.mode not in DISCORD_MODES:
+                raise ConfigError(
+                    f"{source} [roadmap.discord]: mode must be one of "
+                    f"{', '.join(DISCORD_MODES)} (got {discord.mode!r})"
+                )
+            # The bot posts to a channel by id; a webhook URL names its own
+            # channel, so that mode needs nothing further here.
+            if discord.mode == "bot" and not discord.channel_id:
+                raise ConfigError(
+                    f"{source} [roadmap.discord]: channel_id is required in bot mode "
+                    "(enable Developer Mode in Discord, then right-click the channel "
+                    "→ Copy Channel ID)"
+                )
     return rm
 
 

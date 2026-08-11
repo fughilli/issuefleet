@@ -19,7 +19,7 @@ CONFIG = {
         "enabled": True,
         "projects": [BOARD],
         "interval_s": 86400,
-        "discord": {"enabled": True},
+        "discord": {"enabled": True, "channel_id": "1234"},
     },
 }
 
@@ -211,28 +211,77 @@ class ConfigTest(unittest.TestCase):
         self.assertFalse(cfg.roadmap.enabled)
 
     def test_bare_string_project_is_accepted(self):
-        cfg = self._cfg({"enabled": True, "projects": "Splanc", "discord": {"enabled": True}})
+        cfg = self._cfg({"enabled": True, "projects": "Splanc",
+                         "discord": {"enabled": True, "channel_id": "1"}})
         self.assertEqual(cfg.roadmap.projects, ["Splanc"])
 
     def test_enabled_without_projects_is_error(self):
         with self.assertRaises(ConfigError):
-            self._cfg({"enabled": True, "discord": {"enabled": True}})
+            self._cfg({"enabled": True, "discord": {"enabled": True, "channel_id": "1"}})
 
     def test_enabled_without_surface_is_error(self):
         with self.assertRaises(ConfigError):
             self._cfg({"enabled": True, "projects": ["Splanc"]})
 
-    def test_default_system_prompt_is_the_brief_example(self):
-        cfg = self._cfg({"enabled": True, "projects": ["Splanc"], "discord": {"enabled": True}})
-        self.assertIn("workstream summarization agent", cfg.roadmap.system_prompt)
+    def test_default_system_prompt_is_chat_shaped(self):
+        cfg = self._cfg({"enabled": True, "projects": ["Splanc"],
+                         "discord": {"enabled": True, "channel_id": "1"}})
+        prompt = cfg.roadmap.system_prompt
+        self.assertIn("workstream summarization agent", prompt)
+        # Chat clients render neither, so the default must not ask for them.
+        self.assertIn("Do NOT emit Markdown tables, Mermaid", prompt)
+        # A friendly lede up top, with the per-workstream detail left factual.
+        self.assertIn("chipper, informal tone", prompt)
 
     def test_custom_system_prompt_and_model(self):
         cfg = self._cfg({
-            "enabled": True, "projects": ["Splanc"], "discord": {"enabled": True},
+            "enabled": True, "projects": ["Splanc"],
+            "discord": {"enabled": True, "channel_id": "1"},
             "system_prompt": "Be terse.", "model": "claude-x",
         })
         self.assertEqual(cfg.roadmap.system_prompt, "Be terse.")
         self.assertEqual(cfg.roadmap.model, "claude-x")
+
+
+class DiscordSurfaceConfigTest(ConfigTest):
+    def test_bot_is_the_default_mode(self):
+        cfg = self._cfg({"enabled": True, "projects": ["Splanc"],
+                         "discord": {"enabled": True, "channel_id": "1234"}})
+        self.assertEqual(cfg.roadmap.discord.mode, "bot")
+        self.assertEqual(cfg.roadmap.discord.channel_id, "1234")
+
+    def test_bot_mode_without_channel_id_is_error(self):
+        with self.assertRaises(ConfigError):
+            self._cfg({"enabled": True, "projects": ["Splanc"], "discord": {"enabled": True}})
+
+    def test_webhook_mode_needs_no_channel_id(self):
+        cfg = self._cfg({"enabled": True, "projects": ["Splanc"],
+                         "discord": {"enabled": True, "mode": "webhook"}})
+        self.assertEqual(cfg.roadmap.discord.mode, "webhook")
+
+    def test_unknown_mode_is_error(self):
+        with self.assertRaises(ConfigError):
+            self._cfg({"enabled": True, "projects": ["Splanc"],
+                       "discord": {"enabled": True, "mode": "gateway", "channel_id": "1"}})
+
+    def test_numeric_channel_id_is_normalized_to_a_string(self):
+        # TOML gives an unquoted snowflake back as an int; the endpoint wants text.
+        cfg = self._cfg({"enabled": True, "projects": ["Splanc"],
+                         "discord": {"enabled": True, "channel_id": 1234567890123456789}})
+        self.assertEqual(cfg.roadmap.discord.channel_id, "1234567890123456789")
+
+    def test_token_in_the_config_file_is_rejected(self):
+        with self.assertRaises(ConfigError):
+            self._cfg({"enabled": True, "projects": ["Splanc"],
+                       "discord": {"enabled": True, "channel_id": "1", "bot_token": "abc"}})
+
+    def test_secret_locations_are_overridable(self):
+        cfg = self._cfg({"enabled": True, "projects": ["Splanc"], "discord": {
+            "enabled": True, "channel_id": "1",
+            "bot_token_env": "MY_TOKEN", "bot_token_file": "/tmp/bot.token",
+        }})
+        self.assertEqual(cfg.roadmap.discord.bot_token_env, "MY_TOKEN")
+        self.assertEqual(str(cfg.roadmap.discord.bot_token_file), "/tmp/bot.token")
 
 
 if __name__ == "__main__":

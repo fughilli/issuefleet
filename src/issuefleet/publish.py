@@ -27,6 +27,12 @@ log = logging.getLogger("issuefleet.publish")
 # markers a future change might add without re-tuning the math.
 DISCORD_LIMIT = 2000
 
+# Discord's REST base, and the User-Agent bot requests are expected to send.
+# urllib's default ("Python-urllib/3.x") is a shape Discord's edge is known to
+# turn away, so bot calls name themselves explicitly.
+DISCORD_API = "https://discord.com/api/v10"
+DISCORD_USER_AGENT = "DiscordBot (https://github.com/fughilli/issuefleet, 0.1)"
+
 
 class PublishError(Exception):
     """A surface failed to publish. The bot logs it and moves on to the next
@@ -75,26 +81,28 @@ def chunk(text: str, limit: int = DISCORD_LIMIT) -> list[str]:
     return chunks
 
 
-class DiscordWebhookPublisher:
-    """Posts to a Discord channel via an incoming webhook.
+class _DiscordPublisher:
+    """Shared plumbing for the two ways to reach a Discord channel.
 
-    A webhook needs no bot token or gateway connection: one HTTPS POST of
-    ``{"content": ...}`` to the webhook URL drops a message in the channel. The
-    URL itself carries a secret token, so it is resolved env-then-file like
-    every other credential and never sits in the config file.
+    Both chunk the summary to Discord's 2000-character ceiling and POST the
+    pieces in order, stopping at the first failure; they differ only in the URL
+    they post to, what authenticates the call, and what the message can carry.
 
     Discord renders standard Markdown (headings, bold, lists, fenced code) but
     NOT tables or Mermaid — those arrive as their raw source, which is still
-    legible and copy-pasteable. Long summaries are chunked to Discord's
-    2000-character ceiling and posted in order.
+    legible and copy-pasteable.
     """
 
     name = "discord"
 
-    def __init__(self, webhook_url: str, *, username: str | None = None, transport=urllib_transport):
-        self._url = webhook_url
-        self._username = username
-        self._transport = transport
+    def _endpoint(self) -> str:
+        raise NotImplementedError
+
+    def _headers(self) -> dict:
+        raise NotImplementedError
+
+    def _payload(self, piece: str) -> dict:
+        return {"content": piece}
 
     def publish(self, text: str) -> None:
         pieces = chunk(text)
@@ -102,14 +110,86 @@ class DiscordWebhookPublisher:
             log.info("roadmap: nothing to publish to Discord (empty summary)")
             return
         for i, piece in enumerate(pieces):
-            payload: dict = {"content": piece}
-            if self._username:
-                payload["username"] = self._username
             try:
-                # Discord replies 204 No Content on success; the transport
-                # returns {} for an empty body, which we don't inspect.
-                self._transport("POST", self._url, {"Content-Type": "application/json"}, payload)
+                # A webhook replies 204 No Content and the bot endpoint replies
+                # 200 with the created message; neither body is inspected (the
+                # transport hands back {} for an empty one).
+                self._transport(
+                    "POST", self._endpoint(), self._headers(), self._payload(piece)
+                )
             except ApiError as e:
                 raise PublishError(
-                    f"Discord webhook POST failed on message {i + 1}/{len(pieces)}: {e}"
+                    f"Discord POST ({self.name}) failed on message "
+                    f"{i + 1}/{len(pieces)}: {e}"
                 ) from e
+
+
+class DiscordWebhookPublisher(_DiscordPublisher):
+    """Posts to a Discord channel via an incoming webhook.
+
+    A webhook needs no bot account or gateway connection: one HTTPS POST of
+    ``{"content": ...}`` to the webhook URL drops a message in the channel. The
+    URL itself carries a secret token, so it is resolved env-then-file like
+    every other credential and never sits in the config file.
+
+    Because the message is not attributed to any account, a webhook post can
+    override its own display name per message (``username``).
+    """
+
+    name = "discord-webhook"
+
+    def __init__(self, webhook_url: str, *, username: str | None = None, transport=urllib_transport):
+        self._url = webhook_url
+        self._username = username
+        self._transport = transport
+
+    def _endpoint(self) -> str:
+        return self._url
+
+    def _headers(self) -> dict:
+        return {"Content-Type": "application/json"}
+
+    def _payload(self, piece: str) -> dict:
+        payload = {"content": piece}
+        if self._username:
+            payload["username"] = self._username
+        return payload
+
+
+class DiscordBotPublisher(_DiscordPublisher):
+    """Posts to a Discord channel as a bot account.
+
+    Where a webhook is an anonymous drop-box for one channel, this authenticates
+    as the application's bot user (``Authorization: Bot <token>``) and posts to
+    ``/channels/{id}/messages``. That is the surface to use when the update
+    should come *from* an identifiable member of the server — the bot's avatar,
+    name, and role are its own, it can be given access per channel, and the same
+    token can later reach any channel it can see (the roadmap bot posts to one).
+
+    No gateway/websocket connection is involved: posting a message is a plain
+    REST call. The bot must be in the server (invited via OAuth2 with the ``bot``
+    scope) and hold **View Channel** + **Send Messages** on the target channel,
+    or Discord answers 403.
+
+    ``username`` has no analogue here — a bot always posts under its own account
+    name, which is changed in the Developer Portal, not per message.
+    """
+
+    name = "discord-bot"
+
+    def __init__(self, token: str, channel_id: str, *, transport=urllib_transport):
+        self._token = token
+        self._channel_id = str(channel_id)
+        self._transport = transport
+
+    def _endpoint(self) -> str:
+        return f"{DISCORD_API}/channels/{self._channel_id}/messages"
+
+    def _headers(self) -> dict:
+        # The "Bot " prefix is required: without it Discord reads the token as a
+        # (long-dead) user token and answers 401.
+        return {
+            "Authorization": f"Bot {self._token}",
+            "Content-Type": "application/json",
+            "User-Agent": DISCORD_USER_AGENT,
+        }

@@ -254,14 +254,28 @@ def _check_roadmap(cfg: Config) -> list[Check]:
         out.append(Check(WARN, "roadmap summary", "no ANTHROPIC_API_KEY / "
                          "~/.config/issuefleet/anthropic.key — will publish a plain listing"))
     d = rm.discord
-    if d.enabled:
+    if not d.enabled:
+        out.append(Check(WARN, "roadmap → Discord", "surface off — no enabled surface to publish to"))
+    elif d.mode == "bot":
+        if creds.resolve_discord_bot_token(d):
+            out.append(Check(OK, "roadmap → Discord",
+                             f"bot token resolves — posting to channel {d.channel_id}. The bot "
+                             "must be in the server with View Channel + Send Messages there"))
+        else:
+            out.append(Check(FAIL, "roadmap → Discord", f"bot mode but no bot token: set "
+                             f"${d.bot_token_env} or write it to {d.bot_token_file} (chmod 600). "
+                             "It's the Bot token from the Developer Portal, not the OAuth2 "
+                             "client secret"))
+        if d.username:
+            out.append(Check(WARN, "roadmap → Discord",
+                             "username is ignored in bot mode — a bot posts under its own "
+                             "account name (rename it in the Developer Portal)"))
+    else:
         if creds.resolve_discord_webhook(d):
             out.append(Check(OK, "roadmap → Discord", "webhook URL resolves"))
         else:
-            out.append(Check(FAIL, "roadmap → Discord", f"enabled but no webhook URL: set "
+            out.append(Check(FAIL, "roadmap → Discord", f"webhook mode but no webhook URL: set "
                              f"${d.webhook_url_env} or write it to {d.webhook_url_file} (chmod 600)"))
-    else:
-        out.append(Check(WARN, "roadmap → Discord", "surface off — no enabled surface to publish to"))
     return out
 
 

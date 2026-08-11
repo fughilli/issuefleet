@@ -107,6 +107,17 @@ def resolve_discord_webhook(discord) -> str | None:
     return resolve_optional(discord.webhook_url_env, Path(discord.webhook_url_file))
 
 
+def resolve_discord_bot_token(discord) -> str | None:
+    """The roadmap bot's Discord bot-account token (Developer Portal → Bot →
+    Reset Token), env-then-file. Same rule as every other secret: never the
+    config file. Returns None when absent, which doctor flags.
+
+    Note this is the *bot* token, not the application's OAuth2 client secret —
+    the client id/secret pair only mints OAuth grants (it's what the invite link
+    is built from); the bot token is what authorizes posting as the bot."""
+    return resolve_optional(discord.bot_token_env, Path(discord.bot_token_file))
+
+
 def resolve_anthropic_key(cfg: Config) -> str | None:
     """Optional Anthropic API key for the fleet manager's 'claude' advisor.
     Env-then-file; returns None when absent (the advisor falls back to
