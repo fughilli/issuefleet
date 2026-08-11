@@ -99,6 +99,40 @@ def build_fleet_manager(cfg: Config, reconciler: Reconciler):
     )
 
 
+def build_publishers(cfg: Config) -> list:
+    """The roadmap bot's publish surfaces, built from config with their secrets
+    resolved host-side. A surface whose secret is missing is skipped with a
+    warning rather than failing the whole bot — the others still publish."""
+    from issuefleet.publish import DiscordWebhookPublisher
+
+    publishers = []
+    d = cfg.roadmap.discord
+    if d.enabled:
+        url = creds.resolve_discord_webhook(d)
+        if url:
+            publishers.append(DiscordWebhookPublisher(url, username=d.username or None))
+        else:
+            log.warning(
+                "roadmap: Discord surface enabled but no webhook URL resolves "
+                "(set $%s or write %s); skipping it",
+                d.webhook_url_env, d.webhook_url_file,
+            )
+    return publishers
+
+
+def build_roadmap_bot(cfg: Config, reconciler: Reconciler):
+    """The roadmap bot, or None when disabled. Shares the reconciler's tracker
+    so it reads the same fleet; the Anthropic key (for the LLM summary) and each
+    surface's secret resolve host-side, same as everything else."""
+    if not cfg.roadmap.enabled:
+        return None
+    from issuefleet.roadmap import RoadmapBot
+
+    publishers = build_publishers(cfg)
+    anthropic_key = creds.resolve_anthropic_key(cfg)
+    return RoadmapBot(cfg, reconciler.tracker, publishers, agent_key=anthropic_key)
+
+
 class DaemonLock:
     """One reconciling process per state dir — two daemons would double-relay.
     (`status`/`logs`/`attach` don't take it; they only read.)"""
@@ -264,16 +298,28 @@ def cmd_run(cfg: Config) -> int:
                 # Never let a fleet-manager startup problem (missing sigbot key,
                 # unreadable state file, …) take down the reconcile loop.
                 log.exception("fleet manager enabled but not startable; running without it")
+        roadmap = None
+        if cfg.roadmap.enabled:
+            try:
+                roadmap = build_roadmap_bot(cfg, reconciler)
+                log.info("roadmap bot up: project(s) %s, publish every %ds, surfaces: %s",
+                         ", ".join(cfg.roadmap.projects), cfg.roadmap.interval_s,
+                         ", ".join(p.name for p in roadmap.publishers) or "none configured")
+            except Exception:
+                # Never let a roadmap-bot startup problem take down the reconcile loop.
+                log.exception("roadmap bot enabled but not startable; running without it")
         # The loop wakes often enough to poll Signal at the fleet manager's
-        # cadence when it's the tighter interval.
+        # cadence when it's the tighter interval. (The roadmap bot self-gates on
+        # its own — usually daily — interval, so it doesn't tighten the loop.)
         loop_interval = cfg.poll_interval_s
         if fleet is not None:
             loop_interval = min(loop_interval, cfg.fleet_manager.poll_interval_s)
-        log.info("daemon up: %d project(s), poll every %ds%s%s%s",
+        log.info("daemon up: %d project(s), poll every %ds%s%s%s%s",
                  len(cfg.projects), loop_interval,
                  " + webhook wake-ups" if server else "",
                  " + dashboard" if dashboard else "",
-                 " + fleet manager" if fleet else "")
+                 " + fleet manager" if fleet else "",
+                 " + roadmap bot" if roadmap else "")
         from issuefleet.model import PHASE_CRASHED
 
         crashed = [w.issue_key for w in reconciler.registry.all() if w.phase == PHASE_CRASHED]
@@ -295,6 +341,11 @@ def cmd_run(cfg: Config) -> int:
                         fleet.tick()
                     except Exception:
                         log.exception("fleet manager tick failed; retrying next interval")
+                if roadmap is not None:
+                    try:
+                        roadmap.tick()
+                    except Exception:
+                        log.exception("roadmap bot tick failed; retrying next interval")
                 # Sleep until the poll interval elapses OR a webhook wakes us.
                 if wake.wait(timeout=loop_interval):
                     log.debug("woken early by webhook")
@@ -431,6 +482,35 @@ def cmd_fleet(cfg: Config) -> int:
     return 0
 
 
+def cmd_roadmap(cfg: Config, publish: bool) -> int:
+    """Preview the roadmap summary (default) or publish it now (--publish).
+    Reads Linear directly; no worker fleet is touched, so it's cheap to run by
+    hand or from cron."""
+    from issuefleet.roadmap import RoadmapBot
+
+    rm = cfg.roadmap
+    if not rm.enabled:
+        print("roadmap bot: disabled ([roadmap] enabled = false)")
+        return 0
+    tracker = LinearTracker(client_from_config(cfg))
+    publishers = build_publishers(cfg) if publish else []
+    bot = RoadmapBot(cfg, tracker, publishers, agent_key=creds.resolve_anthropic_key(cfg))
+    if publish:
+        if not publishers:
+            raise SystemExit(
+                "roadmap: no publish surface resolved (check [roadmap.discord] and its "
+                "webhook secret); nothing published"
+            )
+        if bot.publish_now():
+            print(f"Published roadmap to: {', '.join(p.name for p in publishers)}")
+        else:
+            print("Nothing published (no open work, or every surface failed — see the log).")
+        return 0
+    text = bot.render()
+    print(text if text.strip() else "(no open work to report)")
+    return 0
+
+
 def cmd_github_app_setup(cfg: Config, args) -> int:
     from issuefleet import githubapp
 
@@ -505,6 +585,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", parents=[common], help="fleet state")
     sub.add_parser("fleet", parents=[common],
                    help="fleet-manager state (Signal cursor, pending escalations)")
+    p = sub.add_parser("roadmap", parents=[common],
+                       help="preview the roadmap summary, or publish it now (--publish)")
+    p.add_argument("--publish", action="store_true",
+                   help="publish to the configured surfaces instead of just printing")
     for name, help_ in (
         ("attach", "attach to a worker's tmux session"),
         ("stop", "wind one worker down"),
@@ -545,6 +629,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_status(cfg)
         if args.cmd == "fleet":
             return cmd_fleet(cfg)
+        if args.cmd == "roadmap":
+            return cmd_roadmap(cfg, args.publish)
         if args.cmd == "attach":
             return cmd_attach(cfg, args.issue)
         if args.cmd == "stop":

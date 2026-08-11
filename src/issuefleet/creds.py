@@ -100,6 +100,13 @@ def resolve_sigbot_key(cfg: Config) -> tuple[str, str]:
     )
 
 
+def resolve_discord_webhook(discord) -> str | None:
+    """The roadmap bot's Discord webhook URL, env-then-file. The URL embeds a
+    token, so it's a secret and never lives in the config file. Returns None
+    when absent (the surface then can't publish, which doctor flags)."""
+    return resolve_optional(discord.webhook_url_env, Path(discord.webhook_url_file))
+
+
 def resolve_anthropic_key(cfg: Config) -> str | None:
     """Optional Anthropic API key for the fleet manager's 'claude' advisor.
     Env-then-file; returns None when absent (the advisor falls back to

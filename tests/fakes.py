@@ -450,6 +450,23 @@ class FakeSignal:
         return mid
 
 
+class FakePublisher:
+    """Roadmap publish-surface stand-in. Records every published text; set
+    ``fail`` to simulate a dead webhook (raises PublishError)."""
+
+    def __init__(self, name: str = "fake", fail: bool = False):
+        self.name = name
+        self.fail = fail
+        self.published: list[str] = []
+
+    def publish(self, text: str) -> None:
+        if self.fail:
+            from issuefleet.publish import PublishError
+
+            raise PublishError(f"fake {self.name} outage")
+        self.published.append(text)
+
+
 class FakeRunner:
     """tmux/container stand-in."""
 

@@ -170,6 +170,51 @@ class FleetManagerConfig:
     advisor: str = "conservative"
 
 
+# The default roadmap system prompt (the brief's example). Configurable via
+# [roadmap] system_prompt.
+DEFAULT_ROADMAP_SYSTEM_PROMPT = (
+    "You are a workstream summarization agent that provides crisp updates to a "
+    "group of stakeholders on a daily basis. Please write succinct updates for "
+    "each outstanding workstream (no more than 1-2 sentences per workstream). "
+    "Produce any diagrams or tables you may need to explain the workstreams "
+    "using Mermaid and standard Markdown."
+)
+
+
+@dataclass
+class DiscordSurfaceConfig:
+    """A Discord publish surface for the roadmap bot: an incoming webhook. The
+    URL carries a secret token, so it follows the usual env-then-file rule and
+    never sits in the config file. ``username`` optionally overrides the
+    webhook's display name for these posts."""
+
+    enabled: bool = False
+    webhook_url_env: str = "ISSUEFLEET_DISCORD_WEBHOOK_URL"
+    webhook_url_file: Path = Path("~/.config/issuefleet/discord_webhook.url").expanduser()
+    username: str = ""
+
+
+@dataclass
+class RoadmapConfig:
+    """The roadmap bot: a host-side singleton that summarizes ongoing work in
+    the configured Linear project(s) and publishes the summary to stakeholders
+    (Discord first). Disabled by default — the daemon runs the reconcile loop
+    with or without it. With an Anthropic key the summary is written by Claude
+    using ``system_prompt``; without one it degrades to a deterministic listing.
+    Publishing runs on the ``interval_s`` cadence (0 = only on demand, via
+    ``issuefleet roadmap --publish``)."""
+
+    enabled: bool = False
+    projects: list[str] = field(default_factory=list)  # Linear project names/UUIDs
+    interval_s: int = 86400  # daily
+    model: str = "claude-opus-4-8"
+    system_prompt: str = DEFAULT_ROADMAP_SYSTEM_PROMPT
+    discord: DiscordSurfaceConfig = field(default_factory=DiscordSurfaceConfig)
+
+    def any_surface_enabled(self) -> bool:
+        return self.discord.enabled
+
+
 @dataclass
 class SecurityConfig:
     """The security gate: scans the diff a worker's `ready` would push for
@@ -264,6 +309,7 @@ class Config:
     webhooks: WebhookConfig = field(default_factory=WebhookConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     fleet_manager: FleetManagerConfig = field(default_factory=FleetManagerConfig)
+    roadmap: RoadmapConfig = field(default_factory=RoadmapConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
     # The file this config was loaded from, when it came from disk. Marks a
     # file-backed daemon run: a project added in-band is persisted (to the
@@ -411,6 +457,53 @@ def _parse_fleet_manager(table: dict, source: str) -> FleetManagerConfig:
         if fm.report_interval_s < 0:
             raise ConfigError(f"{source} [fleet_manager]: report_interval_s must be >= 0")
     return fm
+
+
+def _parse_roadmap(table: dict, source: str) -> RoadmapConfig:
+    _reject_secrets(table, f"{source} [roadmap]")
+    projects_raw = table.get("projects", [])
+    if isinstance(projects_raw, str):
+        projects_raw = [projects_raw]  # tolerate a bare string for a single board
+    if not isinstance(projects_raw, list) or any(not isinstance(p, str) for p in projects_raw):
+        raise ConfigError(f"{source} [roadmap]: projects must be a list of project names/UUIDs")
+
+    discord_raw = table.get("discord", {})
+    if not isinstance(discord_raw, dict):
+        raise ConfigError(f"{source} [roadmap.discord]: must be a table")
+    _reject_secrets(discord_raw, f"{source} [roadmap.discord]")
+    discord = DiscordSurfaceConfig(
+        enabled=bool(discord_raw.get("enabled", False)),
+        username=str(discord_raw.get("username", "")),
+    )
+    if "webhook_url_env" in discord_raw:
+        discord.webhook_url_env = str(discord_raw["webhook_url_env"])
+    if "webhook_url_file" in discord_raw:
+        discord.webhook_url_file = _path(str(discord_raw["webhook_url_file"]))
+
+    rm = RoadmapConfig(
+        enabled=bool(table.get("enabled", False)),
+        projects=list(projects_raw),
+        interval_s=int(table.get("interval_s", 86400)),
+        model=str(table.get("model", "claude-opus-4-8")),
+        system_prompt=str(table.get("system_prompt", DEFAULT_ROADMAP_SYSTEM_PROMPT)),
+        discord=discord,
+    )
+    # Only validate the rest when it's actually turned on — a disabled section
+    # (or none at all) must never block the daemon from starting.
+    if rm.enabled:
+        if not rm.projects:
+            raise ConfigError(
+                f"{source} [roadmap]: projects is required when enabled "
+                "(name at least one Linear project to summarize)"
+            )
+        if rm.interval_s < 0:
+            raise ConfigError(f"{source} [roadmap]: interval_s must be >= 0")
+        if not rm.any_surface_enabled():
+            raise ConfigError(
+                f"{source} [roadmap]: enabled but no publish surface is on — "
+                "set [roadmap.discord] enabled = true"
+            )
+    return rm
 
 
 def _looks_secret(v: str) -> bool:
@@ -602,6 +695,7 @@ def parse(data: dict, source: str = "<config>") -> Config:
     hooks = data.get("webhooks", {})
     dash = data.get("dashboard", {})
     fleet = data.get("fleet_manager", {})
+    roadmap = data.get("roadmap", {})
     security = data.get("security", {})
     for name, table in (
         ("daemon", daemon),
@@ -610,6 +704,7 @@ def parse(data: dict, source: str = "<config>") -> Config:
         ("webhooks", hooks),
         ("dashboard", dash),
         ("fleet_manager", fleet),
+        ("roadmap", roadmap),
         ("security", security),
     ):
         if not isinstance(table, dict):
@@ -704,6 +799,7 @@ def parse(data: dict, source: str = "<config>") -> Config:
     )
 
     cfg.fleet_manager = _parse_fleet_manager(fleet, source)
+    cfg.roadmap = _parse_roadmap(roadmap, source)
     cfg.security = _parse_security(security, source)
 
     if cfg.poll_interval_s < 5:

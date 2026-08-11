@@ -238,6 +238,33 @@ def _check_fleet_manager(cfg: Config) -> list[Check]:
     return out
 
 
+def _check_roadmap(cfg: Config) -> list[Check]:
+    rm = cfg.roadmap
+    if not rm.enabled:
+        return [Check(OK, "roadmap bot", "disabled")]
+    cadence = f"every {rm.interval_s}s" if rm.interval_s > 0 else "on demand only"
+    out = [Check(OK, "roadmap bot", f"enabled — project(s) {', '.join(rm.projects)}, "
+                 f"publishes {cadence}")]
+    # The LLM summary is a nicety, not a requirement — no key just means the
+    # deterministic listing. Flag it as a warning so the operator knows why the
+    # output looks plain, not as a failure.
+    if creds.resolve_anthropic_key(cfg):
+        out.append(Check(OK, "roadmap summary", "Anthropic key resolves — LLM-written updates"))
+    else:
+        out.append(Check(WARN, "roadmap summary", "no ANTHROPIC_API_KEY / "
+                         "~/.config/issuefleet/anthropic.key — will publish a plain listing"))
+    d = rm.discord
+    if d.enabled:
+        if creds.resolve_discord_webhook(d):
+            out.append(Check(OK, "roadmap → Discord", "webhook URL resolves"))
+        else:
+            out.append(Check(FAIL, "roadmap → Discord", f"enabled but no webhook URL: set "
+                             f"${d.webhook_url_env} or write it to {d.webhook_url_file} (chmod 600)"))
+    else:
+        out.append(Check(WARN, "roadmap → Discord", "surface off — no enabled surface to publish to"))
+    return out
+
+
 def _check_security(cfg: Config) -> list[Check]:
     sec = cfg.security
     if sec.mode == "off":
@@ -430,6 +457,7 @@ def run_doctor(
     checks += _check_webhooks(cfg)
     checks += _check_dashboard(cfg)
     checks += _check_fleet_manager(cfg)
+    checks += _check_roadmap(cfg)
     checks += _check_security(cfg)
     linear_checks = _check_linear(cfg, tracker)
     checks += linear_checks

@@ -68,6 +68,34 @@ allow_add_project = true
 mode = "block"
 deep_scan = "off"
 
+# The roadmap bot summarizes ongoing work in the named Linear project(s) and
+# publishes the summary to stakeholders on a cadence (Discord first). Disabled
+# by default. With an Anthropic key (the same one the advisor / deep-scan use)
+# Claude writes the update using system_prompt; without one it publishes a plain
+# grouped listing. Preview any time with `issuefleet roadmap`, or push it now
+# with `issuefleet roadmap --publish`.
+#   projects   — Linear project names (or UUIDs) to summarize.
+#   interval_s — publish cadence; 0 means on-demand only (no daemon publishing).
+#   system_prompt — the persona/instructions; defaults to the daily-summary
+#                   prompt. Override for a different tone or surface.
+[roadmap]
+enabled = false
+projects = ["Splanc"]
+interval_s = 86400   # daily
+# model = "claude-opus-4-8"
+# system_prompt = """
+# You are a workstream summarization agent that provides crisp updates to a
+# group of stakeholders on a daily basis. ...
+# """
+
+# Discord surface: an incoming webhook (Server Settings → Integrations →
+# Webhooks → New Webhook → Copy URL). The URL carries a token, so it's a secret:
+# put it in $ISSUEFLEET_DISCORD_WEBHOOK_URL or a chmod-600 file, never here.
+[roadmap.discord]
+enabled = true
+webhook_url_file = "~/.config/issuefleet/discord_webhook.url"
+# username = "Roadmap Bot"   # optional display-name override for these posts
+
 [agent]
 max_auto_turns = 50
 max_restarts = 3
