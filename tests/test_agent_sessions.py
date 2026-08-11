@@ -149,20 +149,33 @@ class AgentSessionTest(unittest.TestCase):
     def test_ack_outbox_relays_to_session_only(self):
         # ⚙️/✅ acks render in the session; in comment mode they're dropped so
         # they never spam the issue thread. Either way the message is archived.
+        # The activity type in the payload drives Linear's session state: ⚙️ is
+        # a `thought` (stays "Working…"), ✅ is a `response` (settles to
+        # `complete` so an idle worker doesn't time out to "Error" — FUG-98).
         self.add_issue()
         self.rec.enqueue_session(created())
         self.rec.tick()
-        self.mailbox().put_outbox("ack", {"text": "⚙️ On it."})
+        self.mailbox().put_outbox("ack", {"text": "⚙️ On it.", "activity": "thought"})
         self.rec.tick()
         self.assertIn(("sess-1", {"type": "thought", "body": "⚙️ On it."}),
+                      self.tracker.activities)
+        self.mailbox().put_outbox("ack", {"text": "✅ Done for now.", "activity": "response"})
+        self.rec.tick()
+        self.assertIn(("sess-1", {"type": "response", "body": "✅ Done for now."}),
                       self.tracker.activities)
         self.assertEqual(self.tracker.posted, [])
         self.assertEqual(self.mailbox().pending_outbox(), [])
 
+        # An ack with no activity field defaults to a (harmless) thought.
+        self.mailbox().put_outbox("ack", {"text": "⚙️ legacy."})
+        self.rec.tick()
+        self.assertIn(("sess-1", {"type": "thought", "body": "⚙️ legacy."}),
+                      self.tracker.activities)
+
         # Unbind the session: the next ack is dropped, not posted.
         self.registry.get("issue-1").agent_session_id = None
         self.registry.save()
-        self.mailbox().put_outbox("ack", {"text": "✅ Done for now."})
+        self.mailbox().put_outbox("ack", {"text": "✅ Done for now.", "activity": "response"})
         self.rec.tick()
         self.assertEqual(self.tracker.posted, [])
         self.assertEqual(self.mailbox().pending_outbox(), [])

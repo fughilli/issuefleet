@@ -213,10 +213,14 @@ class ReadyWakeRestoreTest(unittest.TestCase):
         self.mb.put_inbox("reply", {"author": "kevin", "text": "one more tweak"})
         self.stub_claude()  # agent emits nothing, so the wake returns to ready
         self.assertEqual(turnloop.step(self.agent_dir), 0)
-        acks = [m.payload["text"] for m in self.mb.pending_outbox() if m.kind == "ack"]
+        acks = [m.payload for m in self.mb.pending_outbox() if m.kind == "ack"]
         self.assertEqual(len(acks), 2)
-        self.assertTrue(acks[0].startswith("⚙️"))
-        self.assertTrue(acks[1].startswith("✅"))
+        self.assertTrue(acks[0]["text"].startswith("⚙️"))
+        self.assertEqual(acks[0]["activity"], "thought")  # working → stays active
+        self.assertTrue(acks[1]["text"].startswith("✅"))
+        # ✅ settles the Linear session to `complete`, not a lingering "Working…"
+        # thought that would eventually false-error on timeout (FUG-98).
+        self.assertEqual(acks[1]["activity"], "response")
         # The cycle is closed: working_acked cleared, ready to fire again next time.
         self.assertFalse(turns.TurnState.load(self.agent_dir).working_acked)
 

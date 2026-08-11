@@ -139,7 +139,10 @@ def step(agent_dir: Path) -> int:
     # ready/idle-restore logic below still sees "no output from the turn".
     starting_cycle = decision.wake_from_phase is not None or not decision.resume
     if starting_cycle and not state.working_acked:
-        mb.put_outbox("ack", {"text": "⚙️ On it — the agent is taking turns."})
+        # A `thought`: the agent genuinely is working, so the Linear session
+        # should read "Working…" (active) until it settles below.
+        mb.put_outbox("ack", {"text": "⚙️ On it — the agent is taking turns.",
+                              "activity": "thought"})
         state.working_acked = True
         state.save(agent_dir)
 
@@ -196,9 +199,15 @@ def step(agent_dir: Path) -> int:
     # ✅: close the acknowledgment loop once the agent settles after working.
     # ready/idle are completions; a pending question (waiting) is itself the
     # response, so it ends the cycle silently. Never on a failed turn.
+    #
+    # The ✅ carries `response`: Linear reads a `response` activity as "work
+    # completed" and moves the session to `complete`, so an idling worker no
+    # longer hangs in "Working…" and then false-errors on the inactivity
+    # timeout (FUG-98). ready also emits its own PR-link `response`; a second
+    # one here is harmless and keeps the ⚙️/✅ bracketing symmetric.
     if state.working_acked and rc == 0:
         if state.phase in (turns.PHASE_READY, turns.PHASE_IDLE):
-            mb.put_outbox("ack", {"text": "✅ Done for now."})
+            mb.put_outbox("ack", {"text": "✅ Done for now.", "activity": "response"})
             state.working_acked = False
         elif state.phase == turns.PHASE_WAITING:
             state.working_acked = False
