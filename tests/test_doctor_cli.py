@@ -31,6 +31,12 @@ class FakeDoctorTracker(FakeTracker):
 
 class PlanTest(unittest.TestCase):
     def setUp(self):
+        """Mock the arch probe so doctor never touches the host's docker."""
+        from unittest import mock
+
+        arch = mock.patch("issuefleet.config.docker_host_arch", return_value="amd64")
+        arch.start()
+        self.addCleanup(arch.stop)
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         self.cfg = config.parse(
@@ -220,6 +226,37 @@ class FleetManagerCheckTest(unittest.TestCase):
         self.assertEqual(adv.status, "warn")
 
 
+class DockerPlatformCheckTest(unittest.TestCase):
+    def _cfg(self, platform_value):
+        return config.parse({"projects": [{"name": "x", "linear_project": "X",
+                                           "repo": "/tmp/x", "claim": {"strategy": "agent"}}],
+                             "agent": {"docker_platform": platform_value}})
+
+    def _check(self, platform_value, arch):
+        from unittest import mock
+
+        from issuefleet.doctor import _check_docker_platform
+
+        with mock.patch("issuefleet.config.docker_host_arch", return_value=arch):
+            [c] = _check_docker_platform(self._cfg(platform_value))
+        return c
+
+    def test_auto_pins_on_arm64_docker_host(self):
+        c = self._check("auto", "arm64")
+        self.assertEqual(c.status, "ok")
+        self.assertIn("linux/amd64", c.detail)
+
+    def test_amd64_host_needs_no_pin(self):
+        self.assertEqual(self._check("auto", "amd64").status, "ok")
+        self.assertEqual(self._check("", "x86_64").status, "ok")
+
+    def test_explicit_disable_on_arm64_warns_not_fails(self):
+        """An explicit "" is the documented opt-out: exit-0, but say so."""
+        c = self._check("", "arm64")
+        self.assertEqual(c.status, "warn")
+        self.assertIn("amd64-only", c.detail)
+
+
 class WorkerRuntimeCheckTest(unittest.TestCase):
     def test_root_euid_fails_with_guidance(self):
         from unittest import mock
@@ -257,6 +294,12 @@ class WebhookBindTest(unittest.TestCase):
 
 class DoctorTest(unittest.TestCase):
     def setUp(self):
+        """Mock the arch probe so doctor never touches the host's docker."""
+        from unittest import mock
+
+        arch = mock.patch("issuefleet.config.docker_host_arch", return_value="amd64")
+        arch.start()
+        self.addCleanup(arch.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
 

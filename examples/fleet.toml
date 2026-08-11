@@ -78,6 +78,7 @@ claude_container = "claude-container"
 # copies get revoked when the host rotates its OAuth token).
 copy_from_repo = [".claude", ".claude-container-overlay"]
 launcher_args = ["--skills-ignore-new"]   # needs claude-container > 1.6.12
+# docker_platform = "auto"   # default: pin linux/amd64 on arm64 docker hosts (amd64-only images)
 
 # Environment handed to the launcher for every worker. Values are never here —
 # each entry names a chmod-600 file (`file`), an env var of the daemon (`env`),

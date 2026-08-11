@@ -416,6 +416,10 @@ copy_from_repo = [".claude", ".claude-container-overlay"]
 # already-accepted skills instead of prompting for undecided ones; set to
 # [] for older launchers (doctor verifies the launcher knows each flag).
 launcher_args = ["--skills-ignore-new"]
+# Worker container platform. "auto" (default) pins linux/amd64 when the
+# docker host is arm64 — published claude-container images are amd64-only.
+# "" disables (self-built multi-arch image); explicit values pass through.
+docker_platform = "auto"
 # container_config_dir = "~/.config/claude-container/config"  # default: launcher's shared dir
 
 [[projects]]                 # one block per (Linear project -> GitHub repo) pair

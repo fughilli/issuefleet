@@ -144,6 +144,28 @@ def _check_worker_runtime(cfg: Config) -> list[Check]:
     return out
 
 
+def _check_docker_platform(cfg: Config) -> list[Check]:
+    """Published claude-container images are amd64-only: an unpinned arm64
+    docker host fails every worker pull before a log exists. Reaching that
+    state takes an explicit docker_platform = "" (unset means "auto"), so
+    it is a deliberate opt-out — WARN, not FAIL."""
+    arch = config_mod.docker_host_arch()
+    resolved = cfg.resolved_docker_platform()
+    if resolved:
+        return [Check(OK, "docker platform",
+                      f"{resolved} (docker_platform={cfg.docker_platform!r}, "
+                      f"docker host is {arch})")]
+    if arch in config_mod.ARM64_ARCHES:
+        return [Check(
+            WARN,
+            "docker platform",
+            f'docker_platform disabled ("") on an {arch} docker host — fine '
+            "for a multi-arch/arm64 image; stock claude-container images are "
+            "amd64-only and their pulls will fail",
+        )]
+    return [Check(OK, "docker platform", f"host default ({arch} runs the images natively)")]
+
+
 def _check_container_settings(cfg: Config) -> list[Check]:
     config_dir = cfg.container_config_dir or Path("~/.config/claude-container/config").expanduser()
     settings = config_dir / "settings.json"
@@ -425,6 +447,7 @@ def run_doctor(
     checks += _check_worker_runtime(cfg)
     checks += _check_launcher_flags(cfg)
     checks += _check_worker_env(cfg)
+    checks += _check_docker_platform(cfg)
     checks += _check_container_settings(cfg)
     checks += _check_dirs(cfg)
     checks += _check_webhooks(cfg)
