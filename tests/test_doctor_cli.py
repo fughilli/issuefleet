@@ -220,6 +220,52 @@ class FleetManagerCheckTest(unittest.TestCase):
         self.assertEqual(adv.status, "warn")
 
 
+class RoadmapCheckTest(unittest.TestCase):
+    def _cfg(self, **discord):
+        d = {"enabled": True}
+        d.update(discord)
+        # Point the secret files somewhere that certainly doesn't exist, so the
+        # check under test sees only the env this test sets — not whatever
+        # credentials happen to live in the developer's ~/.config.
+        d.setdefault("bot_token_file", "/nonexistent/bot.token")
+        d.setdefault("webhook_url_file", "/nonexistent/webhook.url")
+        return config.parse({"projects": [{"name": "x", "linear_project": "X",
+                                           "repo": "/tmp/x", "claim": {"strategy": "agent"}}],
+                             "roadmap": {"enabled": True, "projects": ["Board"], "discord": d}})
+
+    def _discord_checks(self, cfg, env):
+        from unittest import mock
+
+        from issuefleet.doctor import _check_roadmap
+
+        with mock.patch.dict(os.environ, env, clear=True):
+            checks = _check_roadmap(cfg)
+        return [c for c in checks if c.label == "roadmap → Discord"]
+
+    def test_bot_mode_with_token_is_ok(self):
+        cfg = self._cfg(channel_id="42")
+        checks = self._discord_checks(cfg, {"ISSUEFLEET_DISCORD_BOT_TOKEN": "tok"})
+        self.assertEqual([c.status for c in checks], ["ok"])
+        self.assertIn("42", checks[0].detail)
+
+    def test_bot_mode_without_token_fails_and_names_the_right_credential(self):
+        checks = self._discord_checks(self._cfg(channel_id="42"), {})
+        self.assertEqual(checks[0].status, "fail")
+        # The likeliest wrong turn is grabbing the OAuth2 client secret instead.
+        self.assertIn("client secret", checks[0].detail)
+
+    def test_username_in_bot_mode_warns(self):
+        cfg = self._cfg(channel_id="42", username="Roadmap Bot")
+        checks = self._discord_checks(cfg, {"ISSUEFLEET_DISCORD_BOT_TOKEN": "tok"})
+        self.assertEqual([c.status for c in checks], ["ok", "warn"])
+
+    def test_webhook_mode_still_checks_the_url(self):
+        cfg = self._cfg(mode="webhook")
+        self.assertEqual(self._discord_checks(cfg, {})[0].status, "fail")
+        checks = self._discord_checks(cfg, {"ISSUEFLEET_DISCORD_WEBHOOK_URL": "https://d/w"})
+        self.assertEqual(checks[0].status, "ok")
+
+
 class WorkerRuntimeCheckTest(unittest.TestCase):
     def test_root_euid_fails_with_guidance(self):
         from unittest import mock

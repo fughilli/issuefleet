@@ -26,7 +26,12 @@ _FORBIDDEN_SECRET_KEYS = (
     "gh_token",
     "token",
     "api_key",
+    "bot_token",
+    "webhook_url",
 )
+
+# How the roadmap bot reaches a Discord channel. See DiscordSurfaceConfig.
+DISCORD_MODES = ("bot", "webhook")
 
 
 class ConfigError(Exception):
@@ -170,6 +175,82 @@ class FleetManagerConfig:
     advisor: str = "conservative"
 
 
+# The default roadmap system prompt. The persona is the brief's; the formatting
+# half deliberately departs from it. The brief invited Mermaid and Markdown
+# tables, but every surface the bot publishes to so far is a chat client, and
+# chat clients render neither — a table arrives as a wall of pipes and a diagram
+# as a fenced block of source, which is worse than the prose it replaced. So the
+# default asks for chat-shaped output only. A surface that *can* render richer
+# output should override [roadmap] system_prompt rather than change this.
+DEFAULT_ROADMAP_SYSTEM_PROMPT = (
+    "You are a workstream summarization agent that provides crisp updates to a "
+    "group of stakeholders on a daily basis. "
+    "Open with a 1-4 sentence summary in a chipper, informal tone: greet the "
+    "readers by the project's own name, call out the most exciting thing the "
+    "team is working on right now, and hand off to the detail below. For "
+    "example: \"Hey, what's up Splanc'ers! Today the team is hard at work "
+    "shipping X and is excited to share it with you! See below for a summary on "
+    "progress:\" — match that energy, but write it fresh for the actual project "
+    "and the actual work, and never invent progress that isn't in the issues. "
+    "Then write succinct updates for each outstanding workstream (no more than "
+    "1-2 sentences per workstream); those stay factual and to the point. "
+    "Your update is posted to a chat client, so format it with headings, bold "
+    "text, and bullet lists only. Do NOT emit Markdown tables, Mermaid, or any "
+    "other diagram source: they are not rendered there and arrive as unreadable "
+    "raw text. Convey anything you would have tabulated or drawn in prose "
+    "instead. Keep the whole update under 1800 characters so it lands as a "
+    "single message."
+)
+
+
+@dataclass
+class DiscordSurfaceConfig:
+    """A Discord publish surface for the roadmap bot, in one of two ``mode``s:
+
+    - ``"bot"`` — post as the application's bot account into ``channel_id``.
+      The update comes from an identifiable server member with its own name and
+      avatar, and the bot is granted access per channel. Needs the bot token
+      (a secret) and the numeric channel id (not one).
+    - ``"webhook"`` — post through a channel's incoming webhook. No bot account
+      needed; the whole URL is the credential, and ``username`` may override the
+      per-message display name (bots always post under their own name).
+
+    Either way the credential follows the usual env-then-file rule and never
+    sits in the config file."""
+
+    enabled: bool = False
+    mode: str = "bot"
+    # mode = "bot"
+    bot_token_env: str = "ISSUEFLEET_DISCORD_BOT_TOKEN"
+    bot_token_file: Path = Path("~/.config/issuefleet/discord.token").expanduser()
+    channel_id: str = ""
+    # mode = "webhook"
+    webhook_url_env: str = "ISSUEFLEET_DISCORD_WEBHOOK_URL"
+    webhook_url_file: Path = Path("~/.config/issuefleet/discord_webhook.url").expanduser()
+    username: str = ""  # webhook-only display-name override
+
+
+@dataclass
+class RoadmapConfig:
+    """The roadmap bot: a host-side singleton that summarizes ongoing work in
+    the configured Linear project(s) and publishes the summary to stakeholders
+    (Discord first). Disabled by default — the daemon runs the reconcile loop
+    with or without it. With an Anthropic key the summary is written by Claude
+    using ``system_prompt``; without one it degrades to a deterministic listing.
+    Publishing runs on the ``interval_s`` cadence (0 = only on demand, via
+    ``issuefleet roadmap --publish``)."""
+
+    enabled: bool = False
+    projects: list[str] = field(default_factory=list)  # Linear project names/UUIDs
+    interval_s: int = 86400  # daily
+    model: str = "claude-opus-4-8"
+    system_prompt: str = DEFAULT_ROADMAP_SYSTEM_PROMPT
+    discord: DiscordSurfaceConfig = field(default_factory=DiscordSurfaceConfig)
+
+    def any_surface_enabled(self) -> bool:
+        return self.discord.enabled
+
+
 @dataclass
 class SecurityConfig:
     """The security gate: scans the diff a worker's `ready` would push for
@@ -264,6 +345,7 @@ class Config:
     webhooks: WebhookConfig = field(default_factory=WebhookConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     fleet_manager: FleetManagerConfig = field(default_factory=FleetManagerConfig)
+    roadmap: RoadmapConfig = field(default_factory=RoadmapConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
     # The file this config was loaded from, when it came from disk. Marks a
     # file-backed daemon run: a project added in-band is persisted (to the
@@ -411,6 +493,71 @@ def _parse_fleet_manager(table: dict, source: str) -> FleetManagerConfig:
         if fm.report_interval_s < 0:
             raise ConfigError(f"{source} [fleet_manager]: report_interval_s must be >= 0")
     return fm
+
+
+def _parse_roadmap(table: dict, source: str) -> RoadmapConfig:
+    _reject_secrets(table, f"{source} [roadmap]")
+    projects_raw = table.get("projects", [])
+    if isinstance(projects_raw, str):
+        projects_raw = [projects_raw]  # tolerate a bare string for a single board
+    if not isinstance(projects_raw, list) or any(not isinstance(p, str) for p in projects_raw):
+        raise ConfigError(f"{source} [roadmap]: projects must be a list of project names/UUIDs")
+
+    discord_raw = table.get("discord", {})
+    if not isinstance(discord_raw, dict):
+        raise ConfigError(f"{source} [roadmap.discord]: must be a table")
+    _reject_secrets(discord_raw, f"{source} [roadmap.discord]")
+    discord = DiscordSurfaceConfig(
+        enabled=bool(discord_raw.get("enabled", False)),
+        mode=str(discord_raw.get("mode", "bot")).strip().lower(),
+        channel_id=str(discord_raw.get("channel_id", "")).strip(),
+        username=str(discord_raw.get("username", "")),
+    )
+    for key in ("bot_token_env", "webhook_url_env"):
+        if key in discord_raw:
+            setattr(discord, key, str(discord_raw[key]))
+    for key in ("bot_token_file", "webhook_url_file"):
+        if key in discord_raw:
+            setattr(discord, key, _path(str(discord_raw[key])))
+
+    rm = RoadmapConfig(
+        enabled=bool(table.get("enabled", False)),
+        projects=list(projects_raw),
+        interval_s=int(table.get("interval_s", 86400)),
+        model=str(table.get("model", "claude-opus-4-8")),
+        system_prompt=str(table.get("system_prompt", DEFAULT_ROADMAP_SYSTEM_PROMPT)),
+        discord=discord,
+    )
+    # Only validate the rest when it's actually turned on — a disabled section
+    # (or none at all) must never block the daemon from starting.
+    if rm.enabled:
+        if not rm.projects:
+            raise ConfigError(
+                f"{source} [roadmap]: projects is required when enabled "
+                "(name at least one Linear project to summarize)"
+            )
+        if rm.interval_s < 0:
+            raise ConfigError(f"{source} [roadmap]: interval_s must be >= 0")
+        if not rm.any_surface_enabled():
+            raise ConfigError(
+                f"{source} [roadmap]: enabled but no publish surface is on — "
+                "set [roadmap.discord] enabled = true"
+            )
+        if discord.enabled:
+            if discord.mode not in DISCORD_MODES:
+                raise ConfigError(
+                    f"{source} [roadmap.discord]: mode must be one of "
+                    f"{', '.join(DISCORD_MODES)} (got {discord.mode!r})"
+                )
+            # The bot posts to a channel by id; a webhook URL names its own
+            # channel, so that mode needs nothing further here.
+            if discord.mode == "bot" and not discord.channel_id:
+                raise ConfigError(
+                    f"{source} [roadmap.discord]: channel_id is required in bot mode "
+                    "(enable Developer Mode in Discord, then right-click the channel "
+                    "→ Copy Channel ID)"
+                )
+    return rm
 
 
 def _looks_secret(v: str) -> bool:
@@ -602,6 +749,7 @@ def parse(data: dict, source: str = "<config>") -> Config:
     hooks = data.get("webhooks", {})
     dash = data.get("dashboard", {})
     fleet = data.get("fleet_manager", {})
+    roadmap = data.get("roadmap", {})
     security = data.get("security", {})
     for name, table in (
         ("daemon", daemon),
@@ -610,6 +758,7 @@ def parse(data: dict, source: str = "<config>") -> Config:
         ("webhooks", hooks),
         ("dashboard", dash),
         ("fleet_manager", fleet),
+        ("roadmap", roadmap),
         ("security", security),
     ):
         if not isinstance(table, dict):
@@ -704,6 +853,7 @@ def parse(data: dict, source: str = "<config>") -> Config:
     )
 
     cfg.fleet_manager = _parse_fleet_manager(fleet, source)
+    cfg.roadmap = _parse_roadmap(roadmap, source)
     cfg.security = _parse_security(security, source)
 
     if cfg.poll_interval_s < 5:
