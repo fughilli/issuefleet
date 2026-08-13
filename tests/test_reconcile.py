@@ -560,6 +560,24 @@ class ReconcileTest(unittest.TestCase):
         info = [m for m in self.mailbox().pending_inbox() if m.kind == "info"]
         self.assertTrue(any("adopted back" in m.payload.get("text", "").lower() for m in info))
 
+    def test_adopt_resets_onto_the_operators_rebased_branch(self):
+        # The operator released, rebased onto a newer mainline, force-pushed,
+        # and adopts back: adopt_to_remote reports reset-to-remote and the agent
+        # is told (with the reflog recovery path), not silently left on stale.
+        self.claim_one()
+        self.rec.enqueue_release("FUG-1")
+        self.rec._drain_release_requests()
+        self.git.adopt_status = "reset-to-remote"
+        self.rec.enqueue_adopt("FUG-1")
+        self.rec._drain_release_requests()
+        self.assertEqual(self.worker().phase, PHASE_ACTIVE)
+        info = " ".join(
+            m.payload.get("text", "")
+            for m in self.mailbox().pending_inbox() if m.kind == "info"
+        )
+        self.assertIn("reflog", info)
+        self.assertIn("rebased", info.lower())
+
     def test_adopt_of_released_worker_whose_issue_closed_drops_it(self):
         self._release()
         self.tracker.issues["issue-1"].state_type = "canceled"

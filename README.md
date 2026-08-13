@@ -234,11 +234,17 @@ fighting you (it force-pushes; it commits under you). All three moves are
   re-claim it). The branch and an archived transcript are kept, and the agent's
   Claude session id + turn count are remembered.
 - **Adopt** (`/worker/<KEY>/adopt`, shown on a released worker) rebuilds the
-  worktree from that kept branch, **fast-forwards it onto origin** (picking up
-  anything you pushed), re-provisions preserving the session so the same Claude
-  conversation *resumes* (`--resume`, not a new session), and restarts the
-  container. The agent is handed a note telling it the tree may have changed
-  under it.
+  worktree from that kept branch, reconciles it with `origin/<branch>`,
+  re-provisions preserving the session so the same Claude conversation *resumes*
+  (`--resume`, not a new session), and restarts the container. The agent is
+  handed a note telling it the tree may have changed under it. Reconciliation is
+  robust to the common **release → rebase onto newer mainline → push → adopt**
+  flow: the fetch refreshes both the branch and the base, and because after a
+  release the operator's *pushed* branch is authoritative, adopt fast-forwards
+  when they only appended and **resets onto their branch when they rebased or
+  force-updated it** (a plain fast-forward can't follow rewritten history). The
+  pre-adoption tip is never destroyed — it stays in the branch reflog
+  (`<branch>@{1}`), and the agent is told where to find it.
 - **Adopt a branch** (`/adopt`) does the same for a branch that never had a
   worker — one you built in an interactive session outside issuefleet. Name the
   project, the Linear issue to attach it to, and the branch (local to the

@@ -336,8 +336,9 @@ class FakeGit:
         self.fail_next_push = 0
         self.fetched: list[tuple] = []  # (repo, url, auth_header) per fetch
         self.fail_next_fetch = 0
-        self.synced: list[str] = []  # worktrees passed to sync_to_remote
+        self.synced: list[str] = []  # worktrees passed to sync_to_remote / adopt_to_remote
         self.sync_status = "up-to-date"  # what sync_to_remote reports
+        self.adopt_status = "up-to-date"  # what adopt_to_remote reports
         self.fail_next_sync = 0
         self.cloned: list[tuple] = []  # (url, path) per clone
         self._repos: set[Path] = set()  # paths that are (now) real clones
@@ -398,6 +399,15 @@ class FakeGit:
 
             raise GitError("fake git sync failure")
         return self.sync_status
+
+    def adopt_to_remote(self, worktree: Path, branch: str) -> str:
+        self.synced.append(str(worktree))
+        if self.fail_next_sync > 0:
+            self.fail_next_sync -= 1
+            from issuefleet.gitops import GitError
+
+            raise GitError("fake git sync failure")
+        return self.adopt_status
 
     def push(self, worktree: Path, branch: str, url=None, auth_header=None) -> None:
         if self.fail_next_push > 0:

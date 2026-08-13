@@ -470,10 +470,16 @@ class Reconciler:
 
     def _adopt_released(self, rec: WorkerRecord) -> None:
         """Re-take a released worker: rebuild its worktree from the (kept)
-        branch, fast-forward it onto origin, re-provision preserving the session
-        so its Claude conversation resumes, and restart the container. Any
-        commits the operator pushed while it was released are picked up by the
-        fetch + fast-forward."""
+        branch, reconcile it with origin, re-provision preserving the session so
+        its Claude conversation resumes, and restart the container.
+
+        The fetch refreshes both ``origin/<branch>`` and ``origin/<base_ref>``,
+        so whatever the operator did while holding the branch is picked up:
+        commits pushed on top fast-forward, and a rebase onto a newer mainline
+        (which force-updates the branch to a rewritten history) is adopted via
+        ``adopt_to_remote`` resetting onto the operator's pushed branch — the
+        common ``release → rebase → push → adopt`` flow lands the worker exactly
+        on the operator's state, with the fresh base already in ``origin/*``."""
         project = self.cfg.project(rec.project)
         worktree = Path(rec.worktree)
         log.info("dashboard: adopting released worker %s (branch %s)", rec.issue_key, rec.branch)
@@ -497,7 +503,7 @@ class Reconciler:
 
         self.git.create_worktree(project.repo, rec.branch, rec.base_ref, worktree)
         try:
-            sync_status = self.git.sync_to_remote(worktree, rec.branch)
+            sync_status = self.git.adopt_to_remote(worktree, rec.branch)
         except gitops.GitError as e:
             log.warning("adopt %s: branch sync failed (%s); using the local branch",
                         rec.issue_key, e)
@@ -530,7 +536,7 @@ class Reconciler:
              "continue — the working tree may not be what you left."},
             coalesce=True,
         )
-        self._sync_note(mailbox, rec.branch, sync_status)
+        self._adopt_sync_note(mailbox, rec.branch, rec.base_ref, sync_status)
         self.runner.start(rec, self.cfg)
         if rec.agent_session_id:
             self._emit_activity_quietly(
@@ -1287,6 +1293,32 @@ class Reconciler:
             return
         mailbox.ensure().put_inbox("info", {"text": text}, coalesce=True)
 
+    def _adopt_sync_note(
+        self, mailbox: Mailbox, branch: str, base_ref: str, status: str
+    ) -> None:
+        """Adoption-specific branch-move note. Unlike restart's ``_sync_note``,
+        adoption may reset the worktree onto the operator's pushed branch (a
+        rebase/force-push while released), so the wording covers that and the
+        recover-your-old-tip path."""
+        if status == "fast-forwarded":
+            text = (
+                f"Your branch `{branch}` was fast-forwarded onto origin while you were "
+                "released — the operator pushed more commits on top. Re-read anything you had "
+                "in flight; the working tree is their newer state, not what you left."
+            )
+        elif status == "reset-to-remote":
+            text = (
+                f"While released, the operator rebased/force-updated `{branch}` on the remote "
+                f"(e.g. rebased onto a newer `{base_ref}`), so this worktree was reset onto "
+                f"their pushed branch — HEAD is now `origin/{branch}` and `origin/{base_ref}` "
+                "is freshly fetched. Continue from here. Your pre-release tip, if it had "
+                f"unpushed commits, is still in the reflog (`git reflog {branch}` / "
+                f"`{branch}@{{1}}`) if you need to recover anything."
+            )
+        else:  # up-to-date / no-remote: nothing moved, stay quiet
+            return
+        mailbox.ensure().put_inbox("info", {"text": text}, coalesce=True)
+
     def _sync_branch(self, rec: WorkerRecord, project: ProjectConfig, mailbox: Mailbox) -> None:
         """Fast-forward a restarting worker's branch onto origin before its
         agent comes back up.
@@ -1619,8 +1651,12 @@ class Reconciler:
         # survive from an earlier run — can sit behind its own remote branch;
         # create_worktree only checks that the branch NAME matches. The fetch
         # above just refreshed origin/*, so this costs nothing extra.
+        # Adopting an external branch treats the operator's pushed branch as
+        # authoritative (adopt_to_remote also resets a rebased/force-updated one
+        # onto origin); a normal claim keeps the safe fast-forward-only sync.
+        sync = self.git.adopt_to_remote if origin == "adopt" else self.git.sync_to_remote
         try:
-            sync_status = self.git.sync_to_remote(worktree, branch)
+            sync_status = sync(worktree, branch)
         except gitops.GitError as e:
             log.warning("[%s] branch sync failed (%s); using the local branch", issue.key, e)
             sync_status = "up-to-date"
