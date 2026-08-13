@@ -270,6 +270,18 @@ def _start_dashboard(cfg: Config, reconciler: Reconciler, wake: threading.Event)
         reconciler.enqueue_add_project(spec)
         wake.set()
 
+    def release_cb(issue_key: str) -> None:
+        reconciler.enqueue_release(issue_key)
+        wake.set()
+
+    def adopt_cb(issue_key: str) -> None:
+        reconciler.enqueue_adopt(issue_key)
+        wake.set()
+
+    def adopt_branch_cb(spec: dict) -> None:
+        reconciler.enqueue_adopt_branch(spec)
+        wake.set()
+
     view = FleetView(
         cfg.state_dir,
         stop_cb=stop_cb,
@@ -279,6 +291,10 @@ def _start_dashboard(cfg: Config, reconciler: Reconciler, wake: threading.Event)
         allow_add_project=dcfg.allow_add_project,
         add_project_cb=add_project_cb,
         project_results_cb=reconciler.project_results,
+        release_cb=release_cb,
+        adopt_cb=adopt_cb,
+        adopt_branch_cb=adopt_branch_cb,
+        adopt_results_cb=reconciler.adopt_results,
     )
     bind = _dashboard_bind(dcfg)
     server = DashboardServer(bind=bind, port=dcfg.port, view=view).start()
@@ -336,7 +352,7 @@ def cmd_run(cfg: Config) -> int:
                  " + dashboard" if dashboard else "",
                  " + fleet manager" if fleet else "",
                  " + roadmap bot" if roadmap else "")
-        from issuefleet.model import PHASE_CRASHED
+        from issuefleet.model import PHASE_CRASHED, PHASE_RELEASED
 
         crashed = [w.issue_key for w in reconciler.registry.all() if w.phase == PHASE_CRASHED]
         if crashed:
@@ -344,6 +360,13 @@ def cmd_run(cfg: Config) -> int:
                 "holding %d CRASHED worker(s), not auto-restarting: %s — worktrees kept "
                 "for inspection; release with 'issuefleet stop <KEY>' and re-delegate",
                 len(crashed), ", ".join(crashed),
+            )
+        released = [w.issue_key for w in reconciler.registry.all() if w.phase == PHASE_RELEASED]
+        if released:
+            log.info(
+                "holding %d RELEASED worker(s) for local edits: %s — claim held, branch kept; "
+                "adopt them back from the dashboard when done",
+                len(released), ", ".join(released),
             )
         try:
             while not stop["flag"]:

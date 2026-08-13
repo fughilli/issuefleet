@@ -5,9 +5,63 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from issuefleet.worker import inherit_repo_files
+from issuefleet import config
+from issuefleet.agent_runtime.turns import PHASE_RUNNING, TurnState
+from issuefleet.model import Issue
+from issuefleet.worker import inherit_repo_files, provision
 
 DEFAULTS = [".claude", ".claude-container-overlay"]
+
+
+def _issue():
+    return Issue(id="i1", key="FUG-1", title="Fix it", description="do the thing",
+                 url="https://x/FUG-1", priority=0, state_name="Todo", state_type="unstarted")
+
+
+def _cfg(root):
+    return config.parse({
+        "daemon": {"state_dir": str(root / "s"), "worktree_root": str(root / "w")},
+        "projects": [{"name": "p", "linear_project": "P", "repo": str(root / "r"),
+                      "claim": {"strategy": "agent"}}],
+    })
+
+
+class ProvisionTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.wt = self.root / "wt"
+        self.wt.mkdir()
+        self.cfg = _cfg(self.root)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_fresh_claim_seeds_a_new_session(self):
+        uuid = provision(self.wt, _issue(), "agent/fug-1-x", "main", self.cfg)
+        st = TurnState.load(self.wt / ".agent")
+        self.assertEqual(st.session_uuid, uuid)
+        self.assertEqual(st.turns_taken, 0)  # first turn will use --session-id
+
+    def test_adopt_seeds_prior_session_for_resume(self):
+        # The release->adopt path rebuilds a torn-down worktree carrying the
+        # released worker's own session id and turn count, so the loop resumes
+        # (--resume) rather than colliding on its own session id.
+        provision(self.wt, _issue(), "agent/fug-1-x", "main", self.cfg,
+                  session_uuid="keep-me", turns_taken=7, phase=PHASE_RUNNING)
+        st = TurnState.load(self.wt / ".agent")
+        self.assertEqual(st.session_uuid, "keep-me")
+        self.assertEqual(st.turns_taken, 7)
+        self.assertEqual(st.phase, PHASE_RUNNING)
+
+    def test_existing_state_is_preserved(self):
+        provision(self.wt, _issue(), "agent/fug-1-x", "main", self.cfg, session_uuid="first")
+        # A re-provision (restart adoption) must not reset the session or seed.
+        provision(self.wt, _issue(), "agent/fug-1-x", "main", self.cfg,
+                  session_uuid="second", turns_taken=99)
+        st = TurnState.load(self.wt / ".agent")
+        self.assertEqual(st.session_uuid, "first")
+        self.assertEqual(st.turns_taken, 0)
 
 
 class InheritRepoFilesTest(unittest.TestCase):

@@ -111,6 +111,10 @@ class PrFeedback:
 # what the orchestrator must survive a restart knowing.
 PHASE_ACTIVE = "active"  # session should be running; restart it if dead
 PHASE_CRASHED = "crashed"  # gave up restarting; worktree kept for inspection
+# Operator took the branch to work on it locally: the container is stopped and
+# the worktree removed (so the branch is free to check out), but the claim is
+# held. The daemon does nothing with a released worker until it is adopted back.
+PHASE_RELEASED = "released"
 
 
 @dataclass
@@ -127,7 +131,13 @@ class WorkerRecord:
     session_uuid: str  # Claude Code session id, pinned at creation
     tmux_session: str
     phase: str = PHASE_ACTIVE
-    claim_origin: str = "poll"  # "poll" (label/assignee/state rule) | "session"
+    claim_origin: str = "poll"  # "poll" (label/assignee/state rule) | "session" | "adopt"
+    # Set while phase == released: when the branch was handed to the operator,
+    # and the agent's turn count at that moment. The turn count is restored on
+    # adopt so the resumed session uses `claude --resume` (its conversation
+    # survives the release) rather than trying to re-create its own session id.
+    released_at: str | None = None
+    released_turns: int = 0
     agent_session_id: str | None = None  # Linear agent session, if any
     session_lookup_attempts: int = 0  # poll-side session discovery tries (bounded)
     pr_number: int | None = None

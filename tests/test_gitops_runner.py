@@ -79,6 +79,29 @@ class GitopsTest(unittest.TestCase):
         self.assertTrue((self.wt / "NEW.txt").is_file())
         self.assertEqual(sha("HEAD", self.wt), sha("origin/main", self.repo))
 
+    def test_adopt_branch_that_exists_only_on_origin(self):
+        # A branch pushed from an interactive session elsewhere: it exists as
+        # origin/<branch> in the daemon clone but has no local ref. Adoption
+        # must check it out (tracking origin), not cut a fresh one from base —
+        # which would silently discard that work.
+        other = Path(self.tmp.name) / "other"
+        run(["git", "clone", str(self.origin), str(other)])
+        run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "checkout", "-b", "my-feature"], cwd=other)
+        (other / "FEATURE.txt").write_text("external work\n")
+        run(["git", "add", "."], cwd=other)
+        run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "feature"],
+            cwd=other)
+        run(["git", "push", "origin", "my-feature"], cwd=other)
+        self.git.fetch(self.repo, url=str(self.origin))
+
+        self.git.create_worktree(self.repo, "my-feature", "main", self.wt)
+        # The operator's commit is present — the branch was adopted, not re-cut.
+        self.assertTrue((self.wt / "FEATURE.txt").is_file())
+        head = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=self.wt,
+                              capture_output=True, text=True).stdout.strip()
+        self.assertEqual(head, "my-feature")
+
     def test_worktree_base_falls_back_to_local_ref_without_origin(self):
         # A local-only base (no origin/<ref>) still works — bootstrap/offline.
         run(["git", "branch", "local-only", "main"], cwd=self.repo)

@@ -115,6 +115,15 @@ class Gitops:
         path.parent.mkdir(parents=True, exist_ok=True)
         if self._branch_exists(repo, branch):
             _git(["worktree", "add", str(path), branch], cwd=repo)
+        elif self._ref_exists(repo, f"refs/remotes/origin/{branch}"):
+            # Adopt a branch that exists only on the remote (e.g. one an
+            # operator pushed from an interactive session outside issuefleet):
+            # create the local branch tracking origin/<branch> rather than
+            # cutting a fresh one from the base, which would discard that work.
+            _git(
+                ["worktree", "add", "-b", branch, str(path), f"origin/{branch}"],
+                cwd=repo,
+            )
         else:
             _git(["worktree", "add", "-b", branch, str(path), self._base(repo, base_ref)], cwd=repo)
 

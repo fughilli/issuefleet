@@ -90,7 +90,12 @@ class FakeTracker:
     def get_issue(self, issue_id: str) -> Issue | None:
         if issue_id in self.fail_get_issue:
             raise ConnectionError("fake Linear outage on get_issue")
-        return self.issues.get(issue_id)
+        issue = self.issues.get(issue_id)
+        if issue is not None:
+            return issue
+        # Linear's issue(id:) resolves the human identifier (e.g. "FUG-12") too,
+        # not just the UUID — adopt-a-branch looks issues up by key.
+        return next((i for i in self.issues.values() if i.key == issue_id), None)
 
     def comments_since(self, issue_id: str, cursor: str | None) -> list[Comment]:
         out = []
@@ -365,6 +370,11 @@ class FakeGit:
 
     def remove_worktree(self, repo: Path, path: Path, branch: str) -> None:
         self.removed.append(str(path))
+        # Real git removes the worktree directory (and its .agent state with it),
+        # so a later re-adopt re-provisions from scratch. Mirror that.
+        import shutil
+
+        shutil.rmtree(path, ignore_errors=True)
 
     def delete_remote_branch(self, repo: Path, branch: str, url=None, auth_header=None) -> None:
         self.deleted_remote.append(branch)
