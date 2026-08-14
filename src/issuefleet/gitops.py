@@ -148,6 +148,13 @@ class Gitops:
         remote = f"origin/{base_ref}"
         return remote if self._ref_exists(repo, f"refs/remotes/{remote}") else base_ref
 
+    def rev_parse(self, worktree: Path, ref: str = "HEAD") -> str:
+        """Resolve ``ref`` to a full commit SHA in ``worktree`` — used to report
+        an upstream checkout's base and its pushed tip back to the worker as a
+        pin. (Cross-project checkouts reuse ``create_worktree`` on the sibling
+        repo, so no dedicated clone helper is needed.)"""
+        return _git(["rev-parse", ref], cwd=Path(worktree))
+
     def add_worktree_exclude(self, repo: Path, path: Path, pattern: str) -> None:
         common = Path(_git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=path))
         exclude = common / "info" / "exclude"

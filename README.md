@@ -614,6 +614,51 @@ the branch) → kill the tmux session (the `--rm` container exits with it) →
 remove the worktree → on merge only: set the issue's done state and delete
 the branch.
 
+## Cross-project contributions (upstream dependencies)
+
+A fix sometimes needs a change in a *dependency* that the fleet also manages —
+e.g. a worker adding ESP32-C3 support has to patch the vendored `embedded`
+library, which is its own project on the board. The worker can't push or open
+PRs (no credentials). Every worker gets an empty, git-excluded `siblings/` dir
+in its worktree, into which the orchestrator opens a **linked git worktree of
+the sibling project** on request — and relays the git, exactly as it does for
+the worker's own PR.
+
+A worktree, not a fresh clone, on purpose: it shares the sibling repo's
+git-common-dir, so the [shared Bazel cache](#shared-bazel-cache-across-worktrees)
+is warm for it too (the cache lives under `<sibling>/.git/bazel-cache`, shared
+by every worktree of that repo). The one catch is that a linked worktree's
+`.git` points at an absolute host path outside the single worktree the launcher
+mounts — so the runner passes the launcher a same-path `--mount <sibling>/.git`
+for each sibling (config `[agent] mount_sibling_git`, on by default; `doctor`
+FAILs if it's on but the launcher has no `--mount`). All siblings are mounted up
+front, so a checkout needs no container relaunch. Single-project or opt-out
+fleets emit no mounts and run on any launcher.
+
+Each worker's brief lists the sibling projects it may contribute to, and gains
+two `agentctl` verbs:
+
+- `agentctl upstream-checkout --project <name> [--branch <b>]` — the
+  orchestrator opens a worktree of that project at `siblings/<name>/`, refreshed
+  to current mainline with a branch cut off it, and wakes the worker with the
+  path, branch, and base commit. The worker edits and commits there (offline,
+  warm cache), and can point its own project's dependency pin at the local
+  commit to build and experiment.
+- `agentctl upstream-pr --project <name> --title … --body-file …` — the
+  orchestrator credential-scans the sibling diff (the same gate as `ready`),
+  pushes the branch to the sibling forge, opens or updates a PR there, and wakes
+  the worker with the PR url and the *pushed* head SHA — the CI-testable commit
+  to pin while the PR is in review.
+
+Both verbs idle the worker (like `ask`) until the orchestrator replies. Each
+tick the daemon then polls the upstream PRs it staged; when one **merges** it
+wakes the dependent worker with the canonical `merge_commit_sha` so it can
+repoint its pin from the experimental SHA to real mainline *before its own PR
+lands* (and it's told, too, if the upstream PR is closed unmerged). The links
+live on the worker's registry record, so they survive a daemon restart. Sibling
+worktrees are deregistered from their repos at teardown; the upstream PR is an
+ordinary PR that stands on its own.
+
 ## Watching, steering, stopping
 
 ```sh

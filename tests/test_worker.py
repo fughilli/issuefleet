@@ -54,6 +54,24 @@ class ProvisionTest(unittest.TestCase):
         self.assertEqual(st.turns_taken, 7)
         self.assertEqual(st.phase, PHASE_RUNNING)
 
+    def test_siblings_add_the_cross_project_section_to_the_brief(self):
+        provision(self.wt, _issue(), "agent/fug-1-x", "main", self.cfg,
+                  siblings=[{"name": "embedded", "repo": "o/embedded"}])
+        brief = (self.wt / ".agent" / "brief.md").read_text()
+        self.assertIn("Contributing to other fleet projects", brief)
+        self.assertIn("**embedded** (o/embedded)", brief)
+
+    def test_no_siblings_omits_the_cross_project_section(self):
+        provision(self.wt, _issue(), "agent/fug-1-x", "main", self.cfg)
+        brief = (self.wt / ".agent" / "brief.md").read_text()
+        self.assertNotIn("Contributing to other fleet projects", brief)
+
+    def test_precreates_empty_siblings_dir(self):
+        provision(self.wt, _issue(), "agent/fug-1-x", "main", self.cfg)
+        siblings = self.wt / "siblings"
+        self.assertTrue(siblings.is_dir())
+        self.assertEqual(list(siblings.iterdir()), [])  # empty until a checkout
+
     def test_existing_state_is_preserved(self):
         provision(self.wt, _issue(), "agent/fug-1-x", "main", self.cfg, session_uuid="first")
         # A re-provision (restart adoption) must not reset the session or seed.

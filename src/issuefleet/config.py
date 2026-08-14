@@ -312,6 +312,16 @@ class Config:
     # ones — a headless worker must never sit at a prompt. Set to [] for
     # older launchers (doctor checks the installed launcher knows each flag).
     launcher_args: list[str] = field(default_factory=lambda: ["--skills-ignore-new"])
+    # Cross-project contributions (FUG-115): give every worker container access
+    # to its sibling projects' git object stores, so `agentctl upstream-checkout`
+    # can open a *linked worktree* of a dependency the fleet also manages (which
+    # then shares that repo's git-common-dir, so the FUG-24 shared Bazel cache is
+    # warm for it too). Implemented by passing the launcher a same-path
+    # `--mount <sibling-repo>/.git` per sibling — so it needs a launcher that
+    # understands `--mount` (doctor checks). Off => no sibling mounts are emitted
+    # (a single-project fleet, or one that doesn't want cross-project, is
+    # unaffected and works on any launcher).
+    mount_sibling_git: bool = True
     container_config_dir: Path | None = None  # None = launcher's shared default
     claude_container: str = "claude-container"
     # Environment handed to the launcher process for each worker, name -> where
@@ -796,6 +806,7 @@ def parse(data: dict, source: str = "<config>") -> Config:
             agent.get("copy_from_repo", [".claude", ".claude-container-overlay"])
         ),
         launcher_args=list(agent.get("launcher_args", ["--skills-ignore-new"])),
+        mount_sibling_git=bool(agent.get("mount_sibling_git", True)),
         claude_container=agent.get("claude_container", "claude-container"),
     )
     if "state_dir" in daemon:

@@ -91,6 +91,7 @@ def provision(
     session_uuid: str | None = None,
     turns_taken: int = 0,
     phase: str | None = None,
+    siblings: list[dict] | None = None,
 ) -> str:
     """Create/refresh the .agent dir. Idempotent: an existing state.json is
     preserved (re-adoption after an orchestrator restart must not reset the
@@ -108,9 +109,13 @@ def provision(
     agent_dir = Path(worktree) / ".agent"
     bin_dir = agent_dir / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
+    # Pre-create the (empty) siblings dir every worker gets, into which the
+    # orchestrator opens linked worktrees of sibling projects on request
+    # (FUG-115). Git-excluded by the caller alongside `.agent/`.
+    (Path(worktree) / "siblings").mkdir(exist_ok=True)
     Mailbox(agent_dir / "mailbox").ensure()
     (agent_dir / "logs").mkdir(exist_ok=True)
-    (agent_dir / "brief.md").write_text(render_brief(issue, branch, base_ref))
+    (agent_dir / "brief.md").write_text(render_brief(issue, branch, base_ref, siblings))
     stage_runtime(bin_dir)
 
     state_path = agent_dir / "state.json"

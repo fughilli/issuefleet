@@ -229,9 +229,11 @@ class FakeForge:
         self.fail_next_open = 0
         self._next = 100
 
-    def merge(self, number: int) -> None:
-        self.prs[number].state = "closed"
-        self.prs[number].merged = True
+    def merge(self, number: int, merge_sha: str | None = None) -> None:
+        pr = self.prs[number]
+        pr.state = "closed"
+        pr.merged = True
+        pr.merge_commit_sha = merge_sha or f"mergesha-{number}"
 
     def close(self, number: int) -> None:  # test helper: simulate a human close
         self.prs[number].state = "closed"
@@ -343,6 +345,9 @@ class FakeGit:
         self.cloned: list[tuple] = []  # (url, path) per clone
         self._repos: set[Path] = set()  # paths that are (now) real clones
         self.remote = "https://github.example/owner/name.git"
+        self.worktrees: list[dict] = []  # one per create_worktree (repo, branch, path)
+        self.fail_next_worktree = 0
+        self.head_sha = "headsha000000"  # what rev_parse(HEAD) returns
 
     def is_repo(self, repo: Path) -> bool:
         return Path(repo) in self._repos
@@ -364,10 +369,19 @@ class FakeGit:
         self.fetched.append((str(repo), url, auth_header))
 
     def create_worktree(self, repo: Path, branch: str, base_ref: str, path: Path) -> None:
+        if self.fail_next_worktree > 0:
+            self.fail_next_worktree -= 1
+            from issuefleet.gitops import GitError
+
+            raise GitError("fake create_worktree failure")
         Path(path).mkdir(parents=True, exist_ok=True)
+        self.worktrees.append({"repo": str(repo), "branch": branch, "path": str(path)})
 
     def add_worktree_exclude(self, repo: Path, path: Path, pattern: str) -> None:
         self.excludes.append((str(path), pattern))
+
+    def rev_parse(self, worktree: Path, ref: str = "HEAD") -> str:
+        return self.head_sha
 
     def remove_worktree(self, repo: Path, path: Path, branch: str) -> None:
         self.removed.append(str(path))

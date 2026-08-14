@@ -206,6 +206,12 @@ class ConfigTest(unittest.TestCase):
         data["agent"] = {"launcher_args": []}
         self.assertEqual(config.parse(data).launcher_args, [])
 
+    def test_mount_sibling_git_default_and_override(self):
+        self.assertTrue(config.parse(MINIMAL).mount_sibling_git)
+        data = dict(MINIMAL)
+        data["agent"] = {"mount_sibling_git": False}
+        self.assertFalse(config.parse(data).mount_sibling_git)
+
     def test_worker_env_sources(self):
         self.assertEqual(config.parse(MINIMAL).worker_env, {})
         with tempfile.TemporaryDirectory() as tmp:

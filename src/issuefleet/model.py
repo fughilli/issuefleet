@@ -63,6 +63,10 @@ class PullRequest:
     # exactly when the branch conflicts with its base.
     mergeable: bool | None = None
     mergeable_state: str | None = None
+    # The commit the merge produced on the base branch (squash/rebase/merge
+    # all set it). This is the canonical mainline SHA a dependent worker pins
+    # to once an upstream PR lands — empty until the PR is actually merged.
+    merge_commit_sha: str = ""
 
 
 @dataclass
@@ -104,6 +108,43 @@ class PrFeedback:
     body: str
     path: str | None = None  # file path, for inline comments
     url: str | None = None
+
+
+def new_upstream_link(
+    project: str, branch: str, path: str, base_ref: str, base_sha: str = ""
+) -> dict[str, Any]:
+    """One cross-project contribution a worker is making: a self-contained
+    local clone of a *sibling* fleet project, nested inside this worker's
+    worktree at ``path`` (relative), on ``branch`` cut from ``base_ref``.
+
+    Kept as a plain dict rather than a dataclass so it round-trips through the
+    registry JSON with no custom (de)serialization — WorkerRecord.from_dict is
+    generic and would otherwise hand back bare dicts after a reload, silently
+    breaking attribute access. The keys are the whole contract:
+
+    - ``pr_number`` / ``pr_url`` / ``head_sha``: set once the change is pushed
+      and a PR opened on the sibling repo (``head_sha`` is the pushed tip, the
+      CI-testable SHA the agent can pin experimentally);
+    - ``merged`` / ``merge_sha``: set when that PR lands, ``merge_sha`` being
+      the canonical mainline commit to repoint the pin at before the worker's
+      own PR merges;
+    - ``merge_notified`` / ``closed_notified``: once-only wake latches, so a
+      merged/closed upstream PR wakes the dependent worker exactly once.
+    """
+    return {
+        "project": project,
+        "branch": branch,
+        "path": path,
+        "base_ref": base_ref,
+        "base_sha": base_sha,
+        "pr_number": None,
+        "pr_url": None,
+        "head_sha": None,
+        "merged": False,
+        "merge_sha": None,
+        "merge_notified": False,
+        "closed_notified": False,
+    }
 
 
 # Registry-side worker phases. The agent-side turn phase (running/waiting/
@@ -148,6 +189,9 @@ class WorkerRecord:
     restarts: int = 0
     comment_cursor: str | None = None  # ISO timestamp of newest ingested Linear comment
     seen_feedback_ids: list[str] = field(default_factory=list)
+    # Cross-project contributions this worker has staged (see new_upstream_link).
+    # Plain dicts so they survive the generic registry round-trip untouched.
+    upstream_links: list[dict[str, Any]] = field(default_factory=list)
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
 

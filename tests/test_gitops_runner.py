@@ -355,6 +355,42 @@ class GitopsTest(unittest.TestCase):
                                   capture_output=True, text=True).stdout
         self.assertNotIn("agent/fug-1-x", in_other)
 
+    def test_sibling_worktree_nested_in_a_worktree_shares_the_sibling_common_dir(self):
+        # FUG-115: a sibling project's change is staged in a LINKED WORKTREE of
+        # the sibling repo, opened at siblings/<name> inside the worker's own
+        # worktree. It shares the sibling repo's git-common-dir (so its Bazel
+        # cache is warm), and the worker container reaches it because the runner
+        # same-path-mounts that .git. Here `self.repo` plays the sibling.
+        worker_wt = self.worktrees / "FUG-1"
+        self.git.create_worktree(self.repo, "agent/fug-1-main", "main", worker_wt)
+        sib = worker_wt / "siblings" / "embedded"  # nested under the worker worktree
+        self.git.create_worktree(self.repo, "agent/fug-1-embedded", "main", sib)
+        self.assertTrue((sib / "README.md").is_file())
+        # Its common-dir is the sibling repo's .git — exactly the dir the runner
+        # mounts same-path so this resolves in-container.
+        common = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=sib, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(Path(common), (self.repo / ".git"))
+        # Commit + push-to-explicit-URL works from it, like the primary worktree.
+        (sib / "patch.txt").write_text("upstream change")
+        run(["git", "add", "."], cwd=sib)
+        run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "up"], cwd=sib)
+        self.assertTrue(self.git.has_commits_ahead(sib, "main"))
+        other = Path(self.tmp.name) / "embedded.git"
+        run(["git", "init", "--bare", "-b", "main", str(other)])
+        self.git.push(sib, "agent/fug-1-embedded", url=str(other), auth_header="basic zzz")
+        self.assertIn(
+            "agent/fug-1-embedded",
+            subprocess.run(["git", "ls-remote", "--heads", str(other)],
+                           capture_output=True, text=True).stdout,
+        )
+        # Teardown deregisters it from the sibling repo (no stale worktree).
+        self.git.remove_worktree(self.repo, sib, "agent/fug-1-embedded")
+        listing = subprocess.run(["git", "worktree", "list"], cwd=self.repo,
+                                 capture_output=True, text=True).stdout
+        self.assertNotIn("embedded", listing)
+
     def test_remote_url(self):
         self.assertEqual(self.git.remote_url(self.repo), str(self.origin))
 
@@ -433,6 +469,64 @@ class ScriptWrapperTest(unittest.TestCase):
         # Either way the space in the worktree path survives quoting.
         for form in (bsd, gnu):
             self.assertIn("some path", form)
+
+
+class SiblingMountTest(unittest.TestCase):
+    """FUG-115: the worker command same-path-mounts sibling git dirs. Pure
+    argv construction — no tmux — so it runs in the sandbox too."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        for name in ("splanc", "embedded"):  # need a .git dir for the mount
+            (self.root / name / ".git").mkdir(parents=True)
+        self.runner = TmuxRunner(self.root / "logs")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _cfg(self, mount=True):
+        return Config(
+            projects=[
+                ProjectConfig(name="splanc", linear_project="S",
+                              repo=self.root / "splanc", claim=ClaimRule("label", "agent")),
+                ProjectConfig(name="embedded", linear_project="E",
+                              repo=self.root / "embedded", claim=ClaimRule("label", "agent")),
+            ],
+            mount_sibling_git=mount,
+        )
+
+    def _rec(self):
+        return WorkerRecord(
+            issue_id="i", issue_key="FUG-1", issue_title="t", issue_url="u",
+            project="splanc", repo=str(self.root / "splanc"), branch="b",
+            worktree=str(self.root / "wt"), base_ref="main",
+            session_uuid="s", tmux_session="ts",
+        )
+
+    def test_mounts_sibling_git_dirs_same_path_before_the_command(self):
+        cmd = self.runner.command(self._rec(), self._cfg())
+        self.assertIn("--mount", cmd)
+        i = cmd.index("--mount")
+        self.assertEqual(cmd[i + 1], str(self.root / "embedded" / ".git"))  # the sibling
+        # Never the worker's own repo (the launcher already mounts that).
+        self.assertNotIn(str(self.root / "splanc" / ".git"), cmd)
+        # Flags precede the in-container command.
+        self.assertLess(i, cmd.index("/workspace/.agent/bin/turnloop"))
+
+    def test_disabled_emits_no_mounts(self):
+        self.assertNotIn("--mount", self.runner.command(self._rec(), self._cfg(mount=False)))
+
+    def test_single_project_emits_no_mounts(self):
+        cfg = self._cfg()
+        cfg.projects = [cfg.projects[0]]  # only the worker's own project
+        self.assertNotIn("--mount", self.runner.command(self._rec(), cfg))
+
+    def test_absent_sibling_clone_is_skipped(self):
+        import shutil as _sh
+
+        _sh.rmtree(self.root / "embedded" / ".git")  # sibling not cloned yet
+        self.assertNotIn("--mount", self.runner.command(self._rec(), self._cfg()))
 
 
 @unittest.skipIf(shutil.which("tmux") is None, "tmux not available")

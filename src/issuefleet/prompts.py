@@ -53,15 +53,67 @@ credentials**: a host-side orchestrator relays for you.
 - Do not touch `.agent/` except through `agentctl`. Do not modify the repo's
   config, history, or `.gitignore`. Do not try to reach Linear or GitHub
   directly.
-
+{cross_project}
 ## Start
 
 Read the codebase as needed, form a concrete plan, and post it with
 `agentctl status` before making changes.
 """
 
+# Appended to the brief when this issue's fix needs a change in a *sibling*
+# fleet project (a dependency the fleet also manages). The whole point: you
+# can't push or open PRs yourself — so the orchestrator opens a git worktree of
+# the sibling inside your own worktree that you can edit offline, and relays the
+# push/PR for you.
+_CROSS_PROJECT_SECTION = """
+## Contributing to other fleet projects (upstream dependencies)
 
-def render_brief(issue, branch: str, base_ref: str) -> str:
+Some of this issue's work may live in a dependency that issuefleet also
+manages. You can stage a change there without leaving your worktree — the
+orchestrator relays the git for you, exactly like it does for your own PR.
+
+Sibling projects you can contribute to:
+{sibling_list}
+
+- `.agent/bin/agentctl upstream-checkout --project <name> [--branch <b>]` —
+  the orchestrator opens a git worktree of that project at `siblings/<name>/`
+  in your worktree, cuts a branch off the latest base, and wakes you with the
+  path, branch, and base commit. Edit and commit there like any repo (no
+  network needed); its build cache is shared with the dependency, so builds
+  start warm. To experiment, point this project's dependency pin at the local
+  commit and build.
+- `.agent/bin/agentctl upstream-pr --project <name> --title "<t>" --body-file <f>`
+  — when the sibling change is committed, this pushes that branch and opens (or
+  updates) a PR on the sibling repo, then wakes you with the PR url and the
+  *pushed* commit SHA — the CI-testable SHA to pin while the PR is in review.
+- Both commands idle you until the orchestrator replies (like `ask`): run the
+  command, then stop and wait for the wake-up.
+- When the upstream PR **merges**, you're woken with its canonical mainline
+  commit SHA. Repoint your dependency pin from the experimental SHA to that
+  mainline SHA and commit, so your own PR lands against real mainline — then
+  re-run `agentctl ready`. (You're also told if the upstream PR is closed
+  unmerged.)
+
+Only reach for this when a fix genuinely needs an upstream change; a
+self-contained change in this repo needs none of it.
+"""
+
+
+def _render_cross_project(siblings: list[dict] | None) -> str:
+    """The cross-project section, or "" when the fleet has no sibling projects
+    to contribute to (a single-project fleet, or tests). Leading blank line
+    only when present, so a no-sibling brief has no stray whitespace before
+    `## Start`."""
+    if not siblings:
+        return ""
+    listed = "\n".join(
+        f"- **{s['name']}**" + (f" ({s['repo']})" if s.get("repo") else "")
+        for s in siblings
+    )
+    return "\n" + _CROSS_PROJECT_SECTION.format(sibling_list=listed)
+
+
+def render_brief(issue, branch: str, base_ref: str, siblings: list[dict] | None = None) -> str:
     return BRIEF_TEMPLATE.format(
         key=issue.key,
         title=issue.title,
@@ -69,4 +121,5 @@ def render_brief(issue, branch: str, base_ref: str) -> str:
         description=issue.description or "(no description on the issue)",
         branch=branch,
         base_ref=base_ref,
+        cross_project=_render_cross_project(siblings),
     )
