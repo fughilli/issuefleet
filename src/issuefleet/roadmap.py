@@ -5,7 +5,11 @@ It runs alongside the reconcile loop in the daemon and, each tick, checks
 whether its cadence has elapsed; if so it:
 
   1. **Reads the work** — open issues in each configured Linear project, grouped
-     by workflow state, are gathered into a compact context blob.
+     by workflow state, are gathered into a compact context blob and *diffed*
+     against the last published snapshot: each issue is tagged as new,
+     progressed, or unchanged, and issues that have since closed (features
+     landed, work canceled) get their own section so a delivered feature is
+     announced rather than silently dropped.
   2. **Writes the update** — with an Anthropic key, Claude turns that blob into a
      crisp stakeholder update using a *configurable* system prompt (the default
      is the "daily workstream summary" prompt from the brief). Without a key it
@@ -17,8 +21,9 @@ whether its cadence has elapsed; if so it:
      than skipping a whole interval.
 
 Credentials (the Anthropic key, each surface's secret) stay host-side like the
-rest of the daemon. State (just the last-published timestamp) persists to
-``roadmap.json`` so a restart doesn't immediately re-publish.
+rest of the daemon. State (the last-published timestamp and a per-issue
+snapshot to diff the next report against) persists to ``roadmap.json`` so a
+restart doesn't immediately re-publish and the next update reads as a diff.
 """
 
 from __future__ import annotations
@@ -64,6 +69,12 @@ class RoadmapBot:
         self._transport = transport
         self.state_path = Path(config.state_dir) / "roadmap.json"
         self.state = self._load_state()
+        # The snapshot of the current run, built by render() and committed to
+        # state only once a surface actually accepts the report (see
+        # publish_now). Anchoring the diff to what was *published* — not merely
+        # rendered — keeps a preview (`roadmap` with no --publish) from silently
+        # advancing the baseline.
+        self._pending_snapshot: dict | None = None
 
     # ------------------------------------------------------------- state
 
@@ -76,6 +87,10 @@ class RoadmapBot:
             log.warning("roadmap.json is corrupt; starting fresh")
             data = {}
         data.setdefault("last_report", None)  # None = never published yet
+        # Per-issue state as of the last published report, keyed by issue id.
+        # Empty on first run (or after an upgrade from a last_report-only file),
+        # which the renderer reads as "give a full baseline this time".
+        data.setdefault("snapshot", {})
         return data
 
     def _save_state(self) -> None:
@@ -127,36 +142,86 @@ class RoadmapBot:
                 log.info("roadmap: published to %s", pub.name)
             except PublishError:
                 log.exception("roadmap: publishing to %s failed", pub.name)
+        if ok > 0 and self._pending_snapshot is not None:
+            # Advance the baseline only now that stakeholders have actually seen
+            # this state, so tomorrow's report diffs against what was published
+            # (and a just-landed issue is announced once, then drops out).
+            self.state["snapshot"] = self._pending_snapshot
+            self._save_state()
         return ok > 0
 
     # --------------------------------------------------------- summary
 
     def render(self) -> str:
         """The summary text, built but not published. Shared by the daemon tick
-        and the `roadmap` CLI preview."""
-        context, count = self._gather_context()
-        if count == 0:
-            return ""
-        return self._summarize(context)
+        and the `roadmap` CLI preview.
 
-    def _gather_context(self) -> tuple[str, int]:
-        """Open issues across the configured projects, grouped by workflow
-        state, as a compact blob for the model (or the fallback). Returns
-        (text, total_issue_count). A project that fails to read is logged and
-        skipped rather than sinking the whole report."""
+        Builds a diff against the last *published* snapshot: each open issue is
+        annotated with what changed since then, and issues that have left the
+        open set (features that landed, work that was canceled) get their own
+        section so a completed workstream is announced rather than silently
+        dropped. The freshly-computed snapshot is stashed on the bot and only
+        committed by publish_now once a surface accepts the report."""
+        prev = self.state.get("snapshot") or {}
         blocks: list[str] = []
-        total = 0
+        snapshot: dict = {}
+        open_total = 0
         for ref in self.rm.projects:
             try:
                 issues = self.tracker.open_issues_in_project(ref)
             except Exception:
                 log.exception("roadmap: reading project %r failed; skipping it", ref)
                 continue
-            total += len(issues)
-            blocks.append(self._project_block(ref, issues))
-        return "\n\n".join(blocks), total
+            open_total += len(issues)
+            for i in issues:
+                snapshot[i.id] = self._snap(i, ref)
+            blocks.append(self._project_block(ref, issues, prev))
 
-    def _project_block(self, ref: str, issues: list) -> str:
+        closed = self._closed_since(prev, snapshot)
+        self._pending_snapshot = snapshot
+
+        # Nothing open and nothing newly landed: genuinely nothing to say.
+        if open_total == 0 and not closed:
+            return ""
+
+        context = self._compose_context(blocks, closed, first_report=not prev)
+        return self._summarize(context)
+
+    @staticmethod
+    def _snap(issue, ref: str) -> dict:
+        """The bit of an issue worth remembering between runs: enough to detect
+        progress (state change) and to attribute a later closure to a project."""
+        return {
+            "key": issue.key,
+            "title": issue.title,
+            "project": ref,
+            "state_name": issue.state_name,
+            "state_type": issue.state_type,
+            "priority": issue.priority,
+        }
+
+    def _closed_since(self, prev: dict, current: dict) -> list[tuple]:
+        """Issues that were open at the last report but have since left the open
+        set. We look each one up to learn its *current* state: a `completed`
+        issue is a delivered feature worth announcing, a `canceled` one is worth
+        a note; anything still open just moved out of the configured projects
+        and is ignored. Returns (issue, prev_record) pairs, ordered by key."""
+        out: list[tuple] = []
+        for iid, rec in prev.items():
+            if iid in current:
+                continue
+            try:
+                issue = self.tracker.get_issue(iid)
+            except Exception:
+                log.exception("roadmap: looking up closed issue %s failed; skipping it", iid)
+                continue
+            if issue is None:
+                continue
+            if issue.state_type in ("completed", "canceled"):
+                out.append((issue, rec))
+        return sorted(out, key=lambda pair: pair[0].key)
+
+    def _project_block(self, ref: str, issues: list, prev: dict) -> str:
         header = f"Project: {ref}\nOpen issues ({len(issues)}):"
         if not issues:
             return header + "\n(none)"
@@ -170,11 +235,66 @@ class RoadmapBot:
             lines.append(f"\n{state} ({len(group)}):")
             for i in group:
                 prio = _PRIORITY.get(i.priority, "no priority")
-                lines.append(f"- {i.key} [{prio}]: {i.title}")
+                lines.append(f"- {i.key} [{prio}]: {i.title} — {self._progress(i, prev.get(i.id))}")
                 snippet = self._snippet(i.description)
                 if snippet:
                     lines.append(f"    {snippet}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _progress(issue, prev_rec: dict | None) -> str:
+        """How an open issue has moved since the last published report, as a
+        short tag the summarizer can lean on to avoid rehashing steady work."""
+        if prev_rec is None:
+            return "NEW since last update"
+        was = prev_rec.get("state_name")
+        if was and was != issue.state_name:
+            return f"progressed: {was} → {issue.state_name}"
+        return "no change since last update"
+
+    def _completed_block(self, closed: list[tuple]) -> str:
+        """The 'what landed' section: issues completed or canceled since the
+        last report. Split so a delivered feature reads as a win, not a
+        disappearance. Prefers the issue's live title, falling back to the
+        remembered one if the lookup came back thin."""
+        multi = len(self.rm.projects) > 1
+        landed, dropped = [], []
+        for issue, rec in closed:
+            title = issue.title or rec.get("title", "")
+            suffix = f" (in {rec.get('project')})" if multi and rec.get("project") else ""
+            line = f"- {issue.key}: {title}{suffix}"
+            (dropped if issue.state_type == "canceled" else landed).append(line)
+        parts: list[str] = []
+        if landed:
+            parts.append(
+                "Completed since the last update (features delivered — announce these):\n"
+                + "\n".join(landed)
+            )
+        if dropped:
+            parts.append("Canceled since the last update:\n" + "\n".join(dropped))
+        return "\n\n".join(parts)
+
+    def _compose_context(self, blocks: list[str], closed: list[tuple], *, first_report: bool) -> str:
+        """Stitch the per-project blocks, the completed/canceled section, and a
+        one-line framing note into the blob handed to the model (and, offline,
+        shown verbatim). The framing travels *in* the context so both paths — LLM
+        and deterministic — carry the same instructions and stay honest."""
+        if first_report:
+            note = (
+                "This is the FIRST roadmap update: no prior state exists, so give a "
+                "full baseline of the current workstreams."
+            )
+        else:
+            note = (
+                "This is a FOLLOW-UP update. Each open issue is tagged with how it has "
+                "moved since the last update; lead with what progressed or landed and "
+                "don't re-describe unchanged workstreams in detail."
+            )
+        sections = [note, *blocks]
+        completed = self._completed_block(closed)
+        if completed:
+            sections.append(completed)
+        return "\n\n".join(sections)
 
     @staticmethod
     def _snippet(description: str, limit: int = 200) -> str:
