@@ -53,6 +53,17 @@ class RoadmapTestBase(unittest.TestCase):
             publishers = [self.pub]
         return RoadmapBot(self.cfg, self.tracker, publishers, **kwargs)
 
+    def _set_state(self, key, state_name):
+        self.tracker.issues[f"issue-{key}"].state_name = state_name
+
+    def _close(self, key, *, state_type="completed", state_name="Done"):
+        """Simulate an issue leaving the open set: it drops out of
+        open_issues_in_project (which filters on `open`) but get_issue still
+        resolves it, so the bot can learn it landed / was canceled."""
+        issue = self.tracker.issues[f"issue-{key}"]
+        issue.state_type = state_type
+        issue.state_name = state_name
+
 
 class ModelTransport:
     """Fake Anthropic Messages transport. Records the request; returns text."""
@@ -131,6 +142,95 @@ class SummaryTest(RoadmapTestBase):
         bot = RoadmapBot(self.cfg, boom, [self.pub], clock=lambda: self.now[0])
         text = bot.render()
         self.assertIn("FUG-1", text)
+
+
+class DiffTest(RoadmapTestBase):
+    """The bot diffs each report against the last *published* snapshot."""
+
+    def test_first_report_marks_everything_new(self):
+        self._issue("FUG-1", "Add caching")
+        text = self._bot(publishers=[self.pub]).render()
+        self.assertIn("FIRST roadmap update", text)
+        self.assertIn("NEW since last update", text)
+
+    def test_followup_flags_progressed_and_unchanged(self):
+        self._issue("FUG-1", "Add caching", state_name="Todo")
+        self._issue("FUG-2", "Fix login", state_name="Todo")
+        bot = self._bot(publishers=[self.pub])
+        self.assertTrue(bot.publish_now())  # baseline snapshot
+        # FUG-1 moves, FUG-2 stays put.
+        self._set_state("FUG-1", "In Progress")
+        text = bot.render()
+        self.assertIn("FOLLOW-UP update", text)
+        self.assertIn("FUG-1", text)
+        self.assertIn("progressed: Todo → In Progress", text)
+        # FUG-2 is unchanged and flagged as such (so the model can fold it away).
+        fug2_line = next(l for l in text.splitlines() if "FUG-2" in l)
+        self.assertIn("no change since last update", fug2_line)
+
+    def test_landed_issue_is_announced_then_drops(self):
+        self._issue("FUG-1", "Add caching")
+        self._issue("FUG-9", "Ship the widget")
+        bot = self._bot(publishers=[self.pub])
+        self.assertTrue(bot.publish_now())  # baseline: both open
+        # FUG-9 lands (completed → leaves the open set).
+        self._close("FUG-9")
+        self.assertTrue(bot.publish_now())
+        landed = self.pub.published[-1]
+        self.assertIn("Completed since the last update", landed)
+        self.assertIn("FUG-9", landed)
+        self.assertIn("Ship the widget", landed)
+        # Announced once: the next report no longer mentions it.
+        again = bot.render()
+        self.assertNotIn("FUG-9", again)
+
+    def test_canceled_issue_is_noted_separately(self):
+        self._issue("FUG-1", "Add caching")
+        self._issue("FUG-8", "Abandoned idea")
+        bot = self._bot(publishers=[self.pub])
+        self.assertTrue(bot.publish_now())
+        self._close("FUG-8", state_name="Canceled", state_type="canceled")
+        text = bot.render()
+        self.assertIn("Canceled since the last update", text)
+        self.assertIn("FUG-8", text)
+
+    def test_all_work_landed_still_publishes(self):
+        # Everything closed the same day: nothing open, but the landings are the
+        # whole story and must not be swallowed as "no work to report".
+        self._issue("FUG-1", "Add caching")
+        bot = self._bot(publishers=[self.pub])
+        self.assertTrue(bot.publish_now())
+        self._close("FUG-1")
+        text = bot.render()
+        self.assertNotEqual(text, "")
+        self.assertIn("FUG-1", text)
+
+    def test_snapshot_advances_only_on_publish(self):
+        self._issue("FUG-1", "Add caching", state_name="Todo")
+        bot = self._bot(publishers=[self.pub])
+        # A preview (render, no publish) must NOT move the baseline.
+        bot.render()
+        self.assertEqual(bot.state["snapshot"], {})
+        self.assertTrue(bot.publish_now())
+        self.assertIn("issue-FUG-1", bot.state["snapshot"])
+
+    def test_snapshot_not_advanced_when_every_surface_fails(self):
+        self._issue("FUG-1", "Add caching")
+        bot = self._bot(publishers=[FakePublisher("dead", fail=True)])
+        self.assertFalse(bot.publish_now())
+        self.assertEqual(bot.state["snapshot"], {})
+
+    def test_closed_lookup_failure_is_skipped_not_fatal(self):
+        self._issue("FUG-1", "Add caching")
+        self._issue("FUG-9", "Ship the widget")
+        bot = self._bot(publishers=[self.pub])
+        self.assertTrue(bot.publish_now())
+        # FUG-9 leaves the open set, but its lookup errors: the report survives.
+        del self.tracker.issues["issue-FUG-9"]
+        self.tracker.fail_get_issue.add("issue-FUG-9")
+        text = bot.render()
+        self.assertIn("FUG-1", text)
+        self.assertNotIn("FUG-9", text)
 
 
 class PublishTest(RoadmapTestBase):
