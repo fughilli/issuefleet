@@ -35,8 +35,13 @@ PHASE_READY = "ready"  # submitted; blocked on review/merge
 PHASE_IDLE = "idle"  # declared done / standing by (agentctl idle); wakes like ready
 
 # Inbox kinds that justify waking an idle agent. "info" is context-only: it
-# rides along on the next turn but never triggers one by itself.
-_WAKING_KINDS = ("reply", "pr_feedback", "pr_closed", "ci_status", "merge_conflict")
+# rides along on the next turn but never triggers one by itself. The upstream_*
+# kinds wake a worker idling on a cross-project request (checkout/PR ready) or
+# report that an upstream PR it staged has landed/closed.
+_WAKING_KINDS = (
+    "reply", "pr_feedback", "pr_closed", "ci_status", "merge_conflict",
+    "upstream_ready", "upstream_pr_opened", "upstream_merged", "upstream_pr_closed",
+)
 
 
 @dataclass
@@ -176,6 +181,22 @@ def format_inbound(msgs: list[Message]) -> str:
             head = f"CI {p.get('state', 'result')} on your PR"
         elif m.kind == "merge_conflict":
             head = "Your PR no longer merges cleanly (rebase needed)"
+        elif m.kind == "upstream_ready":
+            head = (
+                f"Upstream checkout ready ({p.get('project', '?')})"
+                if p.get("ok", True)
+                else f"Upstream checkout FAILED ({p.get('project', '?')})"
+            )
+        elif m.kind == "upstream_pr_opened":
+            head = (
+                f"Upstream PR opened ({p.get('project', '?')})"
+                if p.get("ok", True)
+                else f"Upstream PR request FAILED ({p.get('project', '?')})"
+            )
+        elif m.kind == "upstream_merged":
+            head = f"Upstream PR merged ({p.get('project', '?')}) — repoint your pin"
+        elif m.kind == "upstream_pr_closed":
+            head = f"Upstream PR closed unmerged ({p.get('project', '?')})"
         else:
             head = "Notice from the orchestrator"
         blocks.append(f"### {head}\n{p.get('text', p.get('body', ''))}")

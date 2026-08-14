@@ -32,6 +32,7 @@ from issuefleet.model import (
     PHASE_RELEASED,
     Issue,
     WorkerRecord,
+    new_upstream_link,
     now_iso,
 )
 from issuefleet.registry import Registry
@@ -91,6 +92,18 @@ def build_forge_and_checkout(project: ProjectConfig, git, token_source):
     clone_url, clone_auth = forge.push_spec()
     action = gitops.ensure_checkout(git, project, clone_url=clone_url, auth_header=clone_auth)
     return forge, action
+
+
+def _project_slug(project: ProjectConfig) -> str:
+    """A short human descriptor for a project, for the sibling list in a
+    brief: the ``owner/name`` of its git remote when known, else the checkout
+    directory name. Never raises — a brief hint is not worth a claim failure."""
+    if project.git_url:
+        try:
+            return parse_repo_slug(project.git_url)
+        except ValueError:
+            pass
+    return Path(project.repo).name
 
 
 def slugify(title: str, max_len: int = 32) -> str:
@@ -520,6 +533,7 @@ class Reconciler:
             session_uuid=rec.session_uuid,
             turns_taken=max(1, rec.released_turns),
             phase=PHASE_RUNNING,
+            siblings=self._siblings(project),
         )
 
         rec.phase = PHASE_ACTIVE
@@ -649,6 +663,16 @@ class Reconciler:
             except Exception:
                 log.exception("resolving project id for %s failed", project.name)
         return None
+
+    def _siblings(self, project: ProjectConfig) -> list[dict]:
+        """The other fleet projects a worker on ``project`` may contribute to,
+        for its brief's cross-project section — every configured project but its
+        own."""
+        return [
+            {"name": p.name, "repo": _project_slug(p)}
+            for p in self.cfg.projects
+            if p.name != project.name
+        ]
 
     def _claim_sessions(self) -> None:
         """Delegation/mention claims. These are explicit human acts, so they
@@ -816,6 +840,16 @@ class Reconciler:
                     f"{rec.issue_key}: would file a new Linear issue "
                     f"({msg.payload.get('title', '?')!r})"
                 )
+            elif msg.kind == "upstream_checkout":
+                lines.append(
+                    f"{rec.issue_key}: would set up an upstream checkout of "
+                    f"{msg.payload.get('project', '?')!r}"
+                )
+            elif msg.kind == "upstream_pr":
+                lines.append(
+                    f"{rec.issue_key}: would push and open/update an upstream PR on "
+                    f"{msg.payload.get('project', '?')!r}"
+                )
             else:
                 lines.append(f"{rec.issue_key}: would relay {msg.kind} to Linear")
         inbound = [
@@ -841,6 +875,22 @@ class Reconciler:
                     f"{rec.issue_key}: PR #{pr.number} has merge conflicts; would fetch "
                     f"origin/{rec.base_ref} and ask the agent to rebase"
                 )
+        for link in rec.upstream_links:
+            if link.get("pr_number") is not None and not link.get("merged"):
+                forge = self.forges.get(link["project"])
+                if forge is None:
+                    continue
+                upr = forge.get_pr(link["pr_number"])
+                if upr.merged:
+                    lines.append(
+                        f"{rec.issue_key}: upstream PR #{upr.number} on {link['project']} "
+                        "merged; would notify the agent of the mainline SHA"
+                    )
+                elif upr.state == "closed" and not link.get("closed_notified"):
+                    lines.append(
+                        f"{rec.issue_key}: upstream PR #{upr.number} on {link['project']} "
+                        "closed unmerged; would notify the agent"
+                    )
         return lines or [f"{rec.issue_key}: up to date; no action"]
 
     # ------------------------------------------------------------- servicing
@@ -922,6 +972,7 @@ class Reconciler:
         self._drain_outbox(rec, project, mailbox)
         self._ingest_comments(rec, mailbox)
         self._check_pr(rec, project, mailbox)
+        self._check_upstream(rec, mailbox)
 
     def _bind_agent_session(self, rec: WorkerRecord) -> None:
         """Recover the Linear agent session for a worker that was poll-claimed
@@ -1048,6 +1099,10 @@ class Reconciler:
                         mailbox.archive_outbox(msg, receipt={"dropped": "no session"})
                 elif msg.kind == "file_issue":
                     self._handle_file_issue(rec, mailbox, msg)
+                elif msg.kind == "upstream_checkout":
+                    self._handle_upstream_checkout(rec, project, mailbox, msg)
+                elif msg.kind == "upstream_pr":
+                    self._handle_upstream_pr(rec, project, mailbox, msg)
                 elif msg.kind == "ready":
                     self._handle_ready(rec, project, mailbox, msg)
                 else:
@@ -1092,6 +1147,217 @@ class Reconciler:
             text += f"\n(labels not found, skipped: {', '.join(unknown)})"
         mailbox.put_inbox("info", {"text": text})
         mailbox.archive_outbox(msg, receipt={"issue": issue.key, "url": issue.url})
+
+    # --------------------------------------------------- cross-project relays
+
+    def _sibling_project(self, name: str) -> ProjectConfig | None:
+        return next((p for p in self.cfg.projects if p.name == name), None)
+
+    def _handle_upstream_checkout(
+        self, rec: WorkerRecord, project: ProjectConfig, mailbox: Mailbox, msg
+    ) -> None:
+        """Set up an editable clone of a sibling fleet project inside this
+        worker's worktree (see gitops.create_upstream_checkout) and wake the
+        worker with the path/branch. A bad request (unknown project, git dead
+        end) is reported back and archived rather than left pending — retrying a
+        request that can never succeed would wedge the outbox behind it."""
+        p = msg.payload
+        name = str(p.get("project") or "")
+
+        def fail(text: str) -> None:
+            mailbox.ensure().put_inbox(
+                "upstream_ready", {"ok": False, "project": name, "text": text}
+            )
+            mailbox.archive_outbox(msg, receipt={"rejected": text})
+
+        sibling = self._sibling_project(name)
+        if sibling is None:
+            return fail(f"No fleet project named {name!r}. See the sibling list in your brief.")
+        if sibling.name == project.name:
+            return fail("That is your own project — work in this worktree directly.")
+
+        # Refresh the sibling clone so the checkout branches off current
+        # mainline, not the daemon's clone-time base. Best-effort: a fetch blip
+        # falls back to whatever refs the clone already carries.
+        forge = self.forges.get(sibling.name)
+        fetch_url = fetch_auth = None
+        if forge is not None:
+            fetch_url, fetch_auth = forge.push_spec()
+            try:
+                self.git.fetch(sibling.repo, url=fetch_url, auth_header=fetch_auth)
+            except gitops.GitError as e:
+                log.warning("worker %s: upstream fetch of %s failed (%s); using local refs",
+                            rec.issue_key, sibling.name, e)
+
+        branch = p.get("branch") or sibling.branch_template.format(
+            key=rec.issue_key.lower(), slug=slugify(rec.issue_title)
+        )
+        rel = f"upstream/{sibling.name}"
+        dest = Path(rec.worktree) / rel
+        try:
+            base_sha = self.git.create_upstream_checkout(
+                Path(sibling.repo), dest, branch, sibling.base_ref,
+                fetch_url=fetch_url, auth_header=fetch_auth,
+            )
+        except gitops.GitError as e:
+            return fail(f"Could not set up the checkout: {e}")
+
+        # Exclude it from the host worktree so the worker's own `git add` never
+        # sweeps the nested clone into its PR (same mechanism as `.agent/`).
+        self.git.add_worktree_exclude(project.repo, Path(rec.worktree), rel + "/")
+        link = new_upstream_link(sibling.name, branch, rel, sibling.base_ref, base_sha)
+        rec.upstream_links = [
+            l for l in rec.upstream_links if l.get("project") != sibling.name
+        ] + [link]
+        rec.touch()
+        self.registry.save()
+        log.info("worker %s: upstream checkout of %s ready at %s (branch %s)",
+                 rec.issue_key, sibling.name, rel, branch)
+        mailbox.ensure().put_inbox(
+            "upstream_ready",
+            {
+                "ok": True, "project": sibling.name, "path": rel, "branch": branch,
+                "base_ref": sibling.base_ref, "base_sha": base_sha,
+                "text": (
+                    f"Your editable clone of `{sibling.name}` is ready at `{rel}/`, on branch "
+                    f"`{branch}` cut from `{sibling.base_ref}` at {base_sha[:12]}. Edit and "
+                    f"commit there with plain git (e.g. `git -C {rel} add -A && git -C {rel} "
+                    "commit`). To experiment, point this project's pin for it at that local "
+                    "commit and build. When the change is committed, run `agentctl upstream-pr "
+                    f"--project {sibling.name} --title \"...\" --body-file <f>` to push it and "
+                    "open a PR."
+                ),
+            },
+        )
+        mailbox.archive_outbox(msg, receipt={"upstream": sibling.name, "branch": branch})
+
+    def _handle_upstream_pr(
+        self, rec: WorkerRecord, project: ProjectConfig, mailbox: Mailbox, msg
+    ) -> None:
+        """Push a worker's sibling-project change and open/update a PR on that
+        repo — the credentialed act the worker can't do itself. The pushed head
+        SHA goes back to the worker as a pin it can test against CI."""
+        p = msg.payload
+        name = str(p.get("project") or "")
+
+        def fail(text: str) -> None:
+            mailbox.ensure().put_inbox(
+                "upstream_pr_opened", {"ok": False, "project": name, "text": text}
+            )
+            mailbox.archive_outbox(msg, receipt={"rejected": text})
+
+        link = next((l for l in rec.upstream_links if l.get("project") == name), None)
+        if link is None:
+            return fail(
+                f"No upstream checkout for {name!r}. Run "
+                f"`agentctl upstream-checkout --project {name}` first."
+            )
+        sibling = self._sibling_project(name)
+        forge = self.forges.get(name) if sibling is not None else None
+        if sibling is None or forge is None:
+            return fail(f"Project {name!r} is no longer configured in the fleet.")
+
+        dest = Path(rec.worktree) / link["path"]
+        try:
+            ahead = self.git.has_commits_ahead(dest, link["base_ref"])
+        except gitops.GitError as e:
+            return fail(f"Could not inspect the `{name}` checkout ({e}).")
+        if not ahead:
+            return fail(
+                f"The `{name}` checkout has no commits on top of `{link['base_ref']}`. "
+                f"Commit your change in `{link['path']}/` first."
+            )
+        if not self._upstream_security_ok(rec, mailbox, msg, dest, link):
+            return
+
+        push_url, push_auth = forge.push_spec()
+        self.git.push(dest, link["branch"], url=push_url, auth_header=push_auth)
+        head_sha = self.git.rev_parse(dest, "HEAD")
+        title = p.get("title") or f"{rec.issue_key}: upstream change in {name}"
+        body = (
+            f"{p.get('body', '')}\n\nStaged from {rec.issue_key} ({rec.issue_url}) "
+            "by issuefleet."
+        ).strip()
+
+        pr = None
+        if link.get("pr_number") is not None:
+            pr = forge.get_pr(link["pr_number"])
+            if pr.state == "open":
+                forge.update_pr(pr.number, title, body)
+            else:
+                pr = None
+        if pr is None:
+            pr = forge.find_pr(link["branch"])
+            if pr is not None:
+                forge.update_pr(pr.number, title, body)
+        if pr is None:
+            pr = forge.open_pr(link["branch"], link["base_ref"], title, body)
+
+        link.update(
+            pr_number=pr.number, pr_url=pr.url, head_sha=head_sha,
+            merged=False, merge_sha=None, merge_notified=False, closed_notified=False,
+        )
+        rec.touch()
+        self.registry.save()
+        log.info("worker %s: upstream PR #%d on %s ready (%s)",
+                 rec.issue_key, pr.number, name, pr.url)
+        mailbox.ensure().put_inbox(
+            "upstream_pr_opened",
+            {
+                "ok": True, "project": name, "pr_number": pr.number, "pr_url": pr.url,
+                "head_sha": head_sha, "branch": link["branch"],
+                "text": (
+                    f"Upstream PR for `{name}` is open: {pr.url}\nThe pushed commit is "
+                    f"{head_sha[:12]} — pin this project at that SHA to test against CI while "
+                    "the PR is in review. You'll be woken with the canonical mainline SHA when "
+                    "it merges, so you can repoint the pin before your own PR lands."
+                ),
+            },
+        )
+        mailbox.archive_outbox(msg, receipt={"pr": pr.number, "url": pr.url})
+
+    def _upstream_security_ok(
+        self, rec: WorkerRecord, mailbox: Mailbox, msg, dest: Path, link: dict
+    ) -> bool:
+        """Same credential-leak gate as the worker's own `ready`, applied to the
+        sibling-project diff before it is pushed. Fails closed in block mode."""
+        mode = self.cfg.security.mode
+        try:
+            diff = self.git.diff(dest, link["base_ref"])
+            verdict = self.gate.scan(diff)
+        except Exception:
+            log.exception("worker %s: upstream security scan failed to run", rec.issue_key)
+            if mode == "warn":
+                return True
+            mailbox.ensure().put_inbox(
+                "upstream_pr_opened",
+                {"ok": False, "project": link["project"],
+                 "text": "The security gate could not scan your upstream diff, so nothing "
+                 "was pushed. Try `agentctl upstream-pr` again."},
+            )
+            mailbox.archive_outbox(msg, receipt={"rejected": "security scan error"})
+            return False
+        if verdict.ok:
+            return True
+        if mode == "warn":
+            log.warning("worker %s: upstream security gate flagged %d issue(s) (warn mode)",
+                        rec.issue_key, len(verdict.findings))
+            mailbox.ensure().put_inbox(
+                "info",
+                {"text": "⚠️ The security gate flagged possible leaked credentials in your "
+                 "upstream diff, but is in warn-only mode, so the PR was pushed anyway. "
+                 "Please review:\n\n" + verdict.render()},
+            )
+            return True
+        log.warning("worker %s: upstream security gate BLOCKED the PR (%d finding(s))",
+                    rec.issue_key, len(verdict.findings))
+        mailbox.ensure().put_inbox(
+            "upstream_pr_opened",
+            {"ok": False, "project": link["project"],
+             "text": "Your upstream PR was blocked by the security gate:\n\n" + verdict.render()},
+        )
+        mailbox.archive_outbox(msg, receipt={"rejected": "security gate"})
+        return False
 
     def _security_ok(self, rec: WorkerRecord, mailbox: Mailbox, msg) -> bool:
         """Scan the diff this `ready` would push for leaked credentials. In
@@ -1516,6 +1782,71 @@ class Reconciler:
         rec.touch()
         self.registry.save()
 
+    def _check_upstream(self, rec: WorkerRecord, mailbox: Mailbox) -> None:
+        """Poll the PRs a worker staged on sibling projects and wake it when one
+        settles. A merge delivers the canonical mainline commit so the worker
+        can repoint its pin off the experimental SHA before its own PR lands; a
+        close-unmerged tells it the upstream change was rejected. Each fires
+        once (``merge_notified`` / ``closed_notified``). The worker has no forge
+        credential, so this host-side poll is the only way it hears the news."""
+        if not rec.upstream_links:
+            return
+        changed = False
+        for link in rec.upstream_links:
+            pr_number = link.get("pr_number")
+            if pr_number is None or link.get("merged"):
+                continue
+            forge = self.forges.get(link["project"])
+            if forge is None:
+                continue
+            try:
+                pr = forge.get_pr(pr_number)
+            except Exception:
+                log.exception("worker %s: polling upstream PR #%s on %s failed",
+                              rec.issue_key, pr_number, link["project"])
+                continue
+            if pr.merged:
+                merge_sha = pr.merge_commit_sha or ""
+                link["merged"] = True
+                link["merge_sha"] = merge_sha
+                link["merge_notified"] = True
+                changed = True
+                shown = merge_sha[:12] if merge_sha else "the merge commit"
+                log.info("worker %s: upstream PR #%d on %s merged (%s); notifying",
+                         rec.issue_key, pr.number, link["project"], shown)
+                mailbox.ensure().put_inbox(
+                    "upstream_merged",
+                    {
+                        "project": link["project"], "pr_number": pr.number, "pr_url": pr.url,
+                        "merge_sha": merge_sha, "base_ref": link["base_ref"],
+                        "text": (
+                            f"Your upstream PR #{pr.number} on `{link['project']}` merged. The "
+                            f"canonical mainline commit is {shown}. Repoint this project's pin "
+                            f"for `{link['project']}` from the experimental SHA to {shown} and "
+                            "commit, then re-run `agentctl ready` so your PR lands against real "
+                            "mainline."
+                        ),
+                    },
+                )
+            elif pr.state == "closed" and not link.get("closed_notified"):
+                link["closed_notified"] = True
+                changed = True
+                mailbox.ensure().put_inbox(
+                    "upstream_pr_closed",
+                    {
+                        "project": link["project"], "pr_number": pr.number, "pr_url": pr.url,
+                        "text": (
+                            f"Your upstream PR #{pr.number} on `{link['project']}` was closed "
+                            "without merging. Decide how to proceed: revise the checkout and "
+                            f"re-run `agentctl upstream-pr --project {link['project']}`, or "
+                            "rethink the approach if the upstream change was rejected."
+                        ),
+                    },
+                )
+        if changed:
+            rec.touch()
+            self.registry.save()
+
     # -------------------------------------------------------------- teardown
 
     def _wind_down(
@@ -1663,7 +1994,10 @@ class Reconciler:
         self.git.add_worktree_exclude(project.repo, worktree, ".agent/")
         for rel in worker_mod.inherit_repo_files(project.repo, worktree, self.cfg.copy_from_repo):
             self.git.add_worktree_exclude(project.repo, worktree, rel)
-        session_uuid = worker_mod.provision(worktree, issue, branch, project.base_ref, self.cfg)
+        session_uuid = worker_mod.provision(
+            worktree, issue, branch, project.base_ref, self.cfg,
+            siblings=self._siblings(project),
+        )
 
         rec = WorkerRecord(
             issue_id=issue.id,

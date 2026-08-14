@@ -153,6 +153,50 @@ class TurnsTest(unittest.TestCase):
         self.assertIn("CI failure on your PR", d.prompt)
         self.assertIn("lint", d.prompt)
 
+    def test_upstream_ready_wakes_a_worker_idling_on_its_request(self):
+        # After `upstream-checkout` the worker idles in WAITING; the
+        # orchestrator's reply must wake it with the checkout path.
+        state = self.reload()
+        state.phase = turns.PHASE_WAITING
+        state.save(self.agent_dir)
+        self.assertEqual(self.decide().exit_code, turns.EXIT_IDLE)
+        self.mb.put_inbox(
+            "upstream_ready",
+            {"ok": True, "project": "embedded", "path": "upstream/embedded",
+             "text": "clone ready at upstream/embedded"},
+        )
+        d = self.decide()
+        self.assertEqual(d.exit_code, turns.EXIT_CONTINUE)
+        self.assertIn("Upstream checkout ready (embedded)", d.prompt)
+        self.assertIn("upstream/embedded", d.prompt)
+
+    def test_upstream_merged_wakes_the_agent_to_repoint(self):
+        state = self.reload()
+        state.phase = turns.PHASE_READY  # sitting on its own submitted PR
+        state.save(self.agent_dir)
+        self.mb.put_inbox(
+            "upstream_merged",
+            {"project": "embedded", "merge_sha": "deadbeef",
+             "text": "upstream merged; pin to deadbeef"},
+        )
+        d = self.decide()
+        self.assertEqual(d.exit_code, turns.EXIT_CONTINUE)
+        self.assertIn("Upstream PR merged (embedded)", d.prompt)
+        self.assertIn("deadbeef", d.prompt)
+
+    def test_upstream_failure_reply_still_wakes(self):
+        # An error reply (ok=False) must unblock the worker too, not strand it.
+        state = self.reload()
+        state.phase = turns.PHASE_WAITING
+        state.save(self.agent_dir)
+        self.mb.put_inbox(
+            "upstream_pr_opened",
+            {"ok": False, "project": "embedded", "text": "no commits to push"},
+        )
+        d = self.decide()
+        self.assertEqual(d.exit_code, turns.EXIT_CONTINUE)
+        self.assertIn("Upstream PR request FAILED (embedded)", d.prompt)
+
     def test_info_alone_does_not_wake(self):
         state = self.reload()
         state.phase = turns.PHASE_READY
@@ -235,6 +279,30 @@ class AgentctlTest(unittest.TestCase):
         st = turns.TurnState.load(self.agent_dir)
         self.assertEqual(st.phase, turns.PHASE_READY)
         self.assertTrue(st.ever_ready)  # gates the no-op auto-idle backstop
+
+    def test_upstream_checkout_queues_and_idles(self):
+        agentctl.main(["upstream-checkout", "--project", "embedded", "--branch", "b"])
+        [m] = self.mb.pending_outbox()
+        self.assertEqual(m.kind, "upstream_checkout")
+        self.assertEqual(m.payload, {"project": "embedded", "branch": "b"})
+        # Idles like `ask` until the orchestrator makes the checkout.
+        self.assertEqual(turns.TurnState.load(self.agent_dir).phase, turns.PHASE_WAITING)
+
+    def test_upstream_checkout_branch_optional(self):
+        agentctl.main(["upstream-checkout", "--project", "embedded"])
+        [m] = self.mb.pending_outbox()
+        self.assertEqual(m.payload, {"project": "embedded"})  # no branch key
+
+    def test_upstream_pr_queues_and_idles(self):
+        agentctl.main(
+            ["upstream-pr", "--project", "embedded", "--title", "Add C3", "--body", "why"]
+        )
+        [m] = self.mb.pending_outbox()
+        self.assertEqual(m.kind, "upstream_pr")
+        self.assertEqual(
+            m.payload, {"project": "embedded", "title": "Add C3", "body": "why"}
+        )
+        self.assertEqual(turns.TurnState.load(self.agent_dir).phase, turns.PHASE_WAITING)
 
     def test_find_agent_dir_walks_up(self):
         import os

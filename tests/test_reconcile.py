@@ -1139,5 +1139,192 @@ class AddProjectTest(unittest.TestCase):
         self.assertFalse(self.rec.project_results()[-1]["ok"])
 
 
+class CrossProjectTest(unittest.TestCase):
+    """FUG-115: a worker on one project staging a change in a sibling project —
+    checkout, PR, and being notified when the upstream PR lands."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.cfg = config.parse(
+            {
+                "daemon": {
+                    "state_dir": str(root / "state"),
+                    "worktree_root": str(root / "worktrees"),
+                    "max_workers": 2,
+                },
+                "projects": [
+                    {"name": "splanc", "linear_project": "Splanc",
+                     "repo": str(root / "splanc"), "git_url": "https://github.com/o/splanc.git",
+                     "claim": {"strategy": "label", "value": "agent"}},
+                    {"name": "embedded", "linear_project": "Embedded",
+                     "repo": str(root / "embedded"), "git_url": "https://github.com/o/embedded.git",
+                     # A distinct claim label so the test issue (labelled "agent")
+                     # is claimed only by splanc — embedded is purely the sibling
+                     # this worker contributes to.
+                     "claim": {"strategy": "label", "value": "embedded-work"}},
+                ],
+            }
+        )
+        self.registry = Registry(self.cfg.state_dir)
+        self.tracker = FakeTracker()
+        self.splanc_forge = FakeForge()
+        self.embedded_forge = FakeForge()
+        self.git = FakeGit(root)
+        self.runner = FakeRunner()
+        self.rec = Reconciler(
+            self.cfg, self.registry, self.tracker,
+            {"splanc": self.splanc_forge, "embedded": self.embedded_forge},
+            self.git, self.runner,
+        )
+        # Claim a splanc issue: this worker will contribute upstream to embedded.
+        self.tracker.add_issue(make_issue(1, project_id="Splanc"))
+        self.rec.tick()
+        self.worker = self.registry.get("issue-1")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def mailbox(self):
+        return Mailbox(Path(self.worker.worktree) / ".agent" / "mailbox")
+
+    def inbox_kinds(self, kind):
+        return [m for m in self.mailbox().pending_inbox() if m.kind == kind]
+
+    def request(self, kind, payload):
+        self.mailbox().put_outbox(kind, payload)
+        self.rec.tick()
+
+    def checkout(self, project="embedded"):
+        self.request("upstream_checkout", {"project": project})
+
+    # -- the brief advertises the mechanism -------------------------------
+
+    def test_brief_lists_sibling_projects(self):
+        brief = (Path(self.worker.worktree) / ".agent" / "brief.md").read_text()
+        self.assertIn("Contributing to other fleet projects", brief)
+        self.assertIn("embedded", brief)
+        self.assertNotIn("**splanc**", brief)  # not its own project
+
+    # -- checkout ---------------------------------------------------------
+
+    def test_upstream_checkout_sets_up_a_nested_clone(self):
+        self.checkout()
+        # The sibling repo was cloned into the worker's worktree and excluded.
+        [ck] = self.git.upstream_checkouts
+        self.assertEqual(ck["source"], str(self.cfg.project("embedded").repo))
+        self.assertTrue(ck["dest"].endswith("upstream/embedded"))
+        self.assertIn(
+            (str(Path(self.worker.worktree)), "upstream/embedded/"), self.git.excludes
+        )
+        # A link is recorded on the worker, and the agent is woken with the path.
+        self.worker = self.registry.get("issue-1")
+        [link] = self.worker.upstream_links
+        self.assertEqual(link["project"], "embedded")
+        self.assertEqual(link["path"], "upstream/embedded")
+        self.assertEqual(link["base_sha"], self.git.upstream_base_sha)
+        self.assertIsNone(link["pr_number"])
+        [ready] = self.inbox_kinds("upstream_ready")
+        self.assertTrue(ready.payload["ok"])
+        self.assertIn("upstream/embedded", ready.payload["text"])
+        # The request was archived, not left to retry.
+        self.assertEqual(self.mailbox().pending_outbox(), [])
+
+    def test_unknown_project_is_reported_not_wedged(self):
+        self.request("upstream_checkout", {"project": "nope"})
+        [ready] = self.inbox_kinds("upstream_ready")
+        self.assertFalse(ready.payload["ok"])
+        self.assertEqual(self.registry.get("issue-1").upstream_links, [])
+        self.assertEqual(self.mailbox().pending_outbox(), [])  # archived, no retry
+
+    def test_own_project_is_rejected(self):
+        self.request("upstream_checkout", {"project": "splanc"})
+        [ready] = self.inbox_kinds("upstream_ready")
+        self.assertFalse(ready.payload["ok"])
+        self.assertIn("your own project", ready.payload["text"])
+
+    def test_checkout_failure_is_reported(self):
+        self.git.fail_next_upstream = 1
+        self.checkout()
+        [ready] = self.inbox_kinds("upstream_ready")
+        self.assertFalse(ready.payload["ok"])
+        self.assertEqual(self.registry.get("issue-1").upstream_links, [])
+
+    # -- staging the PR ---------------------------------------------------
+
+    def test_upstream_pr_pushes_to_the_sibling_and_reports_the_pin(self):
+        self.checkout()
+        self.git.head_sha = "pushedsha1234"
+        self.request("upstream_pr", {"project": "embedded", "title": "Add C3", "body": "why"})
+        # A PR was opened on the sibling forge, not on splanc, from the link's branch.
+        link = self.registry.get("issue-1").upstream_links[0]
+        self.assertEqual(self.git.pushed[-1], link["branch"])
+        self.assertEqual(len(self.embedded_forge.opened), 1)
+        self.assertEqual(self.splanc_forge.opened, [])
+        opened = self.embedded_forge.opened[0]
+        self.assertIn("Add C3", opened["title"])
+        # The link now carries the PR + pushed head SHA (the CI-testable pin).
+        self.assertEqual(link["pr_number"], opened["number"])
+        self.assertEqual(link["head_sha"], "pushedsha1234")
+        [opened_msg] = self.inbox_kinds("upstream_pr_opened")
+        self.assertTrue(opened_msg.payload["ok"])
+        self.assertEqual(opened_msg.payload["head_sha"], "pushedsha1234")
+        self.assertIn("pushedsha1234"[:12], opened_msg.payload["text"])  # shown short
+
+    def test_upstream_pr_without_checkout_is_rejected(self):
+        self.request("upstream_pr", {"project": "embedded", "title": "t", "body": "b"})
+        [msg] = self.inbox_kinds("upstream_pr_opened")
+        self.assertFalse(msg.payload["ok"])
+        self.assertIn("upstream-checkout", msg.payload["text"])
+        self.assertEqual(self.embedded_forge.opened, [])
+
+    def test_upstream_pr_with_no_commits_is_rejected(self):
+        self.checkout()
+        self.git.ahead = False
+        self.request("upstream_pr", {"project": "embedded", "title": "t", "body": "b"})
+        [msg] = self.inbox_kinds("upstream_pr_opened")
+        self.assertFalse(msg.payload["ok"])
+        self.assertIn("no commits", msg.payload["text"])
+        self.assertEqual(self.embedded_forge.opened, [])
+
+    def test_resubmitting_updates_the_same_pr(self):
+        self.checkout()
+        self.request("upstream_pr", {"project": "embedded", "title": "v1", "body": "b"})
+        num = self.registry.get("issue-1").upstream_links[0]["pr_number"]
+        self.request("upstream_pr", {"project": "embedded", "title": "v2", "body": "b"})
+        self.assertEqual(len(self.embedded_forge.opened), 1)  # not opened twice
+        self.assertEqual(self.embedded_forge.updated[-1]["title"], "v2")
+        self.assertEqual(self.registry.get("issue-1").upstream_links[0]["pr_number"], num)
+
+    # -- notification when the upstream PR lands --------------------------
+
+    def _stage_pr(self):
+        self.checkout()
+        self.request("upstream_pr", {"project": "embedded", "title": "t", "body": "b"})
+        return self.registry.get("issue-1").upstream_links[0]["pr_number"]
+
+    def test_upstream_merge_notifies_with_mainline_sha_once(self):
+        num = self._stage_pr()
+        self.embedded_forge.merge(num, merge_sha="mainlinesha99")
+        self.rec.tick()
+        [merged] = self.inbox_kinds("upstream_merged")
+        self.assertEqual(merged.payload["merge_sha"], "mainlinesha99")
+        self.assertIn("mainlinesha99"[:12], merged.payload["text"])  # shown short
+        link = self.registry.get("issue-1").upstream_links[0]
+        self.assertTrue(link["merged"])
+        # A second tick does not re-notify.
+        self.rec.tick()
+        self.assertEqual(len(self.inbox_kinds("upstream_merged")), 1)
+
+    def test_upstream_close_unmerged_notifies_once(self):
+        num = self._stage_pr()
+        self.embedded_forge.close(num)  # closed, not merged
+        self.rec.tick()
+        [closed] = self.inbox_kinds("upstream_pr_closed")
+        self.assertIn("closed", closed.payload["text"].lower())
+        self.rec.tick()
+        self.assertEqual(len(self.inbox_kinds("upstream_pr_closed")), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

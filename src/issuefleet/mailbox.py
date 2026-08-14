@@ -14,9 +14,11 @@ the cross-process handoff relies only on rename() atomicity. Messages are
 never deleted here — consumed/archived files are the durable audit trail and
 get archived wholesale at teardown.
 
-Outbox kinds: status, question, ready, file_issue, ack.
+Outbox kinds: status, question, ready, file_issue, ack, upstream_checkout,
+              upstream_pr.
 Inbox kinds:  reply, pr_feedback, pr_closed, ci_status, merge_conflict, info,
-              shutdown, unclaimed.
+              shutdown, unclaimed, upstream_ready, upstream_pr_opened,
+              upstream_merged, upstream_pr_closed.
 """
 
 from __future__ import annotations
@@ -35,10 +37,21 @@ _NAME_RE = re.compile(r"^(\d{6})-([a-z_]+)-([0-9a-f]+)\.json$")
 
 # `ack` carries a UX acknowledgment emoji (⚙️/✅) the worker emits to close
 # the 👀→⚙️→✅ loop; relayed only into agent sessions, never as a comment.
-OUTBOX_KINDS = ("status", "question", "ready", "file_issue", "ack")
+# `upstream_checkout` / `upstream_pr` are the cross-project verbs: the worker
+# asks the orchestrator to set up a nested clone of a sibling fleet project,
+# then to push it and open a PR (the worker has no forge credential of its own).
+OUTBOX_KINDS = (
+    "status", "question", "ready", "file_issue", "ack",
+    "upstream_checkout", "upstream_pr",
+)
 INBOX_KINDS = (
     "reply", "pr_feedback", "pr_closed", "ci_status", "merge_conflict", "info",
     "shutdown", "unclaimed",
+    # Replies to / events on the cross-project verbs above. All are waking (see
+    # turns._WAKING_KINDS): the first two unblock a worker idling on its own
+    # request, the last two report an upstream PR landing/closing so it can
+    # repoint its pin.
+    "upstream_ready", "upstream_pr_opened", "upstream_merged", "upstream_pr_closed",
 )
 
 

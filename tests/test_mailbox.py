@@ -55,6 +55,14 @@ class MailboxTest(unittest.TestCase):
         m = self.mb.put_outbox("file_issue", {"title": "New ticket"})
         self.assertEqual(self.mb.pending_outbox()[0].id, m.id)
 
+    def test_upstream_kinds_are_accepted(self):
+        # Cross-project verbs (FUG-115) and their reply kinds must round-trip.
+        for kind in ("upstream_checkout", "upstream_pr"):
+            self.assertEqual(self.mb.put_outbox(kind, {"project": "e"}).kind, kind)
+        for kind in ("upstream_ready", "upstream_pr_opened", "upstream_merged",
+                     "upstream_pr_closed"):
+            self.assertEqual(self.mb.put_inbox(kind, {"project": "e"}).kind, kind)
+
     def test_unknown_kinds_rejected(self):
         with self.assertRaises(MailboxError):
             self.mb.put_outbox("reply", {})  # reply is an inbox kind

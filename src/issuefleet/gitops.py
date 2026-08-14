@@ -148,6 +148,63 @@ class Gitops:
         remote = f"origin/{base_ref}"
         return remote if self._ref_exists(repo, f"refs/remotes/{remote}") else base_ref
 
+    def create_upstream_checkout(
+        self,
+        source_repo: Path,
+        dest: Path,
+        branch: str,
+        base_ref: str,
+        fetch_url: str | None = None,
+        auth_header: str | None = None,
+    ) -> str:
+        """Make an editable, self-contained clone of a sibling fleet project
+        (``source_repo``, another checkout the daemon owns) at ``dest`` — which
+        lives *inside* a worker's worktree, so the worker container sees it and
+        can branch/commit/rebase/diff it fully offline.
+
+        A local clone (hardlinked objects — cheap, and safe: git never rewrites
+        an existing object file) rather than a linked worktree: a linked
+        worktree's ``.git`` points at ``source_repo``'s git dir, which sits
+        outside the container's single mounted worktree and so can't be
+        resolved in-container. A standalone clone carries its own objects under
+        ``dest/.git`` and needs no second mount and no network.
+
+        The clone's ``origin`` initially points at the local source; when a
+        forge URL is given we repoint it there (so ``git remote -v`` shows the
+        real repo) and fetch fresh — ``source_repo``'s own ``main`` is frozen at
+        the daemon's clone time (git won't fast-forward a checked-out branch),
+        so branching off a fresh ``origin/<base_ref>`` requires this fetch. A
+        fetch failure is tolerated: we fall back to whatever the local clone
+        already carries. Returns the branch's base commit SHA.
+
+        Idempotent: an existing ``dest`` already on ``branch`` is adopted.
+        """
+        dest = Path(dest)
+        if (dest / ".git").exists():
+            head = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=dest)
+            if head == branch:
+                return _git(["rev-parse", "HEAD"], cwd=dest)
+            raise GitError(
+                f"upstream checkout {dest} exists but is on {head!r}, expected {branch!r}"
+            )
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _git(["clone", "--local", str(source_repo), str(dest)])
+        if fetch_url:
+            try:
+                _git(["remote", "set-url", "origin", fetch_url], cwd=dest)
+                self.fetch(dest, url=fetch_url, auth_header=auth_header)
+            except GitError as e:
+                log.warning("upstream checkout %s: fresh fetch failed (%s); using clone-time refs",
+                            dest, e)
+        base = self._base(dest, base_ref)
+        _git(["checkout", "-b", branch, base], cwd=dest)
+        return _git(["rev-parse", "HEAD"], cwd=dest)
+
+    def rev_parse(self, worktree: Path, ref: str = "HEAD") -> str:
+        """Resolve ``ref`` to a full commit SHA in ``worktree`` — used to report
+        the pushed tip of an upstream checkout back to the worker as a pin."""
+        return _git(["rev-parse", ref], cwd=Path(worktree))
+
     def add_worktree_exclude(self, repo: Path, path: Path, pattern: str) -> None:
         common = Path(_git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=path))
         exclude = common / "info" / "exclude"

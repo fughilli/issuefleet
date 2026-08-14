@@ -77,6 +77,25 @@ def main(argv: list[str] | None = None) -> int:
     pg.add_argument("--project", help="project name/UUID (default: this issue's project)")
     pg.add_argument("--no-project", action="store_true", help="file with no project")
 
+    p = sub.add_parser(
+        "upstream-checkout",
+        help="set up an editable clone of a sibling fleet project, then idle "
+        "until the orchestrator has it ready",
+    )
+    p.add_argument("--project", required=True, help="sibling project name (see your brief)")
+    p.add_argument("--branch", help="branch to cut in the sibling repo (default: derived)")
+
+    p = sub.add_parser(
+        "upstream-pr",
+        help="push your sibling-project change and open/update a PR on it, then "
+        "idle until the orchestrator reports the PR",
+    )
+    p.add_argument("--project", required=True, help="sibling project name you checked out")
+    p.add_argument("--title", required=True)
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--body")
+    g.add_argument("--body-file")
+
     sub.add_parser("inbox", help="show pending inbound messages (peek; the turn loop consumes)")
 
     args = ap.parse_args(argv)
@@ -121,6 +140,25 @@ def main(argv: list[str] | None = None) -> int:
             payload["project"] = args.project
         mb.put_outbox("file_issue", payload)
         print("file-issue queued; the orchestrator will file it and report the key/url back to you")
+    elif args.cmd == "upstream-checkout":
+        payload = {"project": args.project}
+        if args.branch:
+            payload["branch"] = args.branch
+        mb.put_outbox("upstream_checkout", payload)
+        # Idle like `ask`: the orchestrator has to clone the sibling repo host-
+        # side (you have no forge credential), so stop here — you'll be woken
+        # with the checkout path once it's ready.
+        state.phase = turns.PHASE_WAITING
+        state.save(agent_dir)
+        print("upstream-checkout queued; the loop will idle until the checkout is ready")
+    elif args.cmd == "upstream-pr":
+        body = args.body if args.body is not None else Path(args.body_file).read_text()
+        mb.put_outbox(
+            "upstream_pr", {"project": args.project, "title": args.title, "body": body}
+        )
+        state.phase = turns.PHASE_WAITING
+        state.save(agent_dir)
+        print("upstream-pr queued; the loop will idle until the orchestrator reports the PR")
     elif args.cmd == "inbox":
         pending = mb.pending_inbox()
         if not pending:

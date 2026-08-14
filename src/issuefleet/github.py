@@ -54,6 +54,7 @@ def _to_pr(d: dict) -> PullRequest:
         # the PR fetched by get_pr().
         mergeable=d.get("mergeable"),
         mergeable_state=d.get("mergeable_state"),
+        merge_commit_sha=d.get("merge_commit_sha") or "",
     )
 
 

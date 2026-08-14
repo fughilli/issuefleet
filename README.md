@@ -614,6 +614,43 @@ the branch) → kill the tmux session (the `--rm` container exits with it) →
 remove the worktree → on merge only: set the issue's done state and delete
 the branch.
 
+## Cross-project contributions (upstream dependencies)
+
+A fix sometimes needs a change in a *dependency* that the fleet also manages —
+e.g. a worker adding ESP32-C3 support has to patch the vendored `embedded`
+library, which is its own project on the board. The worker can't push or open
+PRs (no credentials), and it can't just make a linked worktree of the sibling
+repo either: a linked worktree's `.git` points outside the one worktree the
+launcher mounts, so it wouldn't resolve in the container. So the orchestrator
+sets up a **self-contained local clone of the sibling inside the worker's
+worktree** and relays the git, exactly as it does for the worker's own PR.
+
+Each worker's brief lists the sibling projects it may contribute to, and gains
+two `agentctl` verbs:
+
+- `agentctl upstream-checkout --project <name> [--branch <b>]` — the
+  orchestrator local-clones that project into `upstream/<name>/` in the
+  worktree (its own hardlinked object store, so the container can branch,
+  commit, rebase, and diff it with no network and no second git mount),
+  refreshes it to current mainline, cuts a branch, git-excludes it (like
+  `.agent/`), and wakes the worker with the path, branch, and base commit. The
+  worker edits and commits there, and can point its own project's dependency
+  pin at the local commit to build and experiment.
+- `agentctl upstream-pr --project <name> --title … --body-file …` — the
+  orchestrator credential-scans the sibling diff (the same gate as `ready`),
+  pushes the branch to the sibling forge, opens or updates a PR there, and wakes
+  the worker with the PR url and the *pushed* head SHA — the CI-testable commit
+  to pin while the PR is in review.
+
+Both verbs idle the worker (like `ask`) until the orchestrator replies. Each
+tick the daemon then polls the upstream PRs it staged; when one **merges** it
+wakes the dependent worker with the canonical `merge_commit_sha` so it can
+repoint its pin from the experimental SHA to real mainline *before its own PR
+lands* (and it's told, too, if the upstream PR is closed unmerged). The links
+live on the worker's registry record, so they survive a daemon restart. The
+sibling clone is torn down with the worktree; the upstream PR is an ordinary PR
+that stands on its own.
+
 ## Watching, steering, stopping
 
 ```sh

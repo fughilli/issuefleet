@@ -229,9 +229,11 @@ class FakeForge:
         self.fail_next_open = 0
         self._next = 100
 
-    def merge(self, number: int) -> None:
-        self.prs[number].state = "closed"
-        self.prs[number].merged = True
+    def merge(self, number: int, merge_sha: str | None = None) -> None:
+        pr = self.prs[number]
+        pr.state = "closed"
+        pr.merged = True
+        pr.merge_commit_sha = merge_sha or f"mergesha-{number}"
 
     def close(self, number: int) -> None:  # test helper: simulate a human close
         self.prs[number].state = "closed"
@@ -343,6 +345,11 @@ class FakeGit:
         self.cloned: list[tuple] = []  # (url, path) per clone
         self._repos: set[Path] = set()  # paths that are (now) real clones
         self.remote = "https://github.example/owner/name.git"
+        # Cross-project (upstream) support.
+        self.upstream_checkouts: list[dict] = []  # one per create_upstream_checkout
+        self.upstream_base_sha = "basesha000000"  # what create_upstream_checkout returns
+        self.head_sha = "headsha000000"  # what rev_parse(HEAD) returns
+        self.fail_next_upstream = 0
 
     def is_repo(self, repo: Path) -> bool:
         return Path(repo) in self._repos
@@ -368,6 +375,25 @@ class FakeGit:
 
     def add_worktree_exclude(self, repo: Path, path: Path, pattern: str) -> None:
         self.excludes.append((str(path), pattern))
+
+    def create_upstream_checkout(
+        self, source_repo: Path, dest: Path, branch: str, base_ref: str,
+        fetch_url=None, auth_header=None,
+    ) -> str:
+        if self.fail_next_upstream > 0:
+            self.fail_next_upstream -= 1
+            from issuefleet.gitops import GitError
+
+            raise GitError("fake upstream checkout failure")
+        Path(dest).mkdir(parents=True, exist_ok=True)
+        self.upstream_checkouts.append(
+            {"source": str(source_repo), "dest": str(dest), "branch": branch,
+             "base_ref": base_ref, "fetch_url": fetch_url}
+        )
+        return self.upstream_base_sha
+
+    def rev_parse(self, worktree: Path, ref: str = "HEAD") -> str:
+        return self.head_sha
 
     def remove_worktree(self, repo: Path, path: Path, branch: str) -> None:
         self.removed.append(str(path))

@@ -355,6 +355,58 @@ class GitopsTest(unittest.TestCase):
                                   capture_output=True, text=True).stdout
         self.assertNotIn("agent/fug-1-x", in_other)
 
+    def test_create_upstream_checkout_is_self_contained_and_offline(self):
+        # A sibling project's change is staged in a standalone local clone
+        # nested inside the worker's worktree, so the container can branch and
+        # commit it with no network and no second git mount.
+        dest = self.wt / "upstream" / "embedded"  # inside the worker worktree
+        base_sha = self.git.create_upstream_checkout(
+            self.repo, dest, "agent/fug-1-embedded", "main"
+        )
+        self.assertTrue((dest / ".git").exists())
+        self.assertTrue((dest / "README.md").is_file())
+        head = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=dest,
+                              capture_output=True, text=True).stdout.strip()
+        self.assertEqual(head, "agent/fug-1-embedded")
+        self.assertEqual(self.git.rev_parse(dest, "HEAD"), base_sha)
+        # Committing and pushing to an explicit forge URL works from the nested
+        # clone exactly like the primary worktree (the relayed upstream PR).
+        (dest / "patch.txt").write_text("upstream change")
+        run(["git", "add", "."], cwd=dest)
+        run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "up"], cwd=dest)
+        self.assertTrue(self.git.has_commits_ahead(dest, "main"))
+        other = Path(self.tmp.name) / "embedded.git"
+        run(["git", "init", "--bare", "-b", "main", str(other)])
+        self.git.push(dest, "agent/fug-1-embedded", url=str(other), auth_header="basic zzz")
+        self.assertIn(
+            "agent/fug-1-embedded",
+            subprocess.run(["git", "ls-remote", "--heads", str(other)],
+                           capture_output=True, text=True).stdout,
+        )
+
+    def test_create_upstream_checkout_branches_off_fresh_base(self):
+        # The nested clone must branch off the sibling's CURRENT mainline, not
+        # the daemon clone's frozen local `main`. Advance origin/main, then check
+        # out with a fresh fetch: the branch carries the new commit.
+        other = Path(self.tmp.name) / "other"
+        run(["git", "clone", str(self.origin), str(other)])
+        (other / "NEW.txt").write_text("fresh\n")
+        run(["git", "add", "."], cwd=other)
+        run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "advance"],
+            cwd=other)
+        run(["git", "push", "origin", "main"], cwd=other)
+
+        dest = self.wt / "upstream" / "embedded"
+        self.git.create_upstream_checkout(
+            self.repo, dest, "agent/fug-1-embedded", "main",
+            fetch_url=str(self.origin),
+        )
+        self.assertTrue((dest / "NEW.txt").is_file())  # off fresh origin/main
+        # Idempotent adoption; a different branch on the same dir is an error.
+        self.git.create_upstream_checkout(self.repo, dest, "agent/fug-1-embedded", "main")
+        with self.assertRaisesRegex(GitError, "expected"):
+            self.git.create_upstream_checkout(self.repo, dest, "agent/other", "main")
+
     def test_remote_url(self):
         self.assertEqual(self.git.remote_url(self.repo), str(self.origin))
 

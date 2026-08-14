@@ -91,6 +91,7 @@ def provision(
     session_uuid: str | None = None,
     turns_taken: int = 0,
     phase: str | None = None,
+    siblings: list[dict] | None = None,
 ) -> str:
     """Create/refresh the .agent dir. Idempotent: an existing state.json is
     preserved (re-adoption after an orchestrator restart must not reset the
@@ -110,7 +111,7 @@ def provision(
     bin_dir.mkdir(parents=True, exist_ok=True)
     Mailbox(agent_dir / "mailbox").ensure()
     (agent_dir / "logs").mkdir(exist_ok=True)
-    (agent_dir / "brief.md").write_text(render_brief(issue, branch, base_ref))
+    (agent_dir / "brief.md").write_text(render_brief(issue, branch, base_ref, siblings))
     stage_runtime(bin_dir)
 
     state_path = agent_dir / "state.json"
