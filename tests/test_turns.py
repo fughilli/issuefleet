@@ -162,13 +162,13 @@ class TurnsTest(unittest.TestCase):
         self.assertEqual(self.decide().exit_code, turns.EXIT_IDLE)
         self.mb.put_inbox(
             "upstream_ready",
-            {"ok": True, "project": "embedded", "path": "upstream/embedded",
-             "text": "clone ready at upstream/embedded"},
+            {"ok": True, "project": "embedded", "path": "siblings/embedded",
+             "text": "worktree ready at siblings/embedded"},
         )
         d = self.decide()
         self.assertEqual(d.exit_code, turns.EXIT_CONTINUE)
         self.assertIn("Upstream checkout ready (embedded)", d.prompt)
-        self.assertIn("upstream/embedded", d.prompt)
+        self.assertIn("siblings/embedded", d.prompt)
 
     def test_upstream_merged_wakes_the_agent_to_repoint(self):
         state = self.reload()

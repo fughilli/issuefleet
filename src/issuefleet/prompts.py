@@ -62,10 +62,9 @@ Read the codebase as needed, form a concrete plan, and post it with
 
 # Appended to the brief when this issue's fix needs a change in a *sibling*
 # fleet project (a dependency the fleet also manages). The whole point: you
-# can't push or open PRs yourself, and a linked worktree of another repo
-# wouldn't resolve its git dir in your container — so the orchestrator sets up
-# a self-contained clone of the sibling inside your worktree that you can edit
-# offline, and relays the push/PR for you.
+# can't push or open PRs yourself — so the orchestrator opens a git worktree of
+# the sibling inside your own worktree that you can edit offline, and relays the
+# push/PR for you.
 _CROSS_PROJECT_SECTION = """
 ## Contributing to other fleet projects (upstream dependencies)
 
@@ -77,11 +76,12 @@ Sibling projects you can contribute to:
 {sibling_list}
 
 - `.agent/bin/agentctl upstream-checkout --project <name> [--branch <b>]` —
-  the orchestrator makes an editable, self-contained clone of that project at
-  `upstream/<name>/` in your worktree (its own git objects; no network needed),
-  cuts a branch off the latest base, and wakes you with the path, branch, and
-  base commit. Edit and commit there like any repo. To experiment, point this
-  project's dependency pin at the local commit and build.
+  the orchestrator opens a git worktree of that project at `siblings/<name>/`
+  in your worktree, cuts a branch off the latest base, and wakes you with the
+  path, branch, and base commit. Edit and commit there like any repo (no
+  network needed); its build cache is shared with the dependency, so builds
+  start warm. To experiment, point this project's dependency pin at the local
+  commit and build.
 - `.agent/bin/agentctl upstream-pr --project <name> --title "<t>" --body-file <f>`
   — when the sibling change is committed, this pushes that branch and opens (or
   updates) a PR on the sibling repo, then wakes you with the PR url and the

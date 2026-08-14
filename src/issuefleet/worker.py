@@ -109,6 +109,10 @@ def provision(
     agent_dir = Path(worktree) / ".agent"
     bin_dir = agent_dir / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
+    # Pre-create the (empty) siblings dir every worker gets, into which the
+    # orchestrator opens linked worktrees of sibling projects on request
+    # (FUG-115). Git-excluded by the caller alongside `.agent/`.
+    (Path(worktree) / "siblings").mkdir(exist_ok=True)
     Mailbox(agent_dir / "mailbox").ensure()
     (agent_dir / "logs").mkdir(exist_ok=True)
     (agent_dir / "brief.md").write_text(render_brief(issue, branch, base_ref, siblings))

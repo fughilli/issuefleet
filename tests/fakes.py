@@ -345,11 +345,9 @@ class FakeGit:
         self.cloned: list[tuple] = []  # (url, path) per clone
         self._repos: set[Path] = set()  # paths that are (now) real clones
         self.remote = "https://github.example/owner/name.git"
-        # Cross-project (upstream) support.
-        self.upstream_checkouts: list[dict] = []  # one per create_upstream_checkout
-        self.upstream_base_sha = "basesha000000"  # what create_upstream_checkout returns
+        self.worktrees: list[dict] = []  # one per create_worktree (repo, branch, path)
+        self.fail_next_worktree = 0
         self.head_sha = "headsha000000"  # what rev_parse(HEAD) returns
-        self.fail_next_upstream = 0
 
     def is_repo(self, repo: Path) -> bool:
         return Path(repo) in self._repos
@@ -371,26 +369,16 @@ class FakeGit:
         self.fetched.append((str(repo), url, auth_header))
 
     def create_worktree(self, repo: Path, branch: str, base_ref: str, path: Path) -> None:
+        if self.fail_next_worktree > 0:
+            self.fail_next_worktree -= 1
+            from issuefleet.gitops import GitError
+
+            raise GitError("fake create_worktree failure")
         Path(path).mkdir(parents=True, exist_ok=True)
+        self.worktrees.append({"repo": str(repo), "branch": branch, "path": str(path)})
 
     def add_worktree_exclude(self, repo: Path, path: Path, pattern: str) -> None:
         self.excludes.append((str(path), pattern))
-
-    def create_upstream_checkout(
-        self, source_repo: Path, dest: Path, branch: str, base_ref: str,
-        fetch_url=None, auth_header=None,
-    ) -> str:
-        if self.fail_next_upstream > 0:
-            self.fail_next_upstream -= 1
-            from issuefleet.gitops import GitError
-
-            raise GitError("fake upstream checkout failure")
-        Path(dest).mkdir(parents=True, exist_ok=True)
-        self.upstream_checkouts.append(
-            {"source": str(source_repo), "dest": str(dest), "branch": branch,
-             "base_ref": base_ref, "fetch_url": fetch_url}
-        )
-        return self.upstream_base_sha
 
     def rev_parse(self, worktree: Path, ref: str = "HEAD") -> str:
         return self.head_sha

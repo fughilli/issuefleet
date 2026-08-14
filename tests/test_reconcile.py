@@ -1206,27 +1206,27 @@ class CrossProjectTest(unittest.TestCase):
         self.assertIn("embedded", brief)
         self.assertNotIn("**splanc**", brief)  # not its own project
 
+    def test_claim_precreates_and_excludes_siblings_dir(self):
+        self.assertTrue((Path(self.worker.worktree) / "siblings").is_dir())
+        self.assertIn((str(Path(self.worker.worktree)), "siblings/"), self.git.excludes)
+
     # -- checkout ---------------------------------------------------------
 
-    def test_upstream_checkout_sets_up_a_nested_clone(self):
+    def test_upstream_checkout_opens_a_worktree_of_the_sibling(self):
         self.checkout()
-        # The sibling repo was cloned into the worker's worktree and excluded.
-        [ck] = self.git.upstream_checkouts
-        self.assertEqual(ck["source"], str(self.cfg.project("embedded").repo))
-        self.assertTrue(ck["dest"].endswith("upstream/embedded"))
-        self.assertIn(
-            (str(Path(self.worker.worktree)), "upstream/embedded/"), self.git.excludes
-        )
+        # A linked worktree of the sibling repo was opened at siblings/embedded.
+        wt = next(w for w in self.git.worktrees if w["path"].endswith("siblings/embedded"))
+        self.assertEqual(wt["repo"], str(self.cfg.project("embedded").repo))
         # A link is recorded on the worker, and the agent is woken with the path.
         self.worker = self.registry.get("issue-1")
         [link] = self.worker.upstream_links
         self.assertEqual(link["project"], "embedded")
-        self.assertEqual(link["path"], "upstream/embedded")
-        self.assertEqual(link["base_sha"], self.git.upstream_base_sha)
+        self.assertEqual(link["path"], "siblings/embedded")
+        self.assertEqual(link["base_sha"], self.git.head_sha)
         self.assertIsNone(link["pr_number"])
         [ready] = self.inbox_kinds("upstream_ready")
         self.assertTrue(ready.payload["ok"])
-        self.assertIn("upstream/embedded", ready.payload["text"])
+        self.assertIn("siblings/embedded", ready.payload["text"])
         # The request was archived, not left to retry.
         self.assertEqual(self.mailbox().pending_outbox(), [])
 
@@ -1244,7 +1244,7 @@ class CrossProjectTest(unittest.TestCase):
         self.assertIn("your own project", ready.payload["text"])
 
     def test_checkout_failure_is_reported(self):
-        self.git.fail_next_upstream = 1
+        self.git.fail_next_worktree = 1
         self.checkout()
         [ready] = self.inbox_kinds("upstream_ready")
         self.assertFalse(ready.payload["ok"])
@@ -1324,6 +1324,18 @@ class CrossProjectTest(unittest.TestCase):
         self.assertIn("closed", closed.payload["text"].lower())
         self.rec.tick()
         self.assertEqual(len(self.inbox_kinds("upstream_pr_closed")), 1)
+
+    # -- teardown ---------------------------------------------------------
+
+    def test_teardown_deregisters_sibling_worktrees(self):
+        self.checkout()
+        sib_path = str(Path(self.worker.worktree) / "siblings" / "embedded")
+        # Close the driving issue: the worker winds down this tick.
+        self.tracker.issues["issue-1"].state_type = "completed"
+        self.rec.tick()
+        self.assertIn(sib_path, self.git.removed)  # sibling worktree deregistered
+        self.assertIn(self.worker.worktree, self.git.removed)  # and the main one
+        self.assertIsNone(self.registry.get("issue-1"))
 
 
 if __name__ == "__main__":

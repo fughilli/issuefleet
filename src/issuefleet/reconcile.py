@@ -442,6 +442,7 @@ class Reconciler:
             self.runner.stop(rec)
         except Exception:
             log.exception("worker %s: stopping the session for release failed", rec.issue_key)
+        self._remove_upstream_worktrees(rec)  # before the dir they live in goes
         try:
             self.git.remove_worktree(Path(rec.repo), Path(rec.worktree), rec.branch)
         except Exception:
@@ -522,6 +523,7 @@ class Reconciler:
                         rec.issue_key, e)
             sync_status = "up-to-date"
         self.git.add_worktree_exclude(project.repo, worktree, ".agent/")
+        self.git.add_worktree_exclude(project.repo, worktree, "siblings/")
         for rel in worker_mod.inherit_repo_files(project.repo, worktree, self.cfg.copy_from_repo):
             self.git.add_worktree_exclude(project.repo, worktree, rel)
         # Resume the same Claude session: turns_taken > 0 makes the loop use
@@ -1156,11 +1158,15 @@ class Reconciler:
     def _handle_upstream_checkout(
         self, rec: WorkerRecord, project: ProjectConfig, mailbox: Mailbox, msg
     ) -> None:
-        """Set up an editable clone of a sibling fleet project inside this
-        worker's worktree (see gitops.create_upstream_checkout) and wake the
-        worker with the path/branch. A bad request (unknown project, git dead
-        end) is reported back and archived rather than left pending — retrying a
-        request that can never succeed would wedge the outbox behind it."""
+        """Open a linked worktree of a sibling fleet project under this worker's
+        ``siblings/<name>/`` and wake the worker with the path/branch. It's a
+        real worktree of the sibling's clone (not a fresh clone), so it shares
+        that repo's git-common-dir — the worker container reaches it because the
+        runner same-path-``--mount``s each sibling's ``.git`` (config
+        ``mount_sibling_git``), and its shared Bazel cache is warm for free
+        (FUG-24). A bad request (unknown project, git dead end) is reported back
+        and archived rather than left pending — retrying something that can never
+        succeed would wedge the outbox behind it."""
         p = msg.payload
         name = str(p.get("project") or "")
 
@@ -1176,11 +1182,10 @@ class Reconciler:
         if sibling.name == project.name:
             return fail("That is your own project — work in this worktree directly.")
 
-        # Refresh the sibling clone so the checkout branches off current
+        # Refresh the sibling clone so the worktree branches off current
         # mainline, not the daemon's clone-time base. Best-effort: a fetch blip
         # falls back to whatever refs the clone already carries.
         forge = self.forges.get(sibling.name)
-        fetch_url = fetch_auth = None
         if forge is not None:
             fetch_url, fetch_auth = forge.push_spec()
             try:
@@ -1192,26 +1197,21 @@ class Reconciler:
         branch = p.get("branch") or sibling.branch_template.format(
             key=rec.issue_key.lower(), slug=slugify(rec.issue_title)
         )
-        rel = f"upstream/{sibling.name}"
+        rel = f"siblings/{sibling.name}"
         dest = Path(rec.worktree) / rel
         try:
-            base_sha = self.git.create_upstream_checkout(
-                Path(sibling.repo), dest, branch, sibling.base_ref,
-                fetch_url=fetch_url, auth_header=fetch_auth,
-            )
+            self.git.create_worktree(Path(sibling.repo), branch, sibling.base_ref, dest)
+            base_sha = self.git.rev_parse(dest, "HEAD")
         except gitops.GitError as e:
             return fail(f"Could not set up the checkout: {e}")
 
-        # Exclude it from the host worktree so the worker's own `git add` never
-        # sweeps the nested clone into its PR (same mechanism as `.agent/`).
-        self.git.add_worktree_exclude(project.repo, Path(rec.worktree), rel + "/")
         link = new_upstream_link(sibling.name, branch, rel, sibling.base_ref, base_sha)
         rec.upstream_links = [
             l for l in rec.upstream_links if l.get("project") != sibling.name
         ] + [link]
         rec.touch()
         self.registry.save()
-        log.info("worker %s: upstream checkout of %s ready at %s (branch %s)",
+        log.info("worker %s: upstream worktree of %s ready at %s (branch %s)",
                  rec.issue_key, sibling.name, rel, branch)
         mailbox.ensure().put_inbox(
             "upstream_ready",
@@ -1219,11 +1219,12 @@ class Reconciler:
                 "ok": True, "project": sibling.name, "path": rel, "branch": branch,
                 "base_ref": sibling.base_ref, "base_sha": base_sha,
                 "text": (
-                    f"Your editable clone of `{sibling.name}` is ready at `{rel}/`, on branch "
+                    f"Your editable worktree of `{sibling.name}` is ready at `{rel}/`, on branch "
                     f"`{branch}` cut from `{sibling.base_ref}` at {base_sha[:12]}. Edit and "
                     f"commit there with plain git (e.g. `git -C {rel} add -A && git -C {rel} "
-                    "commit`). To experiment, point this project's pin for it at that local "
-                    "commit and build. When the change is committed, run `agentctl upstream-pr "
+                    "commit`); its build cache is shared with the dependency, so builds start "
+                    "warm. To experiment, point this project's pin for it at that local commit "
+                    "and build. When the change is committed, run `agentctl upstream-pr "
                     f"--project {sibling.name} --title \"...\" --body-file <f>` to push it and "
                     "open a PR."
                 ),
@@ -1847,6 +1848,24 @@ class Reconciler:
             rec.touch()
             self.registry.save()
 
+    def _remove_upstream_worktrees(self, rec: WorkerRecord) -> None:
+        """Deregister a worker's sibling worktrees from their own repos, before
+        the main worktree (which physically contains them under ``siblings/``) is
+        removed — otherwise each sibling repo keeps a stale worktree registration
+        pointing at a deleted directory. Best-effort per link; teardown must
+        complete regardless. The staged upstream branch and its PR are left
+        alone: the PR stands on its own."""
+        for link in rec.upstream_links:
+            sibling = self._sibling_project(str(link.get("project") or ""))
+            if sibling is None:
+                continue
+            path = Path(rec.worktree) / str(link.get("path") or "")
+            try:
+                self.git.remove_worktree(Path(sibling.repo), path, str(link.get("branch") or ""))
+            except Exception:
+                log.exception("worker %s: removing sibling worktree for %s failed",
+                              rec.issue_key, link.get("project"))
+
     # -------------------------------------------------------------- teardown
 
     def _wind_down(
@@ -1882,6 +1901,7 @@ class Reconciler:
             self.runner.stop(rec)
         except Exception:
             log.exception("worker %s: stopping the session failed", rec.issue_key)
+        self._remove_upstream_worktrees(rec)  # before the dir they live in goes
         try:
             self.git.remove_worktree(Path(rec.repo), Path(rec.worktree), rec.branch)
         except Exception:
@@ -1992,6 +2012,10 @@ class Reconciler:
             log.warning("[%s] branch sync failed (%s); using the local branch", issue.key, e)
             sync_status = "up-to-date"
         self.git.add_worktree_exclude(project.repo, worktree, ".agent/")
+        # Sibling worktrees (agentctl upstream-checkout) land under siblings/;
+        # exclude the whole dir once so the worker's own `git add` never sweeps
+        # a nested sibling checkout into its PR.
+        self.git.add_worktree_exclude(project.repo, worktree, "siblings/")
         for rel in worker_mod.inherit_repo_files(project.repo, worktree, self.cfg.copy_from_repo):
             self.git.add_worktree_exclude(project.repo, worktree, rel)
         session_uuid = worker_mod.provision(

@@ -66,6 +66,12 @@ class ProvisionTest(unittest.TestCase):
         brief = (self.wt / ".agent" / "brief.md").read_text()
         self.assertNotIn("Contributing to other fleet projects", brief)
 
+    def test_precreates_empty_siblings_dir(self):
+        provision(self.wt, _issue(), "agent/fug-1-x", "main", self.cfg)
+        siblings = self.wt / "siblings"
+        self.assertTrue(siblings.is_dir())
+        self.assertEqual(list(siblings.iterdir()), [])  # empty until a checkout
+
     def test_existing_state_is_preserved(self):
         provision(self.wt, _issue(), "agent/fug-1-x", "main", self.cfg, session_uuid="first")
         # A re-provision (restart adoption) must not reset the session or seed.

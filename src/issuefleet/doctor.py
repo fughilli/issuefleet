@@ -68,8 +68,12 @@ def _check_tools(cfg: Config) -> list[Check]:
 def _check_launcher_flags(cfg: Config) -> list[Check]:
     """Every configured launcher flag must be one the installed launcher
     understands — an unknown flag aborts every worker launch. Probed via
-    `--help`, which is side-effect-free."""
-    if not cfg.launcher_args:
+    `--help`, which is side-effect-free. Also verifies `--mount` when
+    cross-project sibling mounting is active (FUG-115): the runner emits a
+    same-path `--mount <sibling-repo>/.git` per sibling, so a launcher that
+    doesn't know the flag would break every worker in a multi-project fleet."""
+    needs_mount = cfg.mount_sibling_git and len(cfg.projects) > 1
+    if not cfg.launcher_args and not needs_mount:
         return []
     launcher = shutil.which(cfg.claude_container)
     if launcher is None:
@@ -95,6 +99,20 @@ def _check_launcher_flags(cfg: Config) -> list[Check]:
                     f"launcher flag {name}",
                     f"not in {cfg.claude_container} --help — launcher too old? "
                     "Upgrade it or remove the flag from [agent] launcher_args",
+                )
+            )
+    if needs_mount:
+        if "--mount" in help_text:
+            out.append(Check(OK, "launcher flag --mount (sibling mounts)"))
+        else:
+            out.append(
+                Check(
+                    FAIL,
+                    "launcher flag --mount",
+                    f"[agent] mount_sibling_git is on and this is a multi-project fleet, so "
+                    f"workers launch with --mount <sibling>/.git — but {cfg.claude_container} "
+                    "--help has no --mount. Upgrade the launcher, or set mount_sibling_git = "
+                    "false to disable cross-project checkouts",
                 )
             )
     return out

@@ -88,8 +88,35 @@ class TmuxRunner:
         # Launcher flags must precede the command: the launcher treats the
         # first non-option argument as the start of the in-container command.
         cmd += list(config.launcher_args)
+        cmd += self._sibling_mount_args(rec, config)
         cmd += ["/workspace/.agent/bin/turnloop", "run"]
         return cmd
+
+    @staticmethod
+    def _sibling_mount_args(rec: WorkerRecord, config: Config) -> list[str]:
+        """Same-path `--mount` flags for every sibling project's git-common-dir,
+        so `agentctl upstream-checkout` can open a linked worktree of a sibling
+        inside `/workspace/siblings/<name>` and have its absolute `.git` pointer
+        resolve in-container (the launcher only mounts the `-w` worktree's own
+        repo). We mount the sibling clone's `.git` at its identical host path —
+        which is also what makes its shared Bazel cache under `<.git>/bazel-cache`
+        reachable and warm. All siblings are mounted up front (the container
+        starts once, before any checkout), so which one a worker actually uses is
+        decided later with no relaunch.
+
+        Empty unless enabled and there is more than one project: a single-project
+        or opt-out fleet emits nothing and runs on any launcher. A sibling whose
+        clone isn't on disk yet is skipped (it can't be checked out anyway)."""
+        if not config.mount_sibling_git:
+            return []
+        args: list[str] = []
+        for p in config.projects:
+            if p.name == rec.project:
+                continue
+            gitdir = Path(p.repo) / ".git"
+            if gitdir.is_dir():
+                args += ["--mount", str(gitdir)]
+        return args
 
     def log_path(self, rec: WorkerRecord) -> Path:
         return self.log_dir / f"{rec.tmux_session}.log"
