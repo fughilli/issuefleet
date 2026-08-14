@@ -695,6 +695,18 @@ to un-claim. Stopping the daemon never stops the agents — they live in
 detached tmux sessions; a restarted daemon re-adopts the fleet from the
 registry.
 
+A worker runs in a *linked* worktree whose `.git` points at the shared repo's
+git-common-dir — a host path the launcher must bind-mount into the container
+at its identical location. If that mount is ever lost on a restart (observed:
+only `/workspace` came up mounted), every git command inside fails with "not a
+git repository" while the session still reads as live, so nothing notices and
+the worker wedges. Two guards close this: before a restart the daemon runs
+`git worktree repair` on the worktree (idempotent — re-links a stale
+admin-gitdir pointer), and the in-container turn loop runs a git preflight at
+startup that exits the worker if git is unusable — so the orchestrator
+relaunches it with a fresh mount (self-healing a transient miss) or, if it
+persists, parks it with a crash report rather than a confused agent.
+
 ## Running persistently
 
 **macOS (launchd)** — edit paths in `deploy/com.issuefleet.daemon.plist`, then:

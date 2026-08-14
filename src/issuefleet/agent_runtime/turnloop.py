@@ -26,6 +26,11 @@ from issuefleet.mailbox import Mailbox
 
 MAX_CLAUDE_RETRIES = 3
 MAX_NOOP_TURNS = 2  # continuation turns with no output/commit before auto-idle
+# The container may still be settling its bind mounts when the loop starts;
+# retry the git preflight a few times before declaring the worktree broken so
+# a slow-mounting filesystem doesn't trip a spurious exit.
+GIT_PREFLIGHT_TRIES = 3
+GIT_PREFLIGHT_SLEEP_S = 2
 
 
 def _git_head(workspace: Path) -> str | None:
@@ -37,6 +42,50 @@ def _git_head(workspace: Path) -> str | None:
         return proc.stdout.strip() if proc.returncode == 0 else None
     except OSError:
         return None
+
+
+def preflight_git(workspace: Path) -> bool:
+    """Is the worktree's git actually usable in *this* container?
+
+    A worker runs in a linked worktree whose ``.git`` is a pointer to the
+    shared repo's git-common-dir — a host path OUTSIDE the ``-w`` mount that
+    the launcher bind-mounts into the container at its identical location. If
+    that mount is missing (observed after a host-crash restart, FUG-116: only
+    ``/workspace`` came up mounted), the pointer resolves to a path that isn't
+    there and every git command fails with "not a git repository" — yet the
+    session is still ``alive`` from the orchestrator's side, so it has no
+    signal and the worker wedges. Resolving ``HEAD`` touches both the admin
+    gitdir and the common object store, so it's a faithful probe.
+
+    Returns True the moment git works; on repeated failure prints a loud,
+    specific diagnostic (naming the unreachable ``.git`` pointer) and returns
+    False, so ``run`` can exit and let the orchestrator relaunch this worker
+    with a fresh mount — a transient miss self-heals, a persistent one climbs
+    to ``max_restarts`` and is reported to the operator, and either beats a
+    confused agent burning turns on git errors.
+    """
+    for attempt in range(1, GIT_PREFLIGHT_TRIES + 1):
+        if _git_head(workspace) is not None:
+            return True
+        try:
+            pointer = (workspace / ".git").read_text().strip()
+        except OSError:
+            pointer = "(no .git file)"
+        print(
+            f"turnloop: git is not usable in {workspace} "
+            f"(attempt {attempt}/{GIT_PREFLIGHT_TRIES}); .git -> {pointer}",
+            flush=True,
+        )
+        if attempt < GIT_PREFLIGHT_TRIES:
+            time.sleep(GIT_PREFLIGHT_SLEEP_S)
+    print(
+        "turnloop: git is broken in this container — the worktree's "
+        "git-common-dir is not mounted (FUG-116: a lost .git mount after a "
+        "host restart). Exiting so the orchestrator relaunches this worker "
+        "with a fresh mount; if it recurs the crash path will report it.",
+        flush=True,
+    )
+    return False
 
 
 def summarize_event(line: str) -> str | None:
@@ -220,6 +269,11 @@ def step(agent_dir: Path) -> int:
 
 
 def run(agent_dir: Path) -> int:
+    # Fail fast (and cleanly) if git isn't usable here: a worker whose
+    # git-common-dir mount was lost on a restart can't commit or rebase, so
+    # exit and let the orchestrator relaunch it rather than wedge (FUG-116).
+    if not preflight_git(agent_dir.parent):
+        return turns.EXIT_ERROR
     failures = 0
     while True:
         code = step(agent_dir)

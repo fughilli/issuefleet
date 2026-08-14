@@ -823,6 +823,17 @@ class ReconcileTest(unittest.TestCase):
         info = [m.payload.get("text", "") for m in self.mailbox().pending_inbox()]
         self.assertTrue(any("fast-forwarded to origin" in t for t in info), info)
 
+    def test_restart_repairs_the_worktree_before_resuming(self):
+        # FUG-116: a restart can leave the worktree's admin-gitdir link stale,
+        # which breaks its git and the relaunched container's mount. Repair it
+        # (idempotently) before the branch sync and relaunch.
+        self.claim_one()
+        w = self.worker()
+        self.git.repaired.clear()
+        self.runner.dead.add(w.tmux_session)
+        self.rec.tick()
+        self.assertEqual(self.git.repaired, [w.worktree])
+
     def test_restart_warns_on_divergence_without_touching_the_branch(self):
         self.claim_one()
         w = self.worker()

@@ -176,6 +176,30 @@ class GitopsTest(unittest.TestCase):
         self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
         self.assertTrue((self.wt / "README.md").is_file())
 
+    def test_repair_worktree_relinks_a_stale_pointer(self):
+        # FUG-116: after a crash the worktree's .git pointer can go stale. A
+        # bogus pointer breaks every git command; repair re-links it from the
+        # admin gitdir and git works again.
+        self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
+        (self.wt / ".git").write_text("gitdir: /nonexistent/bogus\n")
+        broken = subprocess.run(
+            ["git", "status"], cwd=self.wt, capture_output=True, text=True
+        )
+        self.assertNotEqual(broken.returncode, 0)
+        self.git.repair_worktree(self.repo, self.wt)
+        fixed = subprocess.run(
+            ["git", "status"], cwd=self.wt, capture_output=True, text=True
+        )
+        self.assertEqual(fixed.returncode, 0, fixed.stderr)
+
+    def test_repair_worktree_is_a_noop_on_a_healthy_worktree(self):
+        self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
+        before = (self.wt / ".git").read_text()
+        self.git.repair_worktree(self.repo, self.wt)  # must not raise or churn
+        self.assertEqual((self.wt / ".git").read_text(), before)
+        ok = subprocess.run(["git", "status"], cwd=self.wt, capture_output=True, text=True)
+        self.assertEqual(ok.returncode, 0)
+
     def test_exclude_is_per_worktree_not_repo(self):
         self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
         self.git.add_worktree_exclude(self.repo, self.wt, ".agent/")

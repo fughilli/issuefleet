@@ -338,6 +338,7 @@ class FakeGit:
         self.fail_next_push = 0
         self.fetched: list[tuple] = []  # (repo, url, auth_header) per fetch
         self.fail_next_fetch = 0
+        self.repaired: list[str] = []  # worktrees passed to repair_worktree
         self.synced: list[str] = []  # worktrees passed to sync_to_remote / adopt_to_remote
         self.sync_status = "up-to-date"  # what sync_to_remote reports
         self.adopt_status = "up-to-date"  # what adopt_to_remote reports
@@ -382,6 +383,9 @@ class FakeGit:
 
     def rev_parse(self, worktree: Path, ref: str = "HEAD") -> str:
         return self.head_sha
+
+    def repair_worktree(self, repo: Path, path: Path) -> None:
+        self.repaired.append(str(path))
 
     def remove_worktree(self, repo: Path, path: Path, branch: str) -> None:
         self.removed.append(str(path))
