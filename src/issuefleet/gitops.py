@@ -115,6 +115,15 @@ class Gitops:
         path.parent.mkdir(parents=True, exist_ok=True)
         if self._branch_exists(repo, branch):
             _git(["worktree", "add", str(path), branch], cwd=repo)
+        elif self._ref_exists(repo, f"refs/remotes/origin/{branch}"):
+            # Adopt a branch that exists only on the remote (e.g. one an
+            # operator pushed from an interactive session outside issuefleet):
+            # create the local branch tracking origin/<branch> rather than
+            # cutting a fresh one from the base, which would discard that work.
+            _git(
+                ["worktree", "add", "-b", branch, str(path), f"origin/{branch}"],
+                cwd=repo,
+            )
         else:
             _git(["worktree", "add", "-b", branch, str(path), self._base(repo, base_ref)], cwd=repo)
 
@@ -233,6 +242,41 @@ class Gitops:
             _git(["merge", "--ff-only", remote], cwd=worktree)
             return "fast-forwarded"
         return "diverged"
+
+    def adopt_to_remote(self, worktree: Path, branch: str) -> str:
+        """Reconcile a freshly-rebuilt worktree with ``origin/<branch>`` when
+        adopting a branch the operator held. Unlike ``sync_to_remote`` (used on
+        restart, where the worker's own unpushed commits are the side to
+        protect), adoption treats the operator's *pushed* branch as
+        authoritative: after a release the operator owns the branch, and the
+        common reason to adopt is exactly that they advanced it — including
+        rebasing it onto a newer mainline, which force-updates ``origin/<branch>``
+        to a rewritten history that no fast-forward can follow.
+
+        Returns ``"no-remote"``, ``"up-to-date"`` (local already contains the
+        remote — the operator worked in the shared clone without pushing, or
+        nothing moved), ``"fast-forwarded"`` (remote strictly ahead), or
+        ``"reset-to-remote"`` (local and remote diverged — a rebase/force-push —
+        so the worktree is hard-reset onto the operator's branch).
+
+        The pre-adoption local tip is not destroyed: it stays in the branch's
+        reflog (``<branch>@{1}``), and the caller tells the agent, so unpushed
+        pre-release commits are recoverable. Reads only the remote-tracking ref;
+        the caller fetches first.
+        """
+        remote = f"origin/{branch}"
+        if not self._ref_exists(worktree, f"refs/remotes/{remote}"):
+            return "no-remote"
+        if self._is_ancestor(worktree, remote, "HEAD"):
+            return "up-to-date"
+        if self._is_ancestor(worktree, "HEAD", remote):
+            _git(["merge", "--ff-only", remote], cwd=worktree)
+            return "fast-forwarded"
+        # Diverged: the operator rebased or force-updated origin/<branch> after
+        # releasing. Their pushed branch wins; move the worktree (and the branch
+        # ref, which HEAD points at) onto it. The old tip lingers in the reflog.
+        _git(["reset", "--hard", remote], cwd=worktree)
+        return "reset-to-remote"
 
     def push(
         self, worktree: Path, branch: str, url: str | None = None, auth_header: str | None = None

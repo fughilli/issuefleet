@@ -113,6 +113,14 @@ class Git(Protocol):
         "diverged"; never rewrites a diverged branch."""
         ...
 
+    def adopt_to_remote(self, worktree: Path, branch: str) -> str:
+        """Reconcile a rebuilt worktree with origin/<branch> when adopting a
+        branch the operator held: fast-forwards, or on divergence (a rebase/
+        force-push while released) RESETS onto the operator's pushed branch.
+        Returns "no-remote" | "up-to-date" | "fast-forwarded" | "reset-to-remote".
+        The pre-adoption tip survives in the reflog."""
+        ...
+
     def push(self, worktree: Path, branch: str, url=None, auth_header=None) -> None:
         """Push with --force-with-lease (re-submissions may rebase), to the
         forge's HTTPS URL with its scoped token — never the operator's SSH

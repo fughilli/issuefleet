@@ -151,6 +151,12 @@ class DiagnoseTest(unittest.TestCase):
         self.assertEqual(d["case"], "running")
         self.assertFalse(d["needs_reset"])
 
+    def test_released_is_explained_and_not_reset_worthy(self):
+        d = diagnose(self.snap(phase="released", alive=False), max_restarts=3)
+        self.assertEqual(d["case"], "released")
+        self.assertFalse(d["needs_reset"])
+        self.assertIn("branch is yours", d["headline"].lower())
+
 
 class TranscriptTest(unittest.TestCase):
     def setUp(self):
@@ -195,8 +201,14 @@ class DashboardServerTest(unittest.TestCase):
 
         self.stopped: list[str] = []
         self.reset: list[str] = []
+        self.released: list[str] = []
+        self.adopted: list[str] = []
         self.view = FleetView(
-            self.state_dir, stop_cb=self.stopped.append, reset_cb=self.reset.append
+            self.state_dir,
+            stop_cb=self.stopped.append,
+            reset_cb=self.reset.append,
+            release_cb=self.released.append,
+            adopt_cb=self.adopted.append,
         )
         # Never shell to tmux in tests.
         self.view.runner.alive = lambda r: True
@@ -301,6 +313,44 @@ class DashboardServerTest(unittest.TestCase):
         _, body, _ = self.get("/worker/FUG-1")
         self.assertIn("Why it isn't running", body)
         self.assertIn("Reset worker", body)
+
+    def test_release_is_post_only_and_enqueues(self):
+        code, _, _ = self.get("/worker/FUG-1/release")  # GET is not the action
+        self.assertEqual(code, 404)
+        self.assertEqual(self.released, [])
+        code, body, _ = self.get("/worker/FUG-1/release", method="POST")
+        self.assertEqual(code, 200)  # 303 -> followed to the worker page
+        self.assertEqual(self.released, ["FUG-1"])
+        self.assertIn("Release queued", body)
+
+    def test_release_button_shown_for_an_active_worker(self):
+        _, body, _ = self.get("/worker/FUG-1")
+        self.assertIn("Release branch", body)
+        self.assertNotIn("Adopt worker back", body)
+
+    def test_adopt_button_replaces_release_for_a_released_worker(self):
+        # Flip the record to released; the worker page then offers Adopt.
+        reg = Registry(self.state_dir)
+        rec = reg.all()[0]
+        rec.phase = "released"
+        reg.save()
+        _, body, _ = self.get("/worker/FUG-1")
+        self.assertIn("Adopt worker back", body)
+        self.assertNotIn("Release branch", body)
+        self.assertIn("released", body)  # the pill / diagnosis
+        # And the adopt POST enqueues.
+        code, body, _ = self.get("/worker/FUG-1/adopt", method="POST")
+        self.assertEqual(code, 200)
+        self.assertEqual(self.adopted, ["FUG-1"])
+        self.assertIn("Adopt queued", body)
+
+    def test_release_adopt_unknown_worker_does_not_enqueue(self):
+        code, _, _ = self.get("/worker/FUG-999/release", method="POST")
+        self.assertEqual(code, 404)
+        code, _, _ = self.get("/worker/FUG-999/adopt", method="POST")
+        self.assertEqual(code, 404)
+        self.assertEqual(self.released, [])
+        self.assertEqual(self.adopted, [])
 
     def test_html_is_escaped(self):
         # Inject a worker whose title carries markup; it must be escaped.
@@ -442,6 +492,87 @@ class ProjectsDisabledTest(unittest.TestCase):
     def test_add_when_disabled_returns_error(self):
         # add_project on a view with no callback rejects rather than raising.
         self.assertIsNotNone(self.view.add_project({"name": "x"}))
+
+
+class AdoptPageTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state_dir = Path(self.tmp.name)
+        (self.state_dir / "logs").mkdir(exist_ok=True)
+        self.config_path = self.state_dir / "config.toml"
+        self.config_path.write_text(
+            "[[projects]]\n"
+            'name = "splanc"\n'
+            'linear_project = "Splanc"\n'
+            'repo = "/repos/splanc"\n'
+            'claim = { strategy = "agent" }\n'
+        )
+        self.enqueued: list[dict] = []
+        self.results: list[dict] = []
+        self.view = FleetView(
+            self.state_dir,
+            config_path=self.config_path,
+            adopt_branch_cb=self.enqueued.append,
+            adopt_results_cb=lambda: self.results,
+        )
+        self.server = DashboardServer(bind="127.0.0.1", port=0, view=self.view).start()
+        self.base = f"http://127.0.0.1:{self.server.port}"
+
+    def tearDown(self):
+        self.server.stop()
+        self.tmp.cleanup()
+
+    def get(self, path):
+        with urllib.request.urlopen(self.base + path, timeout=5) as resp:
+            return resp.status, resp.read().decode(), resp.geturl()
+
+    def post_form(self, path, fields):
+        data = urllib.parse.urlencode(fields).encode()
+        req = urllib.request.Request(self.base + path, data=data, method="POST")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, resp.read().decode(), resp.geturl()
+
+    def test_index_links_to_adopt(self):
+        _, body, _ = self.get("/")
+        self.assertIn("/adopt", body)
+
+    def test_adopt_page_renders_the_form_with_projects(self):
+        code, body, _ = self.get("/adopt")
+        self.assertEqual(code, 200)
+        self.assertIn("Adopt a branch", body)
+        self.assertIn("splanc", body)  # project option
+        self.assertNotIn("http-equiv='refresh'", body)  # holds a form
+
+    def test_adopt_valid_enqueues(self):
+        code, _, final = self.post_form("/adopt", {
+            "project": "splanc", "issue_key": "FUG-42", "branch": "my-feature",
+        })
+        self.assertEqual(code, 200)  # 303 -> followed to /adopt
+        self.assertIn("/adopt", final)
+        self.assertEqual(self.enqueued, [
+            {"project": "splanc", "issue_key": "FUG-42", "branch": "my-feature"}
+        ])
+
+    def test_adopt_missing_branch_rejected(self):
+        _, _, final = self.post_form("/adopt", {
+            "project": "splanc", "issue_key": "FUG-42", "branch": "",
+        })
+        self.assertIn("error=", final)
+        self.assertEqual(self.enqueued, [])
+
+    def test_adopt_unknown_project_rejected(self):
+        _, _, final = self.post_form("/adopt", {
+            "project": "nope", "issue_key": "FUG-42", "branch": "b",
+        })
+        self.assertIn("error=", final)
+        self.assertEqual(self.enqueued, [])
+
+    def test_adopt_results_rendered(self):
+        self.results.append({"name": "FUG-42", "ok": True,
+                             "detail": "adopted branch 'my-feature'", "ts": 0})
+        _, body, _ = self.get("/adopt")
+        self.assertIn("FUG-42", body)
+        self.assertIn("my-feature", body)
 
 
 if __name__ == "__main__":

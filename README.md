@@ -210,6 +210,8 @@ serves a web UI at `http://<host>:8788/` — the same information as
   summary (raw JSONL one click away).
 - **Projects** (`/projects`): the projects the fleet manages, recent add
   attempts, and a form to **add a new project** (see below).
+- **Adopt a branch** (`/adopt`): a form to hand issuefleet a branch built
+  entirely outside it (see **Release / adopt** below).
 - **JSON API**: `/api/workers` for scripting.
 
 **Stopping a worker** is a mutating action. It is `POST`-only and gated behind
@@ -219,6 +221,40 @@ writer), which stops the container, removes the worktree, and keeps the branch
 + an archived transcript, exactly like `issuefleet stop`. (For a poll-claimed
 issue whose claim rule still matches, the next tick will re-claim it — remove
 the label / advance the state to make a stop stick, same as the CLI.)
+
+**Releasing and adopting a branch** lets you grab a feature branch a worker is
+on, make quick edits in a local session, and hand it back — without the worker
+fighting you (it force-pushes; it commits under you). All three moves are
+`POST`-only, confirm-gated, and go through the reconcile loop like Stop:
+
+- **Release** (`/worker/<KEY>/release`) stops the container and removes the
+  worktree — so the branch is free to check out and edit anywhere — but *keeps
+  the claim*: the registry entry stays in a `released` phase, so no other worker
+  takes the issue and the daemon leaves it alone (it won't restart it or
+  re-claim it). The branch and an archived transcript are kept, and the agent's
+  Claude session id + turn count are remembered.
+- **Adopt** (`/worker/<KEY>/adopt`, shown on a released worker) rebuilds the
+  worktree from that kept branch, reconciles it with `origin/<branch>`,
+  re-provisions preserving the session so the same Claude conversation *resumes*
+  (`--resume`, not a new session), and restarts the container. The agent is
+  handed a note telling it the tree may have changed under it. Reconciliation is
+  robust to the common **release → rebase onto newer mainline → push → adopt**
+  flow: the fetch refreshes both the branch and the base, and because after a
+  release the operator's *pushed* branch is authoritative, adopt fast-forwards
+  when they only appended and **resets onto their branch when they rebased or
+  force-updated it** (a plain fast-forward can't follow rewritten history). The
+  pre-adoption tip is never destroyed — it stays in the branch reflog
+  (`<branch>@{1}`), and the agent is told where to find it.
+- **Adopt a branch** (`/adopt`) does the same for a branch that never had a
+  worker — one you built in an interactive session outside issuefleet. Name the
+  project, the Linear issue to attach it to, and the branch (local to the
+  daemon's clone, or on the remote as `origin/<branch>`); a fresh worker adopts
+  the branch as-is and continues from what's on it. An adopted worker is exempt
+  from the poll-claim un-claim rule (only closing the issue winds it down), so
+  it can ride on an unlabeled issue.
+
+Before adopting, make sure the branch isn't checked out in another worktree —
+git won't let two worktrees hold the same branch.
 
 **Adding a project** (`/projects`) is the other mutating action. Fill in the
 name, Linear project, repo path, an optional `git_url` to clone from, and a
@@ -548,6 +584,7 @@ When the fleet is full, eligible issues wait; `doctor` shows the order.
 | idle | declared done via `agentctl idle` (or parked by the loop after two no-progress turns) | any human reply or feedback |
 | budget-idle | `max_auto_turns` without human contact; posted a status and idling | any human reply (resets the budget clock) |
 | crashed (host-side) | session died `max_restarts`+1 times; reported on the issue | operator intervention (worktree kept for inspection) |
+| released (host-side) | operator released the branch for local edits; container stopped, worktree removed, claim held | adopted back from the dashboard (or the issue closes, dropping the record) |
 
 **Merge conflicts** are watched on the same PR poll. When a submitted PR
 stops merging cleanly (GitHub reports `mergeable: false` because other work

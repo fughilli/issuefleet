@@ -10,7 +10,7 @@ from fakes import FakeForge, FakeGit, FakeRunner, FakeTracker, make_issue
 
 from issuefleet import MARKER_PREFIX, config
 from issuefleet.mailbox import Mailbox
-from issuefleet.model import PHASE_ACTIVE, PHASE_CRASHED
+from issuefleet.model import PHASE_ACTIVE, PHASE_CRASHED, PHASE_RELEASED
 from issuefleet.reconcile import Reconciler, slugify
 from issuefleet.registry import Registry
 
@@ -477,6 +477,160 @@ class ReconcileTest(unittest.TestCase):
         self.rec.enqueue_reset("FUG-404")
         self.rec._drain_reset_requests()  # must not raise
         self.assertIsNotNone(self.worker())
+
+    # -- release / adopt (FUG-113) -----------------------------------------
+
+    def test_release_stops_removes_worktree_and_holds_the_claim(self):
+        w = self.claim_one()
+        self.rec.enqueue_release("fug-1")  # case-insensitive
+        self.assertEqual(self.worker().phase, PHASE_ACTIVE)  # queued only
+        self.rec._drain_release_requests()
+        rec = self.worker()
+        self.assertIsNotNone(rec)  # registry entry KEPT (unlike stop)
+        self.assertEqual(rec.phase, PHASE_RELEASED)
+        self.assertIsNotNone(rec.released_at)
+        self.assertEqual(self.runner.stopped, [w.tmux_session])
+        self.assertEqual(self.git.removed, [w.worktree])
+        self.assertEqual(self.git.deleted_remote, [])  # branch kept
+        # It survives a reload (went through the registry save).
+        self.registry.reload()
+        self.assertEqual(self.worker().phase, PHASE_RELEASED)
+        # The operator is told on the issue.
+        self.assertTrue(any("Released" in b for _, b in self.tracker.posted))
+
+    def test_released_worker_is_not_serviced_or_restarted(self):
+        w = self.claim_one()
+        self.rec.enqueue_release("FUG-1")
+        self.rec._drain_release_requests()
+        self.runner.started.clear()
+        # Even with a dead session, a released worker is never restarted.
+        self.runner.dead.add(w.tmux_session)
+        self.rec.tick()
+        self.assertEqual(self.runner.started, [])
+        self.assertEqual(self.worker().phase, PHASE_RELEASED)
+
+    def test_released_worker_holds_claim_and_is_not_reclaimed(self):
+        self.claim_one()  # issue still carries the label
+        self.rec.enqueue_release("FUG-1")
+        self.rec._drain_release_requests()
+        self.rec.tick()  # a full tick with the eligible issue present
+        # No second worker, and the released one stays released (not re-claimed).
+        self.assertEqual(len(self.registry.all()), 1)
+        self.assertEqual(self.worker().phase, PHASE_RELEASED)
+
+    def test_released_worker_is_unclaimed_when_issue_closes(self):
+        self.claim_one()
+        self.rec.enqueue_release("FUG-1")
+        self.rec._drain_release_requests()
+        self.tracker.issues["issue-1"].state_type = "completed"  # closed
+        self.rec.tick()
+        self.assertIsNone(self.worker())  # stale released record dropped
+
+    def _release(self, n=1):
+        w = self.claim_one(n)
+        self.rec.enqueue_release(w.issue_key)
+        self.rec._drain_release_requests()
+        return self.worker(n)
+
+    def test_adopt_rebuilds_worktree_and_resumes_same_session(self):
+        w = self.claim_one()
+        session_uuid = w.session_uuid
+        self.rec.enqueue_release("FUG-1")
+        self.rec._drain_release_requests()
+        self.runner.started.clear()
+        self.git.fetched.clear()
+        self.rec.enqueue_adopt("fug-1")
+        self.rec._drain_release_requests()
+        rec = self.worker()
+        self.assertEqual(rec.phase, PHASE_ACTIVE)
+        self.assertIsNone(rec.released_at)
+        self.assertIn(rec.tmux_session, self.runner.started)  # container restarted
+        self.assertTrue(self.git.fetched)  # fetched before ff
+        self.assertIn(rec.worktree, self.git.synced)  # fast-forwarded onto origin
+        # The worktree is rebuilt and the SAME Claude session resumes: turns>0
+        # so the loop uses --resume, and the session id is unchanged.
+        import json as _json
+
+        state = _json.loads(
+            (Path(rec.worktree) / ".agent" / "state.json").read_text()
+        )
+        self.assertEqual(state["session_uuid"], session_uuid)
+        self.assertGreater(state["turns_taken"], 0)
+        # A re-orientation note is left for the resumed agent.
+        info = [m for m in self.mailbox().pending_inbox() if m.kind == "info"]
+        self.assertTrue(any("adopted back" in m.payload.get("text", "").lower() for m in info))
+
+    def test_adopt_resets_onto_the_operators_rebased_branch(self):
+        # The operator released, rebased onto a newer mainline, force-pushed,
+        # and adopts back: adopt_to_remote reports reset-to-remote and the agent
+        # is told (with the reflog recovery path), not silently left on stale.
+        self.claim_one()
+        self.rec.enqueue_release("FUG-1")
+        self.rec._drain_release_requests()
+        self.git.adopt_status = "reset-to-remote"
+        self.rec.enqueue_adopt("FUG-1")
+        self.rec._drain_release_requests()
+        self.assertEqual(self.worker().phase, PHASE_ACTIVE)
+        info = " ".join(
+            m.payload.get("text", "")
+            for m in self.mailbox().pending_inbox() if m.kind == "info"
+        )
+        self.assertIn("reflog", info)
+        self.assertIn("rebased", info.lower())
+
+    def test_adopt_of_released_worker_whose_issue_closed_drops_it(self):
+        self._release()
+        self.tracker.issues["issue-1"].state_type = "canceled"
+        self.rec.enqueue_adopt("FUG-1")
+        self.rec._drain_release_requests()
+        self.assertIsNone(self.worker())  # not resurrected
+
+    def test_adopt_of_unknown_or_active_worker_is_a_noop(self):
+        self.claim_one()  # active, not released
+        self.rec.enqueue_adopt("FUG-1")  # active -> ignored
+        self.rec.enqueue_adopt("FUG-404")  # unknown -> ignored
+        self.rec._drain_release_requests()  # must not raise
+        self.assertEqual(self.worker().phase, PHASE_ACTIVE)
+
+    def test_adopt_branch_claims_an_existing_external_branch(self):
+        self.tracker.add_issue(make_issue(2, labels=[]))  # unlabeled: made outside issuefleet
+        self.rec.enqueue_adopt_branch(
+            {"project": "splanc", "issue_key": "FUG-2", "branch": "my-feature"}
+        )
+        self.rec._drain_release_requests()
+        rec = self.worker(2)
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec.branch, "my-feature")  # not the templated name
+        self.assertEqual(rec.claim_origin, "adopt")
+        self.assertIn(rec.tmux_session, self.runner.started)
+        self.assertIn(("issue-2", "In Progress"), self.tracker.state_changes)
+        results = self.rec.adopt_results()
+        self.assertTrue(results and results[-1]["ok"])
+
+    def test_adopted_branch_is_not_unclaimed_by_the_label_rule(self):
+        self.tracker.add_issue(make_issue(2, labels=[]))  # no 'agent' label
+        self.rec.enqueue_adopt_branch(
+            {"project": "splanc", "issue_key": "FUG-2", "branch": "my-feature"}
+        )
+        self.rec._drain_release_requests()
+        self.rec.tick()  # the poll rule must NOT reclaim/unclaim it
+        self.assertIsNotNone(self.worker(2))
+        self.assertEqual(self.worker(2).branch, "my-feature")
+
+    def test_adopt_branch_rejects_unknown_issue_and_double_claim(self):
+        # Unknown issue.
+        self.rec.enqueue_adopt_branch(
+            {"project": "splanc", "issue_key": "FUG-404", "branch": "b"}
+        )
+        self.rec._drain_release_requests()
+        self.assertFalse(self.rec.adopt_results()[-1]["ok"])
+        # Already claimed.
+        self.claim_one(3)
+        self.rec.enqueue_adopt_branch(
+            {"project": "splanc", "issue_key": "FUG-3", "branch": "b"}
+        )
+        self.rec._drain_release_requests()
+        self.assertFalse(self.rec.adopt_results()[-1]["ok"])
 
     def test_pr_closed_without_merge_notifies_agent_once(self):
         self.claim_one()

@@ -82,10 +82,26 @@ def inherit_repo_files(repo: Path, worktree: Path, rel_paths: list[str]) -> list
     return inherited
 
 
-def provision(worktree: Path, issue, branch: str, base_ref: str, config) -> str:
+def provision(
+    worktree: Path,
+    issue,
+    branch: str,
+    base_ref: str,
+    config,
+    session_uuid: str | None = None,
+    turns_taken: int = 0,
+    phase: str | None = None,
+) -> str:
     """Create/refresh the .agent dir. Idempotent: an existing state.json is
     preserved (re-adoption after an orchestrator restart must not reset the
     turn counters or the session), everything else is (re)staged.
+
+    When no state.json exists, a fresh one is seeded. ``session_uuid`` /
+    ``turns_taken`` / ``phase`` let a caller carry a prior session across a
+    worktree that was torn down and rebuilt — the release→adopt path passes the
+    released worker's own UUID and turn count so its Claude conversation resumes
+    (turns_taken > 0 makes the loop use ``--resume`` rather than re-create the
+    session). Defaults reproduce the original fresh-claim behaviour.
 
     Returns the worker's Claude session UUID.
     """
@@ -101,9 +117,12 @@ def provision(worktree: Path, issue, branch: str, base_ref: str, config) -> str:
     if state_path.exists():
         return TurnState.load(agent_dir).session_uuid
     state = TurnState(
-        session_uuid=str(uuid.uuid4()),
+        session_uuid=session_uuid or str(uuid.uuid4()),
+        turns_taken=turns_taken,
         max_auto_turns=config.max_auto_turns,
         claude_args=list(config.claude_args),
     )
+    if phase is not None:
+        state.phase = phase
     state.save(agent_dir)
     return state.session_uuid

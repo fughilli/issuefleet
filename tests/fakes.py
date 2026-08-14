@@ -90,7 +90,12 @@ class FakeTracker:
     def get_issue(self, issue_id: str) -> Issue | None:
         if issue_id in self.fail_get_issue:
             raise ConnectionError("fake Linear outage on get_issue")
-        return self.issues.get(issue_id)
+        issue = self.issues.get(issue_id)
+        if issue is not None:
+            return issue
+        # Linear's issue(id:) resolves the human identifier (e.g. "FUG-12") too,
+        # not just the UUID — adopt-a-branch looks issues up by key.
+        return next((i for i in self.issues.values() if i.key == issue_id), None)
 
     def comments_since(self, issue_id: str, cursor: str | None) -> list[Comment]:
         out = []
@@ -331,8 +336,9 @@ class FakeGit:
         self.fail_next_push = 0
         self.fetched: list[tuple] = []  # (repo, url, auth_header) per fetch
         self.fail_next_fetch = 0
-        self.synced: list[str] = []  # worktrees passed to sync_to_remote
+        self.synced: list[str] = []  # worktrees passed to sync_to_remote / adopt_to_remote
         self.sync_status = "up-to-date"  # what sync_to_remote reports
+        self.adopt_status = "up-to-date"  # what adopt_to_remote reports
         self.fail_next_sync = 0
         self.cloned: list[tuple] = []  # (url, path) per clone
         self._repos: set[Path] = set()  # paths that are (now) real clones
@@ -365,6 +371,11 @@ class FakeGit:
 
     def remove_worktree(self, repo: Path, path: Path, branch: str) -> None:
         self.removed.append(str(path))
+        # Real git removes the worktree directory (and its .agent state with it),
+        # so a later re-adopt re-provisions from scratch. Mirror that.
+        import shutil
+
+        shutil.rmtree(path, ignore_errors=True)
 
     def delete_remote_branch(self, repo: Path, branch: str, url=None, auth_header=None) -> None:
         self.deleted_remote.append(branch)
@@ -388,6 +399,15 @@ class FakeGit:
 
             raise GitError("fake git sync failure")
         return self.sync_status
+
+    def adopt_to_remote(self, worktree: Path, branch: str) -> str:
+        self.synced.append(str(worktree))
+        if self.fail_next_sync > 0:
+            self.fail_next_sync -= 1
+            from issuefleet.gitops import GitError
+
+            raise GitError("fake git sync failure")
+        return self.adopt_status
 
     def push(self, worktree: Path, branch: str, url=None, auth_header=None) -> None:
         if self.fail_next_push > 0:

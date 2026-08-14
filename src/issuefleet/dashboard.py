@@ -110,6 +110,19 @@ def diagnose(snap: dict, max_restarts: int) -> dict:
     restarts = snap.get("restarts") or 0
     counts = f"{restarts}/{max_restarts} restarts"
 
+    if phase == "released":
+        return {
+            "case": "released",
+            "headline": "Released to the operator — the branch is yours to edit locally.",
+            "detail": (
+                "The container is stopped and the worktree removed, so the branch is free to "
+                "check out and change in a local session. The claim is held — no other worker "
+                "will take it and the daemon won't restart it. Adopt it back when you're done; "
+                "issuefleet rebuilds the worktree, fast-forwards it onto any commits you "
+                "pushed, and resumes the same session."
+            ),
+            "needs_reset": False,
+        }
     if phase == "crashed":
         return {
             "case": "crashed",
@@ -271,10 +284,21 @@ class FleetView:
         allow_add_project: bool = False,
         add_project_cb=None,
         project_results_cb=None,
+        release_cb=None,
+        adopt_cb=None,
+        adopt_branch_cb=None,
+        adopt_results_cb=None,
     ):
         self.state_dir = Path(state_dir)
         self.runner = TmuxRunner(log_dir=self.state_dir / "logs")
         self.stop_cb = stop_cb
+        # Release hands a claimed branch to the operator; adopt re-takes a
+        # released worker or picks up a branch made outside issuefleet. All three
+        # delegate to the reconciler exactly like stop — the view mutates nothing.
+        self.release_cb = release_cb
+        self.adopt_cb = adopt_cb
+        self.adopt_branch_cb = adopt_branch_cb
+        self.adopt_results_cb = adopt_results_cb
         # Reset (crash-clear) delegates to the reconciler exactly like stop —
         # the view mutates nothing. max_restarts is the daemon's ceiling, shown
         # in the diagnosis so "2/3 restarts" reads against the real limit.
@@ -386,6 +410,22 @@ class FleetView:
         self.reset_cb(key)
         return True
 
+    def request_release(self, key: str) -> bool:
+        """Queue a branch release (hand it to the operator) for the tick thread.
+        Returns False if there's no such worker or no release channel wired up."""
+        if self.release_cb is None or self.find(key) is None:
+            return False
+        self.release_cb(key)
+        return True
+
+    def request_adopt(self, key: str) -> bool:
+        """Queue an adopt of a released worker for the tick thread. Returns False
+        if there's no such worker or no adopt channel wired up."""
+        if self.adopt_cb is None or self.find(key) is None:
+            return False
+        self.adopt_cb(key)
+        return True
+
     # ---------------------------------------------------------- projects
 
     def projects(self) -> list[dict]:
@@ -440,6 +480,34 @@ class FleetView:
         if any(p["name"] == project.name for p in self.projects()):
             return f"a project named {project.name!r} already exists"
         self.add_project_cb(spec)
+        return None
+
+    # ---------------------------------------------------------- adopt-branch
+
+    @property
+    def allow_adopt_branch(self) -> bool:
+        return self.adopt_branch_cb is not None
+
+    def adopt_results(self) -> list[dict]:
+        return list(self.adopt_results_cb()) if self.adopt_results_cb else []
+
+    def adopt_branch(self, spec: dict) -> str | None:
+        """Validate an adopt-a-branch submission and, if it's well-formed,
+        enqueue it for the tick thread. Returns None on success (queued) or an
+        error string to show the operator. The real work (issue lookup, worktree,
+        start) and its outcome land asynchronously in ``adopt_results``; this
+        only rejects what's obviously wrong up front."""
+        if not self.allow_adopt_branch:
+            return "adopting branches from the dashboard is disabled"
+        if not spec.get("project"):
+            return "a project is required"
+        if not spec.get("issue_key"):
+            return "an issue key is required"
+        if not spec.get("branch"):
+            return "a branch name is required"
+        if not any(p["name"] == spec["project"] for p in self.projects()):
+            return f"no such project {spec['project']!r}"
+        self.adopt_branch_cb(spec)
         return None
 
 
@@ -516,6 +584,8 @@ def _page(title: str, body: str) -> str:
 
 
 def _alive_pill(snap: dict) -> str:
+    if snap["phase"] == "released":
+        return "<span class='pill warn'>released</span>"
     if snap["phase"] == "crashed":
         return "<span class='pill dead'>crashed</span>"
     if snap["alive"]:
@@ -537,7 +607,8 @@ def render_index(snaps: list[dict], stopped: str | None = None) -> str:
             f"<div class='banner'>Stop requested for <b>{_h(stopped)}</b> — it will "
             "wind down on the next reconcile tick. Refresh in a moment.</div>"
         )
-    nav = "<div class='nav'><a href='/projects'>manage projects →</a></div>"
+    nav = ("<div class='nav'><a href='/projects'>manage projects →</a>"
+           "<a href='/adopt'>adopt a branch →</a></div>")
     if not snaps:
         return _page(
             "issuefleet",
@@ -650,6 +721,7 @@ def render_worker(
     diag: dict,
     pane_age_s: int | None = None,
     reset_queued: bool = False,
+    lifecycle_queued: str | None = None,
 ) -> str:
     kv = {
         "Title": snap["issue_title"],
@@ -686,6 +758,7 @@ def render_worker(
     pane_card = _pane_card(pane_tail, pane_age_s, diag)
 
     key = _h(snap["issue_key"])
+    released = snap["phase"] == "released"
     confirm = (
         f"Stop worker {snap['issue_key']}? This winds it down: the container is killed "
         "and the worktree removed. The branch and an archived transcript are kept."
@@ -710,9 +783,42 @@ def render_worker(
             "does not fix the root cause — watch the restart count and pane log above to tell "
             "a recovery from an immediate re-crash.</p>"
         )
+    if released:
+        # A released worker's one forward move is adopt (Stop still available to
+        # give the claim up entirely). Release/Reset make no sense here.
+        adopt_confirm = (
+            f"Adopt {snap['issue_key']} back into issuefleet? It rebuilds the worktree from "
+            f"branch {snap['branch']}, fast-forwards it onto any commits you pushed, and "
+            "resumes the worker. Make sure the branch isn't checked out elsewhere first."
+        )
+        lifecycle_html = (
+            f"<form method='post' action='/worker/{key}/adopt' style='margin-bottom:12px' "
+            f"onsubmit=\"return confirm('{_h(adopt_confirm)}')\">"
+            "<button type='submit' class='primary'>Adopt worker back</button>"
+            "</form>"
+            "<p class='muted' style='margin-top:0'>Rebuilds the worktree from the kept branch, "
+            "fast-forwards it onto origin, and resumes the same session. Adopt only once you've "
+            "finished editing locally and the branch is free to check out.</p>"
+        )
+    else:
+        release_confirm = (
+            f"Release {snap['issue_key']} to work on it locally? The container is stopped and "
+            f"the worktree removed so branch {snap['branch']} is free to check out; the claim "
+            "is held. Adopt it back here when you're done."
+        )
+        lifecycle_html = (
+            reset_html
+            + f"<form method='post' action='/worker/{key}/release' style='margin-bottom:12px' "
+            f"onsubmit=\"return confirm('{_h(release_confirm)}')\">"
+            "<button type='submit' class='primary'>Release branch</button>"
+            "</form>"
+            "<p class='muted' style='margin-top:0'>Hands the branch to you for a local session: "
+            "stops the container and removes the worktree (freeing the branch), but holds the "
+            "claim so nothing else takes it. Adopt it back from here afterwards.</p>"
+        )
     stop_card = (
         "<div class='card'><h2>Lifecycle</h2>"
-        + reset_html
+        + lifecycle_html
         + f"<form method='post' action='/worker/{key}/stop' "
         f"onsubmit=\"return confirm('{_h(confirm)}')\">"
         "<button type='submit' class='danger'>Stop worker</button>"
@@ -729,6 +835,18 @@ def render_worker(
             "<div class='banner'>Reset queued — the crash state is cleared and the restart "
             "counter zeroed on the next reconcile tick; a dead session is restarted then. "
             "Refresh in a moment, and watch the restart count to confirm it stays down.</div>"
+        )
+    elif lifecycle_queued == "release":
+        banner = (
+            "<div class='banner'>Release queued — on the next reconcile tick the container "
+            "stops and the worktree is removed, freeing the branch. Refresh in a moment; the "
+            "worker then shows as <b>released</b> with an Adopt button.</div>"
+        )
+    elif lifecycle_queued == "adopt":
+        banner = (
+            "<div class='banner'>Adopt queued — on the next reconcile tick the worktree is "
+            "rebuilt, fast-forwarded onto origin, and the worker resumes. Refresh in a "
+            "moment.</div>"
         )
     return _page(
         f"{snap['issue_key']} — issuefleet",
@@ -905,6 +1023,83 @@ def render_projects(
     )
 
 
+def render_adopt(
+    projects: list[dict],
+    results: list[dict],
+    allow_adopt: bool,
+    error: str | None = None,
+    queued: str | None = None,
+) -> str:
+    """The adopt-a-branch page: bring a branch made outside issuefleet (an
+    interactive local session) under a worker. No auto-refresh — a half-typed
+    form must never be yanked out from under the operator."""
+    nav = "<div class='nav'><a href='/'>← fleet</a></div>"
+
+    banners = []
+    if queued:
+        banners.append(
+            f"<div class='banner'>Queued adopt for <b>{_h(queued)}</b> — the daemon will pick "
+            "up the branch on the next tick; watch for the outcome below.</div>"
+        )
+    if error:
+        banners.append(
+            f"<div class='banner' style='background:#2a1616;border-color:#5a2b2b;"
+            f"color:#ffb0b0'>Couldn't adopt: {_h(error)}</div>"
+        )
+
+    if results:
+        items = []
+        for r in reversed(results):  # newest first
+            cls = "ok" if r["ok"] else "dead"
+            verb = "adopted" if r["ok"] else "rejected"
+            items.append(
+                f"<div class='ev'><div class='lbl'><span class='pill {cls}'>{verb}</span> "
+                f"{_h(r['name'])}</div><pre>{_h(r['detail'])}</pre></div>"
+            )
+        results_card = f"<div class='card'><h2>Recent adopt attempts</h2>{''.join(items)}</div>"
+    else:
+        results_card = ""
+
+    intro = (
+        "<div class='card'><h2>Adopt a branch</h2>"
+        "<p class='muted'>Hand a branch that already exists — one you built in a local "
+        "session outside issuefleet — to a worker. Name the project, the Linear issue to "
+        "attach it to, and the branch (local to the daemon's clone, or on the remote as "
+        "<code>origin/&lt;branch&gt;</code>). The worker adopts it as-is and continues from "
+        "what's there. Make sure the branch isn't checked out in another worktree first.</p>"
+    )
+    if not allow_adopt:
+        return _page(
+            "adopt — issuefleet",
+            nav + "<h2 style='margin-top:0'>Adopt a branch</h2>" + "".join(banners)
+            + intro + "<p class='muted'>Disabled (no adopt channel wired up).</p></div>"
+            + results_card,
+        )
+
+    opts = "".join(
+        f"<option value='{_h(p['name'])}'>{_h(p['name'])} ({_h(p['linear_project'])})</option>"
+        for p in projects
+    ) or "<option value=''>(no projects configured)</option>"
+    form_card = (
+        intro
+        + "<form method='post' action='/adopt'>"
+        f"<p><label>project<br><select name='project' required>{opts}</select></label></p>"
+        "<p><label>issue key<br><input name='issue_key' placeholder='FUG-123' required></label></p>"
+        "<p><label>branch<br><input name='branch' placeholder='my-feature-branch' required></label></p>"
+        "<button type='submit' class='primary'>Adopt branch</button>"
+        "<p class='muted' style='margin-top:10px'>The issue is looked up in the tracker and moved "
+        "to In&nbsp;Progress; a fresh worker session reads the brief and continues from the "
+        "branch. It goes live on the next tick.</p>"
+        "</form></div>"
+    )
+
+    return _page(
+        "adopt — issuefleet",
+        nav + "<h2 style='margin-top:0'>Adopt a branch</h2>"
+        + "".join(banners) + form_card + results_card,
+    )
+
+
 # ----------------------------------------------------------------- server
 
 
@@ -916,14 +1111,14 @@ class _Route:
 
 
 def _parse_worker_path(path: str) -> _Route | None:
-    """/worker/<KEY>[/turn/<N> | /raw/<N> | /stop]."""
+    """/worker/<KEY>[/turn/<N> | /raw/<N> | /stop | /reset | /release | /adopt]."""
     parts = [p for p in path.split("/") if p]
     if not parts or parts[0] != "worker" or len(parts) < 2:
         return None
     key = urllib.parse.unquote(parts[1])
     if len(parts) == 2:
         return _Route(key=key)
-    if len(parts) == 3 and parts[2] in ("stop", "reset"):
+    if len(parts) == 3 and parts[2] in ("stop", "reset", "release", "adopt"):
         return _Route(key=key, sub=parts[2])
     if len(parts) == 4 and parts[2] in ("turn", "raw"):
         try:
@@ -976,12 +1171,25 @@ class DashboardServer:
                         error=qs.get("error", [None])[0],
                         added=qs.get("added", [None])[0],
                     ))
+                if path == "/adopt":
+                    return self._send(200, render_adopt(
+                        outer.view.projects(),
+                        outer.view.adopt_results(),
+                        outer.view.allow_adopt_branch,
+                        error=qs.get("error", [None])[0],
+                        queued=qs.get("queued", [None])[0],
+                    ))
                 route = _parse_worker_path(path)
                 if route is None:
                     return self._send(404, _page("not found", "<p class='muted'>Not found. <a href='/'>Fleet</a></p>"))
-                return self._get_worker(route, reset=bool(qs.get("reset")))
+                lifecycle = None
+                if qs.get("released"):
+                    lifecycle = "release"
+                elif qs.get("adopted"):
+                    lifecycle = "adopt"
+                return self._get_worker(route, reset=bool(qs.get("reset")), lifecycle=lifecycle)
 
-            def _get_worker(self, route: _Route, reset: bool = False):
+            def _get_worker(self, route: _Route, reset: bool = False, lifecycle=None):
                 snap = outer.view.snapshot(route.key)
                 if snap is None:
                     return self._send(404, _page("not found",
@@ -1005,6 +1213,7 @@ class DashboardServer:
                         diagnose(snap, outer.view.max_restarts),
                         outer.view.pane_log_age_s(route.key),
                         reset_queued=reset,
+                        lifecycle_queued=lifecycle,
                     ))
                 return self._send(404, _page("not found", "<p class='muted'>Not found.</p>"))
 
@@ -1016,15 +1225,30 @@ class DashboardServer:
                 path = urllib.parse.urlparse(self.path).path
                 if path == "/projects/add":
                     return self._add_project(body)
+                if path == "/adopt":
+                    return self._adopt_branch(body)
                 route = _parse_worker_path(path)
-                if route is None or route.sub not in ("stop", "reset"):
+                if route is None or route.sub not in ("stop", "reset", "release", "adopt"):
                     return self._send(404, "not found", "text/plain")
+                quoted = urllib.parse.quote(route.key)
                 if route.sub == "reset":
                     if outer.view.request_reset(route.key):
                         log.info("dashboard: reset requested for %s", route.key)
-                        return self._redirect(f"/worker/{urllib.parse.quote(route.key)}?reset=1")
+                        return self._redirect(f"/worker/{quoted}?reset=1")
                     return self._send(404, _page("not found",
                         f"<p class='muted'>No worker <b>{_h(route.key)}</b> to reset.</p>"))
+                if route.sub == "release":
+                    if outer.view.request_release(route.key):
+                        log.info("dashboard: release requested for %s", route.key)
+                        return self._redirect(f"/worker/{quoted}?released=1")
+                    return self._send(404, _page("not found",
+                        f"<p class='muted'>No worker <b>{_h(route.key)}</b> to release.</p>"))
+                if route.sub == "adopt":
+                    if outer.view.request_adopt(route.key):
+                        log.info("dashboard: adopt requested for %s", route.key)
+                        return self._redirect(f"/worker/{quoted}?adopted=1")
+                    return self._send(404, _page("not found",
+                        f"<p class='muted'>No worker <b>{_h(route.key)}</b> to adopt.</p>"))
                 if outer.view.request_stop(route.key):
                     log.info("dashboard: stop requested for %s", route.key)
                     return self._redirect(f"/?stopped={urllib.parse.quote(route.key)}")
@@ -1058,6 +1282,25 @@ class DashboardServer:
                         f"/projects?added={urllib.parse.quote(spec['name'])}"
                     )
                 return self._redirect(f"/projects?error={urllib.parse.quote(err)}")
+
+            def _adopt_branch(self, body: bytes):
+                form = {
+                    k: v[0].strip()
+                    for k, v in urllib.parse.parse_qs(body.decode("utf-8", "replace")).items()
+                }
+                spec = {
+                    "project": form.get("project", ""),
+                    "issue_key": form.get("issue_key", ""),
+                    "branch": form.get("branch", ""),
+                }
+                err = outer.view.adopt_branch(spec)
+                if err is None:
+                    log.info("dashboard: adopt-branch queued for %r on %r",
+                             spec["issue_key"], spec["branch"])
+                    return self._redirect(
+                        f"/adopt?queued={urllib.parse.quote(spec['issue_key'])}"
+                    )
+                return self._redirect(f"/adopt?error={urllib.parse.quote(err)}")
 
         self._server = ThreadingHTTPServer((bind, port), Handler)
         self._thread: threading.Thread | None = None

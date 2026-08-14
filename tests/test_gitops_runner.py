@@ -79,11 +79,96 @@ class GitopsTest(unittest.TestCase):
         self.assertTrue((self.wt / "NEW.txt").is_file())
         self.assertEqual(sha("HEAD", self.wt), sha("origin/main", self.repo))
 
+    def test_adopt_branch_that_exists_only_on_origin(self):
+        # A branch pushed from an interactive session elsewhere: it exists as
+        # origin/<branch> in the daemon clone but has no local ref. Adoption
+        # must check it out (tracking origin), not cut a fresh one from base —
+        # which would silently discard that work.
+        other = Path(self.tmp.name) / "other"
+        run(["git", "clone", str(self.origin), str(other)])
+        run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "checkout", "-b", "my-feature"], cwd=other)
+        (other / "FEATURE.txt").write_text("external work\n")
+        run(["git", "add", "."], cwd=other)
+        run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "feature"],
+            cwd=other)
+        run(["git", "push", "origin", "my-feature"], cwd=other)
+        self.git.fetch(self.repo, url=str(self.origin))
+
+        self.git.create_worktree(self.repo, "my-feature", "main", self.wt)
+        # The operator's commit is present — the branch was adopted, not re-cut.
+        self.assertTrue((self.wt / "FEATURE.txt").is_file())
+        head = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=self.wt,
+                              capture_output=True, text=True).stdout.strip()
+        self.assertEqual(head, "my-feature")
+
     def test_worktree_base_falls_back_to_local_ref_without_origin(self):
         # A local-only base (no origin/<ref>) still works — bootstrap/offline.
         run(["git", "branch", "local-only", "main"], cwd=self.repo)
         self.git.create_worktree(self.repo, "agent/fug-2-y", "local-only", self.wt)
         self.assertTrue((self.wt / "README.md").is_file())
+
+    def test_adopt_to_remote_resets_onto_a_rebased_origin(self):
+        # Release/adopt robustness (FUG-113): the operator holds a branch,
+        # rebases it onto a newer mainline, force-pushes, and adopts it back.
+        # origin/<branch> now has rewritten history no fast-forward can follow;
+        # adopt_to_remote must reset the worktree onto the operator's branch,
+        # not leave it stranded on the pre-release tip.
+        def sha(ref, cwd):
+            return subprocess.run(["git", "rev-parse", ref], cwd=cwd,
+                                  capture_output=True, text=True).stdout.strip()
+
+        # The branch as origin last saw it (the "released" state).
+        self.git.create_worktree(self.repo, "agent/f", "main", self.wt)
+        self.commit_in_worktree("branch work")
+        run(["git", "push", "origin", "agent/f"], cwd=self.wt)
+        old_tip = sha("HEAD", self.wt)
+
+        # The operator, in their own clone: advance main, rebase the branch onto
+        # it, force-push.
+        other = Path(self.tmp.name) / "other"
+        run(["git", "clone", str(self.origin), str(other)])
+        run(["git", "config", "user.email", "o@o"], cwd=other)
+        run(["git", "config", "user.name", "o"], cwd=other)
+        (other / "MAIN.txt").write_text("newer mainline\n")
+        run(["git", "add", "."], cwd=other)
+        run(["git", "commit", "-m", "advance main"], cwd=other)
+        run(["git", "push", "origin", "main"], cwd=other)
+        run(["git", "checkout", "-B", "agent/f", "origin/agent/f"], cwd=other)
+        run(["git", "rebase", "origin/main"], cwd=other)
+        run(["git", "push", "--force", "origin", "agent/f"], cwd=other)
+
+        # Daemon: fetch, then adopt the branch it still holds locally at old_tip.
+        self.git.fetch(self.repo, url=str(self.origin))
+        self.assertNotEqual(old_tip, sha("origin/agent/f", self.repo))  # rewritten
+        status = self.git.adopt_to_remote(self.wt, "agent/f")
+        self.assertEqual(status, "reset-to-remote")
+        # The worktree is now on the operator's rebased branch, carrying the new
+        # mainline; the pre-release tip survives in the reflog.
+        self.assertEqual(sha("HEAD", self.wt), sha("origin/agent/f", self.repo))
+        self.assertTrue((self.wt / "MAIN.txt").is_file())
+        self.assertEqual(sha("agent/f@{1}", self.wt), old_tip)
+
+    def test_adopt_to_remote_fast_forwards_when_operator_only_appended(self):
+        def sha(ref, cwd):
+            return subprocess.run(["git", "rev-parse", ref], cwd=cwd,
+                                  capture_output=True, text=True).stdout.strip()
+
+        self.git.create_worktree(self.repo, "agent/g", "main", self.wt)
+        run(["git", "push", "origin", "agent/g"], cwd=self.wt)
+        other = Path(self.tmp.name) / "other"
+        run(["git", "clone", str(self.origin), str(other)])
+        run(["git", "config", "user.email", "o@o"], cwd=other)
+        run(["git", "config", "user.name", "o"], cwd=other)
+        run(["git", "checkout", "-B", "agent/g", "origin/agent/g"], cwd=other)
+        (other / "MORE.txt").write_text("appended\n")
+        run(["git", "add", "."], cwd=other)
+        run(["git", "commit", "-m", "more"], cwd=other)
+        run(["git", "push", "origin", "agent/g"], cwd=other)
+
+        self.git.fetch(self.repo, url=str(self.origin))
+        self.assertEqual(self.git.adopt_to_remote(self.wt, "agent/g"), "fast-forwarded")
+        self.assertEqual(sha("HEAD", self.wt), sha("origin/agent/g", self.repo))
 
     def test_create_worktree_recovers_from_deleted_dir(self):
         self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)

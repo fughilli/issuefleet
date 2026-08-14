@@ -29,8 +29,10 @@ from issuefleet.mailbox import Mailbox
 from issuefleet.model import (
     PHASE_ACTIVE,
     PHASE_CRASHED,
+    PHASE_RELEASED,
     Issue,
     WorkerRecord,
+    now_iso,
 )
 from issuefleet.registry import Registry
 
@@ -152,6 +154,15 @@ class Reconciler:
         self._add_lock = threading.Lock()
         self._add_requests: list[dict] = []  # raw project tables
         self._project_results: list[dict] = []  # {name, ok, detail, ts}
+        # Dashboard-requested branch release / adopt: same single-writer
+        # discipline. Release hands a claimed branch to the operator (stop the
+        # container, remove the worktree, keep the claim). Adopt re-takes a
+        # released worker, or picks up a branch made entirely outside issuefleet.
+        self._release_lock = threading.Lock()
+        self._release_requests: list[str] = []  # issue keys
+        self._adopt_requests: list[str] = []  # issue keys (re-adopt a released worker)
+        self._adopt_branch_requests: list[dict] = []  # {project, issue_key, branch}
+        self._adopt_results: list[dict] = []  # {name, ok, detail, ts}
 
     # ------------------------------------------------------------------ tick
 
@@ -311,6 +322,281 @@ class Reconciler:
         log.info("dashboard: added project %r (%s)", project.name, detail)
         self._record_result(project.name, True, detail)
 
+    # ------------------------------------------- dashboard release / adopt
+
+    def enqueue_release(self, issue_key: str) -> None:
+        """Thread-safe intake for a dashboard 'release this branch' click. Like
+        stop, the web thread only queues the key; ``_drain_release_requests``
+        does the real work (stop container, remove worktree, keep the claim)
+        next tick."""
+        with self._release_lock:
+            self._release_requests.append(issue_key)
+
+    def enqueue_adopt(self, issue_key: str) -> None:
+        """Thread-safe intake for a dashboard 'adopt this released worker'
+        click. Re-takes a worker that was released back to the operator."""
+        with self._release_lock:
+            self._adopt_requests.append(issue_key)
+
+    def enqueue_adopt_branch(self, spec: dict) -> None:
+        """Thread-safe intake for a dashboard 'adopt a branch' submission: bring
+        up a worker on a branch that started outside issuefleet."""
+        with self._release_lock:
+            self._adopt_branch_requests.append(spec)
+
+    def adopt_results(self) -> list[dict]:
+        """Snapshot of recent adopt-a-branch outcomes, for the dashboard."""
+        with self._release_lock:
+            return list(self._adopt_results)
+
+    def _record_adopt_result(self, name: str, ok: bool, detail: str) -> None:
+        with self._release_lock:
+            self._adopt_results.append(
+                {"name": name, "ok": ok, "detail": detail, "ts": int(time.time())}
+            )
+            self._adopt_results = self._adopt_results[-10:]
+
+    def _drain_release_requests(self) -> None:
+        with self._release_lock:
+            rel, self._release_requests = self._release_requests, []
+            adopt, self._adopt_requests = self._adopt_requests, []
+            branches, self._adopt_branch_requests = self._adopt_branch_requests, []
+        for key in rel:
+            self._do_release(key)
+        for key in adopt:
+            self._do_adopt(key)
+        for spec in branches:
+            self._adopt_branch(spec)
+
+    def _find_worker_by_key(self, key: str) -> WorkerRecord | None:
+        return next(
+            (w for w in self.registry.all() if w.issue_key.lower() == key.lower()), None
+        )
+
+    def _do_release(self, key: str) -> None:
+        rec = self._find_worker_by_key(key)
+        if rec is None:
+            log.info("dashboard release for %s: no such worker (already gone)", key)
+            return
+        if rec.phase == PHASE_RELEASED:
+            log.info("dashboard release for %s: already released", key)
+            return
+        try:
+            self._release(rec)
+        except Exception:
+            log.exception("dashboard release of %s failed; will not retry", key)
+
+    def _release(self, rec: WorkerRecord) -> None:
+        """Hand a claimed branch to the operator. The container is stopped and
+        the worktree removed (so the branch is free to check out and edit in a
+        local session), but the registry entry is KEPT in ``released`` phase, so
+        the issue stays claimed — the daemon won't re-claim it or restart it —
+        and the branch survives. The agent's session UUID and turn count are
+        remembered so ``adopt`` can resume the same Claude conversation."""
+        project = self.cfg.project(rec.project)
+        mailbox = Mailbox(Path(rec.worktree) / ".agent" / "mailbox")
+        log.info("dashboard: releasing %s (branch %s) to the operator", rec.issue_key, rec.branch)
+
+        # Remember where the agent's turn counter stood, so adopt resumes with
+        # `--resume` rather than colliding on its own session id. Best-effort:
+        # a worktree already partly gone just means we start the adopt fresh.
+        rec.released_turns = self._agent_turns_taken(rec)
+
+        # Signal the agent to exit its loop, and settle its Linear session.
+        try:
+            mailbox.ensure().put_inbox("shutdown", {"reason": "released to operator"})
+        except OSError:
+            pass
+        if rec.agent_session_id:
+            self._emit_activity_quietly(
+                rec.agent_session_id,
+                {"type": "response",
+                 "body": "Released: an operator has taken this branch to work on it locally. "
+                 "I'll resume here if it's adopted back."},
+            )
+
+        # Archive the transcript before the worktree goes — it must outlive the
+        # branch, same as a wind-down.
+        agent_dir = Path(rec.worktree) / ".agent"
+        if agent_dir.is_dir():
+            dest = self.registry.archive_dir_for(rec)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(
+                agent_dir, dest, ignore=shutil.ignore_patterns("bin", "tmp"), dirs_exist_ok=True
+            )
+
+        try:
+            self.runner.stop(rec)
+        except Exception:
+            log.exception("worker %s: stopping the session for release failed", rec.issue_key)
+        try:
+            self.git.remove_worktree(Path(rec.repo), Path(rec.worktree), rec.branch)
+        except Exception:
+            log.exception("worker %s: removing the worktree for release failed", rec.issue_key)
+
+        rec.phase = PHASE_RELEASED
+        rec.released_at = now_iso()
+        rec.touch()
+        self.registry.save()
+        self._post_once(
+            rec.issue_id,
+            f"released-{rec.issue_id}-{rec.released_at}",
+            f"🤖 Released branch `{rec.branch}` for local work — the worker's container "
+            "is stopped and its worktree removed, so the branch is free to check out and "
+            "edit. The claim is held (no other worker will take it); adopt it back from the "
+            "dashboard when you're done.",
+        )
+
+    def _agent_turns_taken(self, rec: WorkerRecord) -> int:
+        try:
+            from issuefleet.agent_runtime.turns import TurnState
+
+            return TurnState.load(Path(rec.worktree) / ".agent").turns_taken
+        except (OSError, ValueError, KeyError):
+            return rec.released_turns
+
+    def _do_adopt(self, key: str) -> None:
+        rec = self._find_worker_by_key(key)
+        if rec is None:
+            log.info("dashboard adopt for %s: no such worker", key)
+            return
+        if rec.phase != PHASE_RELEASED:
+            log.info("dashboard adopt for %s: not released (phase=%s); ignoring", key, rec.phase)
+            return
+        try:
+            self._adopt_released(rec)
+        except Exception:
+            log.exception("dashboard adopt of %s failed; leaving it released", key)
+
+    def _adopt_released(self, rec: WorkerRecord) -> None:
+        """Re-take a released worker: rebuild its worktree from the (kept)
+        branch, reconcile it with origin, re-provision preserving the session so
+        its Claude conversation resumes, and restart the container.
+
+        The fetch refreshes both ``origin/<branch>`` and ``origin/<base_ref>``,
+        so whatever the operator did while holding the branch is picked up:
+        commits pushed on top fast-forward, and a rebase onto a newer mainline
+        (which force-updates the branch to a rewritten history) is adopted via
+        ``adopt_to_remote`` resetting onto the operator's pushed branch — the
+        common ``release → rebase → push → adopt`` flow lands the worker exactly
+        on the operator's state, with the fresh base already in ``origin/*``."""
+        project = self.cfg.project(rec.project)
+        worktree = Path(rec.worktree)
+        log.info("dashboard: adopting released worker %s (branch %s)", rec.issue_key, rec.branch)
+
+        issue = self.tracker.get_issue(rec.issue_id)
+        if issue is None or not issue.open:
+            # Nothing to adopt back to: drop the stale claim rather than resurrect
+            # a worker for a closed/gone issue.
+            log.info("adopt %s: issue closed/gone; dropping the released record", rec.issue_key)
+            self.registry.remove(rec.issue_id)
+            return
+
+        forge = self.forges.get(project.name)
+        if forge is not None:
+            fetch_url, fetch_auth = forge.push_spec()
+            try:
+                self.git.fetch(project.repo, url=fetch_url, auth_header=fetch_auth)
+            except gitops.GitError as e:
+                log.warning("adopt %s: pre-adopt fetch failed (%s); using local refs",
+                            rec.issue_key, e)
+
+        self.git.create_worktree(project.repo, rec.branch, rec.base_ref, worktree)
+        try:
+            sync_status = self.git.adopt_to_remote(worktree, rec.branch)
+        except gitops.GitError as e:
+            log.warning("adopt %s: branch sync failed (%s); using the local branch",
+                        rec.issue_key, e)
+            sync_status = "up-to-date"
+        self.git.add_worktree_exclude(project.repo, worktree, ".agent/")
+        for rel in worker_mod.inherit_repo_files(project.repo, worktree, self.cfg.copy_from_repo):
+            self.git.add_worktree_exclude(project.repo, worktree, rel)
+        # Resume the same Claude session: turns_taken > 0 makes the loop use
+        # `--resume`. Come back as `running` so it takes a re-orientation turn.
+        from issuefleet.agent_runtime.turns import PHASE_RUNNING
+
+        worker_mod.provision(
+            worktree, issue, rec.branch, rec.base_ref, self.cfg,
+            session_uuid=rec.session_uuid,
+            turns_taken=max(1, rec.released_turns),
+            phase=PHASE_RUNNING,
+        )
+
+        rec.phase = PHASE_ACTIVE
+        rec.released_at = None
+        rec.released_turns = 0
+        rec.touch()
+        self.registry.save()
+
+        mailbox = Mailbox(worktree / ".agent" / "mailbox")
+        mailbox.ensure().put_inbox(
+            "info",
+            {"text": "This branch was adopted back into issuefleet after an operator worked "
+             "on it locally. Run `git log` and `git status` to see what changed before you "
+             "continue — the working tree may not be what you left."},
+            coalesce=True,
+        )
+        self._adopt_sync_note(mailbox, rec.branch, rec.base_ref, sync_status)
+        self.runner.start(rec, self.cfg)
+        if rec.agent_session_id:
+            self._emit_activity_quietly(
+                rec.agent_session_id,
+                {"type": "thought",
+                 "body": f"Adopted back: resuming work on `{rec.branch}` in a fresh worktree."},
+            )
+        self._post_once(
+            rec.issue_id,
+            f"adopted-{rec.issue_id}-{now_iso()}",
+            f"🤖 Adopted branch `{rec.branch}` back into issuefleet; the worker is resuming.",
+        )
+
+    def _adopt_branch(self, spec: dict) -> None:
+        """Bring up a worker on a branch that started entirely outside issuefleet
+        (an interactive local session). The operator names the project, the
+        Linear issue to attach it to, and the existing branch; we create a worker
+        record pointing at that branch (not the templated name) and start a fresh
+        session that reads the brief and continues from whatever is on the
+        branch. Every failure is recorded, never raised."""
+        name = str(spec.get("issue_key") or "?")
+        project_name = str(spec.get("project") or "")
+        branch = str(spec.get("branch") or "").strip()
+        project = next((p for p in self.cfg.projects if p.name == project_name), None)
+        if project is None:
+            self._record_adopt_result(name, False, f"no such project {project_name!r}")
+            return
+        if not branch:
+            self._record_adopt_result(name, False, "a branch name is required")
+            return
+        try:
+            issue = self.tracker.get_issue(spec.get("issue_key", ""))
+        except Exception as e:
+            self._record_adopt_result(name, False, f"could not look up the issue: {e}")
+            return
+        if issue is None:
+            self._record_adopt_result(name, False, f"no issue {name!r} found in the tracker")
+            return
+        if not issue.open:
+            self._record_adopt_result(issue.key, False, f"issue {issue.key} is closed")
+            return
+        if self.registry.get(issue.id) is not None:
+            self._record_adopt_result(issue.key, False, f"issue {issue.key} is already claimed")
+            return
+        active = [w for w in self.registry.all() if w.phase == PHASE_ACTIVE]
+        if len(active) >= self.cfg.max_workers:
+            self._record_adopt_result(
+                issue.key, False, f"fleet is full ({len(active)}/{self.cfg.max_workers} active)"
+            )
+            return
+        try:
+            self._claim_one(issue, project, branch=branch, origin="adopt")
+        except Exception as e:
+            log.exception("adopt-branch %s failed", issue.key)
+            self._record_adopt_result(issue.key, False, f"could not adopt: {e}")
+            return
+        self._record_adopt_result(
+            issue.key, True, f"adopted branch {branch!r}; worker started"
+        )
+
     def _drain_session_events(self) -> None:
         with self._session_lock:
             events, self._session_events = self._session_events, []
@@ -432,6 +718,10 @@ class Reconciler:
         # serviced off its cleared state (active, restarts 0), so a dead
         # session is restarted this same tick rather than staying parked.
         self._drain_reset_requests()
+        # Branch release / adopt before servicing: a released worker must not be
+        # serviced (or restarted) this tick, and an adopted one comes up ready to
+        # be serviced immediately.
+        self._drain_release_requests()
         # New projects before the claim pass below, so a project added this
         # tick is polled for claimable work the same tick it lands.
         self._drain_add_project_requests()
@@ -506,6 +796,8 @@ class Reconciler:
         reason = self._unclaim_reason(project, issue, rec)
         if reason:
             return [f"{rec.issue_key}: would un-claim and tear down ({reason})"]
+        if rec.phase == PHASE_RELEASED:
+            return [f"{rec.issue_key}: released to the operator (branch {rec.branch} kept); no action"]
         if rec.phase == PHASE_CRASHED:
             return [f"{rec.issue_key}: crashed (kept for inspection); no action"]
         if not self.runner.alive(rec):
@@ -555,6 +847,18 @@ class Reconciler:
 
     def _service(self, rec: WorkerRecord) -> None:
         project = self.cfg.project(rec.project)
+        if rec.phase == PHASE_RELEASED:
+            # The operator holds this branch. Don't restart it, service its
+            # (removed) worktree, or touch it — but still honor an explicit
+            # un-claim so a closed or unlabeled issue drops the stale record
+            # instead of it lingering released forever.
+            issue = self.tracker.get_issue(rec.issue_id)
+            reason = self._unclaim_reason(project, issue, rec)
+            if reason:
+                log.info("released worker %s: un-claiming (%s)", rec.issue_key, reason)
+                mailbox = Mailbox(Path(rec.worktree) / ".agent" / "mailbox")
+                self._wind_down(rec, project, mailbox, reason=reason, done=False)
+            return
         # Worktree gone from under us (a hand `stop`, a manual rm): the
         # worker is unserviceable — drop the registry entry rather than
         # crash every tick reading files that no longer exist.
@@ -664,9 +968,11 @@ class Reconciler:
             return "issue disappeared from the tracker"
         if not issue.open:
             return f"issue was closed ({issue.state_name})"
-        # Session-originated claims (delegation/@-mention) aren't governed by
-        # the poll-side claim rule; only closure winds them down.
-        if rec is not None and rec.claim_origin == "session":
+        # Claims that weren't made by the poll rule — a delegation/@-mention
+        # (session) or an operator adopting a branch — aren't governed by it;
+        # only closure winds them down. (An adopted branch may be attached to an
+        # unlabeled issue, so the label rule must not immediately reclaim it.)
+        if rec is not None and rec.claim_origin != "poll":
             return None
         claim = project.claim
         # For the `state` strategy, claiming itself moves the issue out of the
@@ -987,6 +1293,32 @@ class Reconciler:
             return
         mailbox.ensure().put_inbox("info", {"text": text}, coalesce=True)
 
+    def _adopt_sync_note(
+        self, mailbox: Mailbox, branch: str, base_ref: str, status: str
+    ) -> None:
+        """Adoption-specific branch-move note. Unlike restart's ``_sync_note``,
+        adoption may reset the worktree onto the operator's pushed branch (a
+        rebase/force-push while released), so the wording covers that and the
+        recover-your-old-tip path."""
+        if status == "fast-forwarded":
+            text = (
+                f"Your branch `{branch}` was fast-forwarded onto origin while you were "
+                "released — the operator pushed more commits on top. Re-read anything you had "
+                "in flight; the working tree is their newer state, not what you left."
+            )
+        elif status == "reset-to-remote":
+            text = (
+                f"While released, the operator rebased/force-updated `{branch}` on the remote "
+                f"(e.g. rebased onto a newer `{base_ref}`), so this worktree was reset onto "
+                f"their pushed branch — HEAD is now `origin/{branch}` and `origin/{base_ref}` "
+                "is freshly fetched. Continue from here. Your pre-release tip, if it had "
+                f"unpushed commits, is still in the reflog (`git reflog {branch}` / "
+                f"`{branch}@{{1}}`) if you need to recover anything."
+            )
+        else:  # up-to-date / no-remote: nothing moved, stay quiet
+            return
+        mailbox.ensure().put_inbox("info", {"text": text}, coalesce=True)
+
     def _sync_branch(self, rec: WorkerRecord, project: ProjectConfig, mailbox: Mailbox) -> None:
         """Fast-forward a restarting worker's branch onto origin before its
         agent comes back up.
@@ -1286,12 +1618,19 @@ class Reconciler:
             except Exception:
                 log.exception("claiming %s failed; will retry next tick", issue.key)
 
-    def _claim_one(self, issue: Issue, project: ProjectConfig, session=None) -> None:
-        branch = project.branch_template.format(key=issue.key.lower(), slug=slugify(issue.title))
+    def _claim_one(
+        self, issue: Issue, project: ProjectConfig, session=None,
+        branch: str | None = None, origin: str | None = None,
+    ) -> None:
+        # `branch` is supplied only when adopting a branch made outside
+        # issuefleet — otherwise it's derived from the template as usual.
+        branch = branch or project.branch_template.format(
+            key=issue.key.lower(), slug=slugify(issue.title)
+        )
         worktree = self.cfg.worktree_root / project.name / issue.key
         tmux_session = f"issuefleet-{project.name}-{issue.key}"
         log.info("claiming %s -> %s (%s)%s", issue.key, branch, worktree,
-                 " [agent session]" if session else "")
+                 " [agent session]" if session else " [adopted branch]" if origin else "")
 
         # Refresh origin/* before cutting the worktree so the worker sees
         # current branches (and can check any of them out from inside its
@@ -1312,8 +1651,12 @@ class Reconciler:
         # survive from an earlier run — can sit behind its own remote branch;
         # create_worktree only checks that the branch NAME matches. The fetch
         # above just refreshed origin/*, so this costs nothing extra.
+        # Adopting an external branch treats the operator's pushed branch as
+        # authoritative (adopt_to_remote also resets a rebased/force-updated one
+        # onto origin); a normal claim keeps the safe fast-forward-only sync.
+        sync = self.git.adopt_to_remote if origin == "adopt" else self.git.sync_to_remote
         try:
-            sync_status = self.git.sync_to_remote(worktree, branch)
+            sync_status = sync(worktree, branch)
         except gitops.GitError as e:
             log.warning("[%s] branch sync failed (%s); using the local branch", issue.key, e)
             sync_status = "up-to-date"
@@ -1334,7 +1677,7 @@ class Reconciler:
             base_ref=project.base_ref,
             session_uuid=session_uuid,
             tmux_session=tmux_session,
-            claim_origin="session" if session else "poll",
+            claim_origin=origin or ("session" if session else "poll"),
             agent_session_id=getattr(session, "session_id", None),
         )
         # Register before the runner/tracker side effects: if we crash here,
