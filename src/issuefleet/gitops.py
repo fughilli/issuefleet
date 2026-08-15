@@ -155,6 +155,22 @@ class Gitops:
         repo, so no dedicated clone helper is needed.)"""
         return _git(["rev-parse", ref], cwd=Path(worktree))
 
+    def repair_worktree(self, repo: Path, path: Path) -> None:
+        """Re-link a linked worktree with its admin gitdir before a restart.
+
+        ``git worktree repair`` rewrites the two-way pointer between a
+        worktree's ``.git`` file and its ``<repo>/.git/worktrees/<name>`` admin
+        dir. It is idempotent — a no-op on a healthy worktree — and fixes the
+        post-crash case where that link went stale (a documented failure mode:
+        the admin gitdir can go stale while the branch ref stays safe), which
+        also trips the launcher's own mount resolution. Best-effort: repair
+        failing must never block a (re)launch, so a bad path is logged, not
+        raised. Runs on the host, where every path is reachable."""
+        try:
+            _git(["worktree", "repair", str(path)], cwd=repo)
+        except GitError as e:
+            log.warning("worktree repair %s: %s", path, e)
+
     def add_worktree_exclude(self, repo: Path, path: Path, pattern: str) -> None:
         common = Path(_git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=path))
         exclude = common / "info" / "exclude"

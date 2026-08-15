@@ -263,5 +263,52 @@ class ReadyWakeRestoreTest(unittest.TestCase):
         self.assertTrue(turns.TurnState.load(self.agent_dir).working_acked)
 
 
+class PreflightGitTest(unittest.TestCase):
+    """FUG-116: a worker whose git-common-dir mount was lost on a restart must
+    fail the preflight and exit, so the orchestrator relaunches it rather than
+    letting it wedge on 'not a git repository'."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.workspace = root / "ws"
+        self.agent_dir = self.workspace / ".agent"
+        self.agent_dir.mkdir(parents=True)
+        # Keep retries fast and non-blocking for the broken-path assertions.
+        self._orig_tries = turnloop.GIT_PREFLIGHT_TRIES
+        self._orig_sleep = turnloop.GIT_PREFLIGHT_SLEEP_S
+        turnloop.GIT_PREFLIGHT_TRIES = 2
+        turnloop.GIT_PREFLIGHT_SLEEP_S = 0
+
+    def tearDown(self):
+        turnloop.GIT_PREFLIGHT_TRIES = self._orig_tries
+        turnloop.GIT_PREFLIGHT_SLEEP_S = self._orig_sleep
+        self.tmp.cleanup()
+
+    def _make_healthy_repo(self):
+        import subprocess as sp
+
+        sp.run(["git", "init", "-q", str(self.workspace)], check=True)
+        for k, v in (("user.email", "t@t"), ("user.name", "t")):
+            sp.run(["git", "-C", str(self.workspace), "config", k, v], check=True)
+        (self.workspace / "f").write_text("x")
+        sp.run(["git", "-C", str(self.workspace), "add", "."], check=True)
+        sp.run(["git", "-C", str(self.workspace), "commit", "-qm", "init"], check=True)
+
+    def test_healthy_worktree_passes(self):
+        self._make_healthy_repo()
+        self.assertTrue(turnloop.preflight_git(self.workspace))
+
+    def test_unmounted_gitdir_fails(self):
+        # The exact restart symptom: .git points at a host path that isn't
+        # here, so every git command fails.
+        (self.workspace / ".git").write_text("gitdir: /nonexistent/repos/x/.git/worktrees/y\n")
+        self.assertFalse(turnloop.preflight_git(self.workspace))
+
+    def test_run_exits_error_on_broken_git(self):
+        (self.workspace / ".git").write_text("gitdir: /nonexistent/repos/x/.git/worktrees/y\n")
+        self.assertEqual(turnloop.run(self.agent_dir), turns.EXIT_ERROR)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1599,6 +1599,11 @@ class Reconciler:
         Best-effort by design: a fetch or merge failure must never block a
         restart, since resuming where it left off is exactly the old behaviour.
         """
+        # Re-link the worktree with its admin gitdir first (idempotent): a
+        # restart can leave that pointer stale, which breaks both this sync's
+        # git calls and, once relaunched, the container's git-common-dir mount
+        # (FUG-116). The in-container preflight is the backstop if it recurs.
+        self.git.repair_worktree(Path(rec.repo), Path(rec.worktree))
         forge = self.forges.get(project.name)
         try:
             if forge is not None:

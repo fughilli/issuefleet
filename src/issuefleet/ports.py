@@ -99,6 +99,12 @@ class Git(Protocol):
         repo's own .gitignore."""
         ...
 
+    def repair_worktree(self, repo: Path, path: Path) -> None:
+        """Re-link a worktree with its admin gitdir before a restart
+        (idempotent; best-effort). Fixes a post-crash stale link that would
+        otherwise break the worktree's git and the launcher's mount."""
+        ...
+
     def has_commits_ahead(self, worktree: Path, base_ref: str) -> bool: ...
 
     def diff(self, worktree: Path, base_ref: str) -> str:
