@@ -1,3 +1,16 @@
+load("@rules_python//python:defs.bzl", "py_binary")
+
 # The Bazelisk wrapper is a plain script read from the source tree, not a build
 # target; it is exported only so tests can depend on the real file as data.
 exports_files(["bazel"])
+
+# `bazel run //tools:takeover -- FUG-555`: release a worker's branch, edit it in
+# a live local claude-container session, then hand it back to the fleet. A thin
+# wrapper over `issuefleet takeover` (see issuefleet/takeover.py).
+py_binary(
+    name = "takeover",
+    srcs = ["takeover.py"],
+    main = "takeover.py",
+    visibility = ["//visibility:public"],
+    deps = ["//src/issuefleet"],
+)
