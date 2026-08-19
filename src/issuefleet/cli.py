@@ -1,4 +1,4 @@
-"""The issuefleet CLI: doctor / run / once / status / attach / stop / logs."""
+"""The issuefleet CLI: doctor / run / once / status / attach / stop / takeover / logs."""
 
 from __future__ import annotations
 
@@ -483,6 +483,15 @@ def cmd_stop(cfg: Config, key: str) -> int:
     return 0
 
 
+def cmd_takeover(cfg: Config, key: str) -> int:
+    from issuefleet import takeover
+
+    try:
+        return takeover.run(cfg, key)
+    except takeover.TakeoverError as e:
+        raise SystemExit(f"takeover: {e}")
+
+
 def cmd_logs(cfg: Config, key: str, follow: bool) -> int:
     registry = Registry(cfg.state_dir)
     runner = TmuxRunner(log_dir=cfg.state_dir / "logs")
@@ -631,6 +640,7 @@ def build_parser() -> argparse.ArgumentParser:
     for name, help_ in (
         ("attach", "attach to a worker's tmux session"),
         ("stop", "wind one worker down"),
+        ("takeover", "release a branch, edit it in a live local session, then hand it back"),
     ):
         p = sub.add_parser(name, parents=[common], help=help_)
         p.add_argument("issue", help="issue key, e.g. FUG-12")
@@ -674,6 +684,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_attach(cfg, args.issue)
         if args.cmd == "stop":
             return cmd_stop(cfg, args.issue)
+        if args.cmd == "takeover":
+            return cmd_takeover(cfg, args.issue)
         if args.cmd == "logs":
             return cmd_logs(cfg, args.issue, args.follow)
     except creds.CredentialError as e:

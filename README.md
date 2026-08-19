@@ -256,6 +256,32 @@ fighting you (it force-pushes; it commits under you). All three moves are
 Before adopting, make sure the branch isn't checked out in another worktree —
 git won't let two worktrees hold the same branch.
 
+**Taking a branch over from the command line** wraps that whole
+release → edit → adopt loop into one interactive command, so you don't have to
+click Release, check the branch out by hand, and click Adopt:
+
+```
+bazel run //tools:takeover -- FUG-555      # or: issuefleet takeover FUG-555
+```
+
+It asks the running daemon to **release** `FUG-555` (over the same dashboard
+control channel the button uses), rebuilds a local worktree on the freed branch,
+and drops you into an **interactive `claude-container` session resuming the
+worker's exact Claude conversation** (same session id, same config dir — you see
+everything the worker did). Edit however you like; when you exit, the branch is
+**adopted back** and the headless worker resumes *the same session again* — now
+including your turns — so it knows what happened, and gets the adopt flow's
+"an operator worked on this locally; check `git log`/`git status`" note on top.
+
+Only committed work returns (the branch ref is shared, so your commits survive
+without a push; the worktree is rebuilt on adopt, so **commit before you exit** —
+uncommitted changes are discarded). The command drives the two transitions
+through the daemon (it never mutates the fleet itself, so it can't race the tick
+thread), so it needs the daemon running with the dashboard enabled; point it at a
+remote/tailnet daemon with `ISSUEFLEET_DASHBOARD_URL`. If the session is
+interrupted (Ctrl-C, crash), it still hands the branch back; a hard kill leaves
+it `released`, which you can adopt from the dashboard.
+
 **Adding a project** (`/projects`) is the other mutating action. Fill in the
 name, Linear project, repo path, an optional `git_url` to clone from, and a
 claim rule, then submit. As with Stop, the web thread never touches the fleet:
@@ -666,6 +692,7 @@ bin/issuefleet status            # fleet: phase, turns, PR, liveness, pending me
 bin/issuefleet attach FUG-12     # the worker's live tmux session (take over freely)
 bin/issuefleet logs FUG-12 -f    # tail its captured output
 bin/issuefleet stop FUG-12       # wind one worker down by hand
+bin/issuefleet takeover FUG-12   # grab its branch for a live local session, then hand it back
 bin/issuefleet once              # single reconcile tick (cron-friendly)
 bin/issuefleet once --dry-run    # print every action a tick would take; mutate nothing
 ```
