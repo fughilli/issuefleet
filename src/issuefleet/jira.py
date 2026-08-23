@@ -275,10 +275,14 @@ class JiraTracker:
     # -- comments ----------------------------------------------------------
 
     def _recent_comments(self, issue_id: str, count: int = 100) -> list[Comment]:
+        # Newest first so a long thread's most-recent comments are the ones we
+        # read (like Linear's `last: N`); we re-sort ascending below. Fetching
+        # ascending from the start would page the OLDEST comments and never see
+        # new replies once a thread passes `count`.
         data = self.client.request(
             "GET",
             f"/issue/{issue_id}/comment",
-            params={"maxResults": count, "orderBy": "created"},
+            params={"maxResults": count, "orderBy": "-created"},
         )
         out = []
         for n in data.get("comments", []):
