@@ -100,6 +100,51 @@ The CLI is stdlib-only Python 3.11+: run `bin/issuefleet` directly, or
 hermetically via `bazel run //:issuefleet --`. A Nix devshell (`nix develop`)
 provides bazelisk/python/tmux on hosts that want it.
 
+## Jira instead of Linear
+
+The tracker is a single narrow port (`ports.py`), so **Atlassian Jira** slots
+in behind it alongside Linear. Set `[credentials] tracker = "jira"` and every
+`[[projects]]` entry drains a Jira board instead:
+
+```toml
+[credentials]
+tracker = "jira"
+jira_site = "https://your-org.atlassian.net"
+jira_email = "bot@your-org.com"      # not a secret; the API token authenticates as this account
+jira_auth = "basic"                   # "basic" = Cloud (email + API token); "bearer" = Server/DC PAT
+jira_api_token_file = "~/.config/issuefleet/jira.key"   # or $JIRA_API_TOKEN
+
+[[projects]]
+name = "acme"
+jira_project = "PROJ"                  # the Jira project KEY (not a Linear project name)
+repo = "~/Projects/acme"
+claim = { strategy = "label", value = "agent" }
+state_in_progress = "In Progress"     # target STATUS names to transition into
+state_done = "Done"
+```
+
+Create the token at <https://id.atlassian.com/manage-profile/security/api-tokens>
+(Cloud) or as a Personal Access Token (Server/Data Center, with `jira_auth =
+"bearer"`); it follows the usual env-then-file rule and never lives in the
+config. `bin/issuefleet doctor` verifies the credential, authenticates, and
+reports what each board would claim, exactly as it does for Linear.
+
+What carries over and what differs:
+
+- **Claim strategies** `label` / `assignee` / `state` work identically
+  (assignee matches a Jira `accountId`; state matches a status name). The
+  `agent` strategy is Linear-only — it claims via the Linear agents platform
+  (delegation / @-mention), which Jira has no equivalent of.
+- **`state_in_progress` / `state_done`** name Jira *statuses*; issuefleet moves
+  an issue by finding the workflow **transition** into that status, so each
+  target must be reachable from the issue's current status.
+- **One backend per daemon.** Credentials and identity are fleet-wide, so a
+  mixed Linear+Jira setup runs as two daemons with separate `state_dir`s.
+- **Poll-only.** Jira has no agent-session platform, so the Linear-specific
+  webhook path, roadmap bot, and fleet manager stay disabled under `jira`
+  (doctor and the config loader flag this). Polling is already the source of
+  truth, so a Jira fleet just runs on `poll_interval_s`.
+
 ## Bot identities (optional, recommended)
 
 **GitHub App (preferred).** PRs open as `yourapp[bot]`, auth uses

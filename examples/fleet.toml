@@ -30,6 +30,26 @@ linear_auth = "client_credentials"
 linear_oauth_client_id = ""
 linear_oauth_client_secret_file = "~/.config/issuefleet/linear_oauth_client.secret"
 
+# Tracker backend for the whole fleet: "linear" (default) or "jira". One
+# backend per daemon — credentials and identity are fleet-wide, and the
+# reconcile loop holds a single tracker. Run a mixed Linear+Jira setup as two
+# daemons with separate state_dirs. Under "jira", every [[projects]] entry names
+# a Jira project KEY via jira_project (not linear_project), and the roadmap bot
+# / fleet manager (Linear-only APIs) must stay disabled.
+# tracker = "jira"
+#
+# Jira credentials. jira_site and jira_email are not secrets and live here; the
+# API token / PAT follows the usual env-then-file rule (never in this file).
+#   jira_auth = "basic"  — Atlassian Cloud: HTTP Basic with jira_email + an API
+#                          token from id.atlassian.com/manage-profile/security.
+#   jira_auth = "bearer" — Jira Server/Data Center: a Personal Access Token sent
+#                          as a Bearer header (jira_email is then unused).
+# jira_site = "https://your-org.atlassian.net"
+# jira_email = "bot@your-org.com"
+# jira_auth = "basic"
+# jira_api_token_env = "JIRA_API_TOKEN"
+# jira_api_token_file = "~/.config/issuefleet/jira.key"
+
 # Push wake-ups (and required for the Linear agents platform). Put a tunnel
 # (Cloudflare Tunnel / Tailscale Funnel) in front of 127.0.0.1:8787.
 [webhooks]
@@ -169,3 +189,18 @@ claim = { strategy = "state", value = "Ready for agent" }
 state_in_progress = "In Progress"
 state_done = "Done"
 max_workers = 2
+
+# A Jira-backed project (only when [credentials] tracker = "jira"). Name the
+# Jira project KEY, not a Linear project. claim strategies label / assignee /
+# state work the same (assignee matches an accountId; state matches a Jira
+# status name). 'agent' is Linear-only. state_in_progress / state_done are the
+# target STATUS names issuefleet transitions the issue to — there must be a
+# workflow transition into each from the issue's current status.
+# [[projects]]
+# name = "acme"
+# jira_project = "PROJ"
+# repo = "~/Projects/acme"
+# base_ref = "main"
+# claim = { strategy = "label", value = "agent" }
+# state_in_progress = "In Progress"
+# state_done = "Done"

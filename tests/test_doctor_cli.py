@@ -29,6 +29,17 @@ class FakeDoctorTracker(FakeTracker):
         return {"todo": "s0", "in progress": "s1", "done": "s2"}
 
 
+class FakeJiraDoctorTracker(FakeTracker):
+    """FakeTracker + the Jira doctor surface (myself, open_issues)."""
+
+    def myself(self):
+        return {"accountId": self.viewer_id, "displayName": "fleet-bot",
+                "emailAddress": "bot@example.com"}
+
+    def open_issues(self, project):
+        return [i for i in self.issues.values() if i.open]
+
+
 class PlanTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -399,6 +410,50 @@ claim = {{ strategy = "agent" }}
             self.assertNotIn("not a git repository", text)
         finally:
             del os.environ["LINEAR_API_KEY"]
+            del os.environ["GITHUB_TOKEN"]
+
+    def test_jira_tracker_reports_would_claim(self):
+        import os
+
+        os.environ["JIRA_API_TOKEN"] = "jtok"
+        os.environ["GITHUB_TOKEN"] = "t"
+        try:
+            p = self.write_config(
+                f"""
+[daemon]
+state_dir = "{self.root}/state"
+worktree_root = "{self.root}/wt"
+[credentials]
+tracker = "jira"
+jira_site = "https://acme.atlassian.net"
+jira_email = "bot@acme.com"
+[[projects]]
+name = "acme"
+jira_project = "PROJ"
+repo = "{self.root}/repo"
+claim = {{ strategy = "label", value = "agent" }}
+"""
+            )
+            tracker = FakeJiraDoctorTracker()
+            tracker.add_issue(make_issue(1, key="PROJ-1"))
+            tracker.add_issue(make_issue(2, key="PROJ-2", labels=[]))  # open, not eligible
+            git = FakeGit(self.root)
+            git.is_repo = lambda repo: True
+            git.remote_url = lambda repo: "git@github.com:fughilli/acme.git"
+            out = io.StringIO()
+            code = run_doctor(
+                p, tracker=tracker, forges={"acme": FakeForge()}, git=git,
+                runner=FakeRunner(), stream=out,
+            )
+            text = out.getvalue()
+            self.assertIn("Jira API token", text)
+            self.assertIn("authenticated as fleet-bot", text)
+            self.assertIn("Jira project 'PROJ'", text)
+            self.assertIn("2 open issue(s), 1 eligible", text)
+            self.assertIn("Would claim now:", text)
+            self.assertIn("PROJ-1", text)
+        finally:
+            del os.environ["JIRA_API_TOKEN"]
             del os.environ["GITHUB_TOKEN"]
 
     def test_missing_credentials_is_actionable(self):

@@ -22,6 +22,7 @@ from issuefleet.gitops import Gitops
 from issuefleet.linear import LinearClient, LinearTracker, client_from_config
 from issuefleet.reconcile import Reconciler
 from issuefleet.registry import Registry
+from issuefleet.trackers import build_tracker
 
 OK, WARN, FAIL = "ok", "warn", "fail"
 _ICON = {OK: "✓", WARN: "⚠", FAIL: "✗"}
@@ -379,6 +380,51 @@ def _check_linear(cfg: Config, tracker) -> list[Check]:
     return out
 
 
+def _check_jira(cfg: Config, tracker) -> list[Check]:
+    out = []
+    try:
+        _token, source = creds.resolve_jira_token(cfg)
+    except creds.CredentialError as e:
+        return [Check(FAIL, "Jira API token", str(e))]
+    out.append(Check(OK, "Jira API token", f"from {source} ({cfg.jira_auth} auth)"))
+    if not creds.file_permissions_ok(cfg.jira_api_token_file):
+        out.append(Check(WARN, f"{cfg.jira_api_token_file}",
+                         "readable by group/other — chmod 600 it"))
+    if tracker is None:
+        from issuefleet import jira
+
+        tracker = jira.JiraTracker(jira.client_from_config(cfg))
+    try:
+        me = tracker.myself()
+        out.append(Check(OK, "Jira API", f"authenticated as {me.get('displayName')} "
+                         f"({me.get('emailAddress', 'no email')}) at {cfg.jira_site}"))
+    except Exception as e:
+        out.append(Check(FAIL, "Jira API", str(e)))
+        return out
+
+    for project in cfg.projects:
+        try:
+            issues = tracker.open_issues(project)
+            eligible = [i for i in issues if project.claim.matches(i)]
+            out.append(Check(
+                OK, f"[{project.name}] Jira project {project.jira_project!r}",
+                f"{len(issues)} open issue(s), {len(eligible)} eligible "
+                f"({project.claim.strategy}={project.claim.value!r})"))
+            # Unlike Linear's fixed team workflow, Jira transitions are
+            # contextual (they depend on an issue's current status), so we can't
+            # verify state_in_progress/state_done up front — set_state resolves
+            # them live and errors clearly if a transition isn't reachable.
+        except Exception as e:
+            out.append(Check(FAIL, f"[{project.name}] Jira project", str(e)))
+    return out
+
+
+def _check_tracker(cfg: Config, tracker) -> list[Check]:
+    if cfg.tracker == "jira":
+        return _check_jira(cfg, tracker)
+    return _check_linear(cfg, tracker)
+
+
 def _check_github(cfg: Config, git: Gitops, forges: dict | None) -> list[Check]:
     out = []
     mode = creds.github_auth_mode(cfg)
@@ -491,19 +537,19 @@ def run_doctor(
     checks += _check_fleet_manager(cfg)
     checks += _check_roadmap(cfg)
     checks += _check_security(cfg)
-    linear_checks = _check_linear(cfg, tracker)
-    checks += linear_checks
+    tracker_checks = _check_tracker(cfg, tracker)
+    checks += tracker_checks
     checks += _check_github(cfg, git, forges)
 
     for c in checks:
         print(c.render(), file=stream)
 
     # The would-claim report: exactly what `run` would pick up, claim-order.
-    if tracker is not None or not any(c.status == FAIL for c in linear_checks):
+    if tracker is not None or not any(c.status == FAIL for c in tracker_checks):
         try:
             registry = Registry(cfg.state_dir)
             if tracker is None:
-                tracker = LinearTracker(client_from_config(cfg))
+                tracker = build_tracker(cfg)
             rec = Reconciler(cfg, registry, tracker, forges or {}, git, runner or _NullRunner())
             eligible = {p.name: tracker.eligible_issues(p) for p in cfg.projects}
             claim_now, waiting = rec.claim_queue(eligible)

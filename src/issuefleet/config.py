@@ -22,6 +22,7 @@ CLAIM_STRATEGIES = ("label", "assignee", "state", "agent")
 
 _FORBIDDEN_SECRET_KEYS = (
     "linear_api_key",
+    "jira_api_token",
     "github_token",
     "gh_token",
     "token",
@@ -29,6 +30,16 @@ _FORBIDDEN_SECRET_KEYS = (
     "bot_token",
     "webhook_url",
 )
+
+# Issue tracker backends. One per daemon: credentials and identity are
+# fleet-wide (one Linear workspace / one Jira site), and the reconcile loop
+# holds a single Tracker. A mixed Linear+Jira setup runs as two daemons with
+# separate state dirs. Default "linear" keeps every existing config working.
+TRACKERS = ("linear", "jira")
+
+# How the daemon authenticates to Jira. "basic" = email + API token (Atlassian
+# Cloud); "bearer" = a Personal Access Token (Jira Server/Data Center).
+JIRA_AUTH_MODES = ("basic", "bearer")
 
 # How the roadmap bot reaches a Discord channel. See DiscordSurfaceConfig.
 DISCORD_MODES = ("bot", "webhook")
@@ -94,9 +105,14 @@ class ClaimRule:
 @dataclass
 class ProjectConfig:
     name: str  # short handle, used in paths and logs
-    linear_project: str  # Linear project name or UUID
+    # The tracker-side board this project drains. Exactly one is set, per the
+    # fleet's [credentials] tracker: ``linear_project`` (Linear project name or
+    # UUID) or ``jira_project`` (Jira project key, e.g. "PROJ"). ``board_ref``
+    # returns whichever is populated.
+    linear_project: str  # Linear project name or UUID ("" on a Jira fleet)
     repo: Path  # local main checkout (push remote = origin)
     claim: ClaimRule
+    jira_project: str = ""  # Jira project key, e.g. "PROJ" ("" on a Linear fleet)
     # Remote to clone from when `repo` doesn't exist yet — the daemon
     # bootstraps the checkout itself, and `repo` is always a real clone it
     # owns. Without it, a missing repo is an error. (Only owner/name is
@@ -109,6 +125,11 @@ class ProjectConfig:
     state_done: str = "Done"
     delete_remote_branch: bool = True
     max_workers: int | None = None  # per-project cap; None = only global cap
+
+    @property
+    def board_ref(self) -> str:
+        """The tracker-side board reference, whichever backend this fleet uses."""
+        return self.jira_project or self.linear_project
 
 
 @dataclass
@@ -332,6 +353,10 @@ class Config:
     # didn't ask. The motivating case is TS_AUTHKEY: led_mapper's overlay joins
     # the tailnet at container start so workers can reach the HITL rigs.
     worker_env: dict[str, EnvSource] = field(default_factory=dict)
+    # Issue tracker backend for the whole fleet: "linear" (default) or "jira".
+    # See TRACKERS. The reconcile loop holds one Tracker; every project drains
+    # this backend.
+    tracker: str = "linear"
     # credential lookup (values are env var names / file paths, never secrets)
     linear_api_key_env: str = "LINEAR_API_KEY"
     linear_api_key_file: Path = Path("~/.config/issuefleet/linear.key").expanduser()
@@ -360,6 +385,17 @@ class Config:
         "~/.config/issuefleet/linear_oauth_client.secret"
     ).expanduser()
     linear_oauth_redirect_port: int = 9779
+    # Jira (tracker = "jira"). The site base URL and login email are not secrets
+    # and live here; the API token / PAT follows the usual env-then-file rule.
+    #   jira_auth = "basic"  — Atlassian Cloud: HTTP Basic with jira_email + the
+    #                          API token (id.atlassian.com/manage-profile/security).
+    #   jira_auth = "bearer" — Jira Server/Data Center: a Personal Access Token
+    #                          sent as a Bearer header (jira_email is unused).
+    jira_site: str = ""  # e.g. "https://your-org.atlassian.net"
+    jira_email: str = ""  # Atlassian account email (basic auth only)
+    jira_auth: str = "basic"
+    jira_api_token_env: str = "JIRA_API_TOKEN"
+    jira_api_token_file: Path = Path("~/.config/issuefleet/jira.key").expanduser()
     webhooks: WebhookConfig = field(default_factory=WebhookConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     fleet_manager: FleetManagerConfig = field(default_factory=FleetManagerConfig)
@@ -598,14 +634,19 @@ def _path(v: str) -> Path:
     return Path(os.path.expandvars(v)).expanduser()
 
 
-def parse_project(p: dict, where: str) -> ProjectConfig:
+def parse_project(p: dict, where: str, tracker: str = "linear") -> ProjectConfig:
     """Validate and build one ``[[projects]]`` entry. Shared by ``parse`` (the
     file loader) and the dashboard's add-project path, so a project typed into
-    the web form is checked exactly the way one written into the config is."""
+    the web form is checked exactly the way one written into the config is.
+
+    ``tracker`` is the fleet's backend (``parse`` passes the configured one):
+    it decides whether the required board key is ``linear_project`` or
+    ``jira_project``."""
     if not isinstance(p, dict):
         raise ConfigError(f"{where}: a project must be a table")
     _reject_secrets(p, where)
-    for req in ("name", "linear_project", "repo"):
+    board_key = "jira_project" if tracker == "jira" else "linear_project"
+    for req in ("name", board_key, "repo"):
         if not p.get(req):
             raise ConfigError(f"{where}: missing required key {req!r}")
     claim_raw = p.get("claim", {"strategy": "label", "value": "agent"})
@@ -613,6 +654,12 @@ def parse_project(p: dict, where: str) -> ProjectConfig:
     if strategy not in CLAIM_STRATEGIES:
         raise ConfigError(
             f"{where}: claim.strategy must be one of {CLAIM_STRATEGIES}, got {strategy!r}"
+        )
+    if strategy == "agent" and tracker != "linear":
+        raise ConfigError(
+            f"{where}: claim.strategy = 'agent' needs the Linear tracker "
+            "(it claims via delegation / @-mention agent sessions, which Jira "
+            "has no equivalent of) — use label, assignee, or state on a Jira fleet"
         )
     if strategy != "agent" and not claim_raw.get("value"):
         raise ConfigError(f"{where}: claim.value is required (e.g. the label name)")
@@ -634,7 +681,8 @@ def parse_project(p: dict, where: str) -> ProjectConfig:
             raise ConfigError(f"{where}: max_workers must be >= 1")
     return ProjectConfig(
         name=p["name"],
-        linear_project=p["linear_project"],
+        linear_project=p.get("linear_project", ""),
+        jira_project=p.get("jira_project", ""),
         repo=_path(p["repo"]),
         claim=ClaimRule(strategy=strategy, value=claim_raw.get("value", "")),
         git_url=p.get("git_url") or None,
@@ -660,12 +708,12 @@ def project_to_toml(p: ProjectConfig) -> str:
     dashboard-added project to the add-project drop-in; kept minimal and
     canonical (only the fields the project carries), not a faithful echo of
     hand-written formatting."""
-    lines = [
-        "[[projects]]",
-        f"name = {_toml_str(p.name)}",
-        f"linear_project = {_toml_str(p.linear_project)}",
-        f"repo = {_toml_str(str(p.repo))}",
-    ]
+    lines = ["[[projects]]", f"name = {_toml_str(p.name)}"]
+    if p.jira_project:
+        lines.append(f"jira_project = {_toml_str(p.jira_project)}")
+    else:
+        lines.append(f"linear_project = {_toml_str(p.linear_project)}")
+    lines.append(f"repo = {_toml_str(str(p.repo))}")
     if p.git_url:
         lines.append(f"git_url = {_toml_str(p.git_url)}")
     lines.append(f"base_ref = {_toml_str(p.base_ref)}")
@@ -746,7 +794,7 @@ def _merge_added_projects(cfg: Config) -> None:
     known = {p.name for p in cfg.projects}
     for i, raw in enumerate(data.get("projects", [])):
         try:
-            p = parse_project(raw, f"{path} [[projects]] #{i + 1}")
+            p = parse_project(raw, f"{path} [[projects]] #{i + 1}", cfg.tracker)
         except ConfigError as e:
             log.warning("skipping invalid project in drop-in %s: %s", path, e)
             continue
@@ -783,12 +831,16 @@ def parse(data: dict, source: str = "<config>") -> Config:
             raise ConfigError(f"{source}: [{name}] must be a table")
         _reject_secrets(table, f"{source} [{name}]")
 
+    tracker = creds.get("tracker", "linear")
+    if tracker not in TRACKERS:
+        raise ConfigError(f"{source}: tracker must be one of {TRACKERS}, got {tracker!r}")
+
     raw_projects = data.get("projects", [])
     if not raw_projects:
         raise ConfigError(f"{source}: at least one [[projects]] entry is required")
 
     projects = [
-        parse_project(p, f"{source} [[projects]] #{i + 1}")
+        parse_project(p, f"{source} [[projects]] #{i + 1}", tracker)
         for i, p in enumerate(raw_projects)
     ]
     names = [p.name for p in projects]
@@ -797,6 +849,7 @@ def parse(data: dict, source: str = "<config>") -> Config:
 
     cfg = Config(
         projects=projects,
+        tracker=tracker,
         poll_interval_s=int(daemon.get("poll_interval_s", 60)),
         max_workers=int(daemon.get("max_workers", 4)),
         max_auto_turns=int(agent.get("max_auto_turns", 50)),
@@ -850,6 +903,30 @@ def parse(data: dict, source: str = "<config>") -> Config:
     if "linear_oauth_redirect_port" in creds:
         cfg.linear_oauth_redirect_port = int(creds["linear_oauth_redirect_port"])
 
+    cfg.jira_site = str(creds.get("jira_site", "") or "").rstrip("/")
+    cfg.jira_email = str(creds.get("jira_email", "") or "")
+    if "jira_auth" in creds:
+        if creds["jira_auth"] not in JIRA_AUTH_MODES:
+            raise ConfigError(
+                f"{source}: jira_auth must be one of {JIRA_AUTH_MODES}, got {creds['jira_auth']!r}"
+            )
+        cfg.jira_auth = creds["jira_auth"]
+    if "jira_api_token_env" in creds:
+        cfg.jira_api_token_env = str(creds["jira_api_token_env"])
+    if "jira_api_token_file" in creds:
+        cfg.jira_api_token_file = _path(creds["jira_api_token_file"])
+    if cfg.tracker == "jira":
+        if not cfg.jira_site:
+            raise ConfigError(
+                f"{source}: tracker = 'jira' needs [credentials] jira_site "
+                "(e.g. \"https://your-org.atlassian.net\")"
+            )
+        if cfg.jira_auth == "basic" and not cfg.jira_email:
+            raise ConfigError(
+                f"{source}: jira_auth = 'basic' needs [credentials] jira_email "
+                "(the API token authenticates as this Atlassian account)"
+            )
+
     cfg.webhooks = WebhookConfig(
         enabled=bool(hooks.get("enabled", False)),
         bind=hooks.get("bind", "127.0.0.1"),
@@ -874,6 +951,20 @@ def parse(data: dict, source: str = "<config>") -> Config:
     cfg.fleet_manager = _parse_fleet_manager(fleet, source)
     cfg.roadmap = _parse_roadmap(roadmap, source)
     cfg.security = _parse_security(security, source)
+
+    # The fleet manager and roadmap bot drive Linear-only APIs (issue authoring,
+    # workflow/team introspection, agent activities) that the Jira tracker does
+    # not implement — fail fast rather than crash at runtime on a Jira fleet.
+    if cfg.tracker != "linear":
+        for name, enabled in (
+            ("fleet_manager", cfg.fleet_manager.enabled),
+            ("roadmap", cfg.roadmap.enabled),
+        ):
+            if enabled:
+                raise ConfigError(
+                    f"{source}: [{name}] requires the Linear tracker "
+                    f"(tracker = {cfg.tracker!r}); disable it or switch trackers"
+                )
 
     if cfg.poll_interval_s < 5:
         raise ConfigError(f"{source}: poll_interval_s must be >= 5")

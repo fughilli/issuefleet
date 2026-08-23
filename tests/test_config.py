@@ -495,5 +495,115 @@ class AppendProjectTest(unittest.TestCase):
         self.assertEqual(leftovers, [])
 
 
+JIRA_MINIMAL = {
+    "credentials": {
+        "tracker": "jira",
+        "jira_site": "https://acme.atlassian.net/",
+        "jira_email": "bot@acme.com",
+    },
+    "projects": [
+        {
+            "name": "acme",
+            "jira_project": "PROJ",
+            "repo": "~/Projects/acme",
+            "claim": {"strategy": "label", "value": "agent"},
+        }
+    ],
+}
+
+
+class JiraConfigTest(unittest.TestCase):
+    def test_default_tracker_is_linear(self):
+        self.assertEqual(config.parse(MINIMAL).tracker, "linear")
+
+    def test_jira_minimal_parses(self):
+        cfg = config.parse(JIRA_MINIMAL)
+        self.assertEqual(cfg.tracker, "jira")
+        self.assertEqual(cfg.jira_site, "https://acme.atlassian.net")  # trailing / stripped
+        self.assertEqual(cfg.jira_email, "bot@acme.com")
+        self.assertEqual(cfg.jira_auth, "basic")
+        p = cfg.projects[0]
+        self.assertEqual(p.jira_project, "PROJ")
+        self.assertEqual(p.board_ref, "PROJ")
+
+    def test_unknown_tracker_rejected(self):
+        data = {"credentials": {"tracker": "asana"}, "projects": MINIMAL["projects"]}
+        with self.assertRaises(ConfigError):
+            config.parse(data)
+
+    def test_jira_requires_project_key(self):
+        data = {
+            "credentials": {"tracker": "jira", "jira_site": "https://a.atlassian.net",
+                            "jira_email": "b@a.com"},
+            "projects": [{"name": "acme", "linear_project": "PROJ", "repo": "/r"}],
+        }
+        with self.assertRaises(ConfigError):
+            config.parse(data)  # linear_project set, jira_project missing
+
+    def test_jira_requires_site(self):
+        data = {"credentials": {"tracker": "jira", "jira_email": "b@a.com"},
+                "projects": JIRA_MINIMAL["projects"]}
+        with self.assertRaises(ConfigError):
+            config.parse(data)
+
+    def test_jira_basic_requires_email(self):
+        data = {"credentials": {"tracker": "jira", "jira_site": "https://a.atlassian.net"},
+                "projects": JIRA_MINIMAL["projects"]}
+        with self.assertRaises(ConfigError):
+            config.parse(data)
+
+    def test_jira_bearer_needs_no_email(self):
+        data = {
+            "credentials": {"tracker": "jira", "jira_site": "https://a.atlassian.net",
+                            "jira_auth": "bearer"},
+            "projects": JIRA_MINIMAL["projects"],
+        }
+        self.assertEqual(config.parse(data).jira_auth, "bearer")
+
+    def test_jira_bad_auth_rejected(self):
+        data = {
+            "credentials": {"tracker": "jira", "jira_site": "https://a.atlassian.net",
+                            "jira_email": "b@a.com", "jira_auth": "oauth"},
+            "projects": JIRA_MINIMAL["projects"],
+        }
+        with self.assertRaises(ConfigError):
+            config.parse(data)
+
+    def test_agent_claim_rejected_on_jira(self):
+        data = {
+            "credentials": {"tracker": "jira", "jira_site": "https://a.atlassian.net",
+                            "jira_email": "b@a.com"},
+            "projects": [{"name": "acme", "jira_project": "PROJ", "repo": "/r",
+                          "claim": {"strategy": "agent"}}],
+        }
+        with self.assertRaises(ConfigError):
+            config.parse(data)
+
+    def test_literal_token_in_config_rejected(self):
+        data = {
+            "credentials": {"tracker": "jira", "jira_site": "https://a.atlassian.net",
+                            "jira_email": "b@a.com", "jira_api_token": "secret-token-value"},
+            "projects": JIRA_MINIMAL["projects"],
+        }
+        with self.assertRaises(ConfigError):
+            config.parse(data)
+
+    def test_fleet_manager_rejected_on_jira(self):
+        data = {
+            "credentials": JIRA_MINIMAL["credentials"],
+            "projects": JIRA_MINIMAL["projects"],
+            "fleet_manager": {"enabled": True, "base_url": "http://x", "board_project": "P",
+                              "board_team": "T"},
+        }
+        with self.assertRaises(ConfigError):
+            config.parse(data)
+
+    def test_jira_project_round_trips_through_toml(self):
+        p = config.parse(JIRA_MINIMAL).projects[0]
+        rendered = config.project_to_toml(p)
+        self.assertIn('jira_project = "PROJ"', rendered)
+        self.assertNotIn("linear_project", rendered)
+
+
 if __name__ == "__main__":
     unittest.main()
