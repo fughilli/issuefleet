@@ -17,6 +17,7 @@ from issuefleet.webhooks import (
     linear_timestamp_fresh,
     parse_session_event,
     verify_github_signature,
+    verify_gitlab_token,
     verify_linear_signature,
 )
 
@@ -37,6 +38,13 @@ class SignatureTest(unittest.TestCase):
         self.assertFalse(verify_github_signature("s3cret", body, "sha256=deadbeef"))
         self.assertFalse(verify_github_signature("s3cret", body, None))
         self.assertFalse(verify_github_signature("s3cret", body, "nosha_prefix"))
+
+    def test_gitlab_token(self):
+        # GitLab sends the shared secret verbatim — a constant-time equality
+        # check, not an HMAC over the body.
+        self.assertTrue(verify_gitlab_token("s3cret", "s3cret"))
+        self.assertFalse(verify_gitlab_token("s3cret", "wrong"))
+        self.assertFalse(verify_gitlab_token("s3cret", None))
 
     def test_linear_signature(self):
         body = b'{"type":"Comment"}'
@@ -115,6 +123,7 @@ class WebhookServerTest(unittest.TestCase):
             wake=self.woken.set,
             on_session=self.sessions.append,
             github_secret="gh-secret",
+            gitlab_secret="gl-secret",
             linear_secret="lin-secret",
         ).start()
         self.base = f"http://127.0.0.1:{self.server.port}"
@@ -143,6 +152,20 @@ class WebhookServerTest(unittest.TestCase):
     def test_github_bad_signature_rejected(self):
         body = b"{}"
         code = self.post("/webhook/github", body, {"X-Hub-Signature-256": gh_sig("wrong", body)})
+        self.assertEqual(code, 401)
+        self.assertFalse(self.woken.is_set())
+
+    def test_gitlab_valid_wakes(self):
+        body = b'{"object_kind":"merge_request"}'
+        code = self.post(
+            "/webhook/gitlab", body,
+            {"X-Gitlab-Token": "gl-secret", "X-Gitlab-Event": "Merge Request Hook"},
+        )
+        self.assertEqual(code, 200)
+        self.assertTrue(self.woken.wait(2))
+
+    def test_gitlab_bad_token_rejected(self):
+        code = self.post("/webhook/gitlab", b"{}", {"X-Gitlab-Token": "wrong"})
         self.assertEqual(code, 401)
         self.assertFalse(self.woken.is_set())
 

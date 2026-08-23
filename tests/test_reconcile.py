@@ -1077,7 +1077,7 @@ class AddProjectTest(unittest.TestCase):
         self.runner = FakeRunner()
         self.rec = Reconciler(
             self.cfg, self.registry, self.tracker, {"splanc": FakeForge()},
-            self.git, self.runner, token_source=lambda owner: "faketoken",
+            self.git, self.runner, forge_factory=lambda project, remote: FakeForge(),
         )
 
     def tearDown(self):
@@ -1137,7 +1137,7 @@ class AddProjectTest(unittest.TestCase):
     def test_no_token_source_reports_error(self):
         rec = Reconciler(
             self.cfg, self.registry, self.tracker, {"splanc": FakeForge()},
-            self.git, self.runner,  # token_source=None
+            self.git, self.runner,  # forge_factory=None
         )
         rec.enqueue_add_project(self.valid_spec())
         rec.tick()

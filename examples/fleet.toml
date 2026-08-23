@@ -18,6 +18,13 @@ github_token_file = "~/.config/issuefleet/github.key"
 github_auth = "auto"
 github_app_id = ""
 github_app_key_file = "~/.config/issuefleet/github_app.pem"
+# GitLab credential — only needed if a [[projects]] entry resolves to GitLab
+# (see the per-project `forge` note below). A personal, group, or project
+# access token with the `api` scope; the same token opens merge requests and
+# authenticates git-over-HTTPS. It's a secret, so it lives in the env or a
+# chmod-600 file, never here.
+gitlab_token_env = ["GITLAB_TOKEN"]
+gitlab_token_file = "~/.config/issuefleet/gitlab.key"
 # linear_auth: auto (infer from a static key's prefix) | api_key (raw) |
 # oauth (Bearer) | client_credentials. Prefer "client_credentials" for the
 # daemon: it mints its own 30-day app-actor token from the client id/secret
@@ -37,6 +44,11 @@ enabled = false
 bind = "127.0.0.1"
 port = 8787
 github_secret_file = "~/.config/issuefleet/github_webhook.secret"
+# GitLab webhook (POST /webhook/gitlab): GitLab sends this secret verbatim in
+# the X-Gitlab-Token header (a shared-secret compare, not an HMAC signature).
+# Set it as the "Secret token" on the project/group webhook. Only needed for
+# GitLab projects.
+gitlab_secret_file = "~/.config/issuefleet/gitlab_webhook.secret"
 linear_secret_file = "~/.config/issuefleet/linear_webhook.secret"
 
 # Introspection + light-control web UI served by the running daemon: lists
@@ -169,3 +181,21 @@ claim = { strategy = "state", value = "Ready for agent" }
 state_in_progress = "In Progress"
 state_done = "Done"
 max_workers = 2
+
+# A GitLab-hosted project. The forge is picked per project: it's inferred from
+# the remote host (gitlab.com and gitlab.* hosts -> GitLab, everything else ->
+# GitHub), so on gitlab.com you need nothing extra beyond the gitlab_token
+# above. Set `forge = "gitlab"` explicitly only for a self-hosted GitLab on a
+# host the inference doesn't recognize (e.g. git.example.com); nested groups
+# work — the group path is the whole slug. Merge requests stand in for pull
+# requests throughout (CI, review feedback, and conflict handling all map over).
+[[projects]]
+name = "widget"
+linear_project = "Widget"
+repo = "~/Projects/widget"
+git_url = "https://gitlab.example.com/team/subgroup/widget.git"
+forge = "gitlab"
+base_ref = "main"
+claim = { strategy = "agent" }
+state_in_progress = "In Progress"
+state_done = "Done"

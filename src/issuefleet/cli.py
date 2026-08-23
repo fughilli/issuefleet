@@ -33,23 +33,12 @@ log = logging.getLogger("issuefleet")
 def build_stack(cfg: Config) -> Reconciler:
     tracker = LinearTracker(client_from_config(cfg))
     git = Gitops()
-    if creds.github_auth_mode(cfg) == "app":
-        from issuefleet.githubapp import AppTokenProvider
+    from issuefleet import forge as forge_mod
 
-        provider = AppTokenProvider(
-            cfg.github_app_id,
-            cfg.github_app_key_file,
-            installation_id=cfg.github_app_installation_id,
-        )
+    gh_token_source, gl_token_source = _forge_token_sources(cfg)
 
-        def token_source(owner: str):
-            return lambda: provider.token_for_owner(owner)
-
-    else:
-        github_token, _ = creds.resolve_github_token(cfg)
-
-        def token_source(owner: str):
-            return github_token
+    def forge_factory(project, remote):
+        return forge_mod.build_forge(project, remote, gh_token_source, gl_token_source)
 
     forges = {}
     for project in cfg.projects:
@@ -57,8 +46,8 @@ def build_stack(cfg: Config) -> Reconciler:
         # the shared helper, so a project added later from the dashboard comes
         # up the same way. A dead end is fatal here (startup), reportable there.
         try:
-            forge, action = build_forge_and_checkout(project, git, token_source)
-        except (ValueError, gitops_mod.GitError) as e:
+            forge, action = build_forge_and_checkout(project, git, forge_factory)
+        except (ValueError, gitops_mod.GitError, creds.CredentialError) as e:
             raise SystemExit(f"[{project.name}] {e}")
         if action:
             log.info("[%s] %s -> %s", project.name, project.repo, action)
@@ -73,8 +62,43 @@ def build_stack(cfg: Config) -> Reconciler:
         creds.resolve_anthropic_key(cfg) if cfg.security.deep_scan == "claude" else None,
     )
     return Reconciler(
-        cfg, registry, tracker, forges, git, runner, token_source=token_source, gate=gate
+        cfg, registry, tracker, forges, git, runner, forge_factory=forge_factory, gate=gate
     )
+
+
+def _forge_token_sources(cfg: Config):
+    """Build the GitHub (``owner -> callable|token``) and GitLab (``() -> token``)
+    credential providers a forge factory needs. Both resolve lazily — a
+    GitLab-only fleet never demands a GitHub token, and vice versa — so only the
+    credentials a fleet actually uses have to be present."""
+    if creds.github_auth_mode(cfg) == "app":
+        from issuefleet.githubapp import AppTokenProvider
+
+        provider = AppTokenProvider(
+            cfg.github_app_id,
+            cfg.github_app_key_file,
+            installation_id=cfg.github_app_installation_id,
+        )
+
+        def gh_token_source(owner: str):
+            return lambda: provider.token_for_owner(owner)
+
+    else:
+        _gh: dict[str, str] = {}
+
+        def gh_token_source(owner: str):
+            if "tok" not in _gh:
+                _gh["tok"], _ = creds.resolve_github_token(cfg)
+            return _gh["tok"]
+
+    _gl: dict[str, str] = {}
+
+    def gl_token_source():
+        if "tok" not in _gl:
+            _gl["tok"], _ = creds.resolve_gitlab_token(cfg)
+        return _gl["tok"]
+
+    return gh_token_source, gl_token_source
 
 
 def build_fleet_manager(cfg: Config, reconciler: Reconciler):
@@ -209,8 +233,9 @@ def _start_webhooks(cfg: Config, reconciler: Reconciler, wake: threading.Event):
 
     wcfg = cfg.webhooks
     github_secret = creds.resolve_optional(wcfg.github_secret_env, wcfg.github_secret_file)
+    gitlab_secret = creds.resolve_optional(wcfg.gitlab_secret_env, wcfg.gitlab_secret_file)
     linear_secret = creds.resolve_optional(wcfg.linear_secret_env, wcfg.linear_secret_file)
-    if not github_secret and not linear_secret:
+    if not github_secret and not gitlab_secret and not linear_secret:
         log.warning("[webhooks] enabled but no signing secrets resolve; not starting listener")
         return None
 
@@ -234,12 +259,15 @@ def _start_webhooks(cfg: Config, reconciler: Reconciler, wake: threading.Event):
         wake=wake.set,
         on_session=on_session,
         github_secret=github_secret,
+        gitlab_secret=gitlab_secret,
         linear_secret=linear_secret,
     ).start()
     log.info(
-        "webhook listener on %s:%d (/webhook/github%s, /webhook/linear%s) — put a tunnel in front",
+        "webhook listener on %s:%d (/webhook/github%s, /webhook/gitlab%s, /webhook/linear%s) "
+        "— put a tunnel in front",
         _webhook_bind(wcfg), server.port,
         "" if github_secret else " [no secret: disabled]",
+        "" if gitlab_secret else " [no secret: disabled]",
         "" if linear_secret else " [no secret: disabled]",
     )
     return server
