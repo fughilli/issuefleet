@@ -24,7 +24,9 @@ from issuefleet.model import CiCheck, CiStatus, PrFeedback, PullRequest
 log = logging.getLogger("issuefleet.gitlab")
 
 # Commit-status / job states that count as still-running (verdict not settled).
-_PENDING_STATES = frozenset({"pending", "running", "created", "waiting_for_resource", "preparing"})
+_PENDING_STATES = frozenset(
+    {"pending", "running", "created", "waiting_for_resource", "preparing", "scheduled"}
+)
 # States that count as a failure worth surfacing. success/skipped are green or
 # benign; canceled/manual are human/superseded stops, not code failures, so
 # they're left out to avoid false alarms (mirrors the GitHub forge's choices).

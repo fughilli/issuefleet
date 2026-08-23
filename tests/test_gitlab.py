@@ -34,6 +34,13 @@ class ParseRemoteTest(unittest.TestCase):
                 "gitlab.example.com", "group/sub/project"),
             # An oauth2@ (or token@) userinfo prefix on the HTTPS URL is stripped.
             "https://oauth2@gitlab.com/group/project.git": ("gitlab.com", "group/project"),
+            # A self-hosted SSH remote with a custom port: the port is dropped
+            # (the API and HTTPS clone don't use it) and never leaks into the slug.
+            "ssh://git@gitlab.example.com:2222/group/sub/project.git": (
+                "gitlab.example.com", "group/sub/project"),
+            # An HTTP(S) port, by contrast, is kept — the API base and push URL
+            # are built on it.
+            "https://gitlab.example.com:8443/g/p.git": ("gitlab.example.com:8443", "g/p"),
         }
         for url, expected in cases.items():
             self.assertEqual(parse_remote(url), expected, url)
