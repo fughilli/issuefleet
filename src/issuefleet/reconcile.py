@@ -23,7 +23,7 @@ from issuefleet import config as config_mod
 from issuefleet import gitops
 from issuefleet import worker as worker_mod
 from issuefleet.config import Config, ProjectConfig
-from issuefleet.github import GithubForge, parse_repo_slug
+from issuefleet.github import parse_repo_slug
 from issuefleet.httpx import ApiError
 from issuefleet.mailbox import Mailbox
 from issuefleet.model import (
@@ -67,7 +67,7 @@ def _is_user_prompt(evt) -> bool:
     return True
 
 
-def build_forge_and_checkout(project: ProjectConfig, git, token_source):
+def build_forge_and_checkout(project: ProjectConfig, git, forge_factory):
     """Build a project's Forge and make sure its main checkout exists (cloning
     over HTTPS with the forge's scoped token when it doesn't). Shared by the
     daemon's startup (``cli.build_stack``) and the dashboard's add-project path,
@@ -76,19 +76,20 @@ def build_forge_and_checkout(project: ProjectConfig, git, token_source):
     None). Raises ``ValueError``/``gitops.GitError`` on a dead end — the caller
     decides whether that's fatal (startup) or reportable (dashboard).
 
-    ``token_source`` is ``owner -> (callable | token)``: the forge and its
-    scoped token must exist BEFORE the clone, which uses it, so no SSH key is
-    ever needed."""
+    ``forge_factory`` is ``(project, remote_url) -> Forge`` (see forge.py): it
+    picks GitHub vs GitLab from the remote and builds the forge with its scoped
+    token. The forge and its token must exist BEFORE the clone, which uses them,
+    so no SSH key is ever needed."""
     if git.is_repo(project.repo):
-        slug = parse_repo_slug(git.remote_url(project.repo))
+        remote = git.remote_url(project.repo)
     elif project.git_url:
-        slug = parse_repo_slug(project.git_url)
+        remote = project.git_url
     else:
         raise ValueError(
             f"repo {project.repo} does not exist and the project has no "
             "git_url to clone from"
         )
-    forge = GithubForge(token_source(slug.split("/")[0]), slug)
+    forge = forge_factory(project, remote)
     clone_url, clone_auth = forge.push_spec()
     action = gitops.ensure_checkout(git, project, clone_url=clone_url, auth_header=clone_auth)
     return forge, action
@@ -126,7 +127,7 @@ class Reconciler:
         git,
         runner,
         gate=None,  # SecurityGate; None => scanning off (NullGate)
-        token_source=None,  # owner -> (callable | token); enables add-project
+        forge_factory=None,  # (project, remote) -> Forge; enables add-project
     ):
         self.cfg = config
         self.registry = registry
@@ -144,7 +145,7 @@ class Reconciler:
         # How to mint a forge for a project added at runtime. None when the
         # stack was built without it (some tests) — add-project then no-ops
         # with an error result rather than raising.
-        self.token_source = token_source
+        self.forge_factory = forge_factory
         # Linear agent sessions: fed by the webhook thread, drained at tick.
         self._session_lock = threading.Lock()
         self._session_events: list = []
@@ -302,13 +303,13 @@ class Reconciler:
         if any(p.name == project.name for p in self.cfg.projects):
             self._record_result(project.name, False, "a project with this name already exists")
             return
-        if self.token_source is None:
+        if self.forge_factory is None:
             self._record_result(
                 project.name, False, "this daemon can't add projects (no forge credentials wired up)"
             )
             return
         try:
-            forge, action = build_forge_and_checkout(project, self.git, self.token_source)
+            forge, action = build_forge_and_checkout(project, self.git, self.forge_factory)
         except (ValueError, gitops.GitError) as e:
             self._record_result(project.name, False, f"could not set up the repo: {e}")
             return

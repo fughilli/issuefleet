@@ -469,8 +469,10 @@ class CredsTest(unittest.TestCase):
         self.cfg = config.parse(MINIMAL)
         self.cfg.linear_api_key_file = Path(self.tmp.name) / "linear.key"
         self.cfg.github_token_file = Path(self.tmp.name) / "github.key"
+        self.cfg.gitlab_token_file = Path(self.tmp.name) / "gitlab.key"
         self._saved = {
-            k: os.environ.pop(k, None) for k in ("LINEAR_API_KEY", "GITHUB_TOKEN", "GH_TOKEN")
+            k: os.environ.pop(k, None)
+            for k in ("LINEAR_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN")
         }
 
     def tearDown(self):
@@ -504,6 +506,17 @@ class CredsTest(unittest.TestCase):
             creds.resolve_linear_key(self.cfg)
         with self.assertRaisesRegex(creds.CredentialError, "fine-grained PAT"):
             creds.resolve_github_token(self.cfg)
+
+    def test_gitlab_env_then_file(self):
+        with self.assertRaisesRegex(creds.CredentialError, "no GitLab token"):
+            creds.resolve_gitlab_token(self.cfg)
+        self.cfg.gitlab_token_file.write_text("glpat-fromfile\n")
+        tok, source = creds.resolve_gitlab_token(self.cfg)
+        self.assertEqual(tok, "glpat-fromfile")
+        self.assertIn("gitlab.key", source)
+        os.environ["GITLAB_TOKEN"] = "glpat-fromenv"
+        tok, source = creds.resolve_gitlab_token(self.cfg)
+        self.assertEqual((tok, source), ("glpat-fromenv", "env $GITLAB_TOKEN"))
 
     def test_permission_check(self):
         f = self.cfg.github_token_file

@@ -1,8 +1,9 @@
 """Narrow interfaces (ports) between the reconcile loop and the world.
 
-Real implementations: linear.LinearTracker, github.GithubForge, gitops.Git,
-runner.TmuxRunner. Tests substitute in-memory fakes. Keeping these narrow is
-deliberate — GitLab/Jira *could* slot in behind them, and that is as far as
+Real implementations: linear.LinearTracker, github.GithubForge,
+gitlab.GitlabForge, gitops.Git, runner.TmuxRunner. Tests substitute in-memory
+fakes. Keeping these narrow is deliberate — GitLab slots in behind the Forge
+port (Jira/others *could* slot in the same way), and that is as far as
 pluggability goes (brief §8).
 """
 

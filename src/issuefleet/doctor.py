@@ -16,8 +16,11 @@ from pathlib import Path
 
 from issuefleet import config as config_mod
 from issuefleet import creds
+from issuefleet import forge as forge_mod
 from issuefleet.config import Config, ConfigError
 from issuefleet.github import GithubForge, parse_repo_slug
+from issuefleet.gitlab import GitlabForge
+from issuefleet.giturl import parse_remote
 from issuefleet.gitops import Gitops
 from issuefleet.linear import LinearClient, LinearTracker, client_from_config
 from issuefleet.reconcile import Reconciler
@@ -379,7 +382,40 @@ def _check_linear(cfg: Config, tracker) -> list[Check]:
     return out
 
 
-def _check_github(cfg: Config, git: Gitops, forges: dict | None) -> list[Check]:
+def _project_remote(git: Gitops, project) -> str | None:
+    """The remote URL for a project's checkout (or its git_url when not yet
+    cloned), or None when neither is known. Never raises."""
+    try:
+        if git.is_repo(project.repo):
+            return git.remote_url(project.repo)
+    except Exception:
+        return None
+    return project.git_url
+
+
+def _forge_kinds(cfg: Config, git: Gitops) -> dict[str, str]:
+    """Classify each project as 'github' or 'gitlab', so the credential and API
+    checks below only demand the tokens a fleet actually uses. Unknown (no
+    remote yet, unparseable) defaults to 'github' — the same path a repo with a
+    missing git_url already reports on."""
+    kinds = {}
+    for project in cfg.projects:
+        kind = project.forge
+        if kind is None:
+            remote = _project_remote(git, project)
+            if remote:
+                try:
+                    kind = forge_mod.infer_kind(parse_remote(remote)[0])
+                except ValueError:
+                    kind = None
+        kinds[project.name] = kind or "github"
+    return kinds
+
+
+def _check_github(cfg: Config, git: Gitops, forges: dict | None, kinds: dict) -> list[Check]:
+    github_projects = [p for p in cfg.projects if kinds.get(p.name) != "gitlab"]
+    if not github_projects:
+        return []  # a GitLab-only fleet needs no GitHub credential
     out = []
     mode = creds.github_auth_mode(cfg)
     token_source = None
@@ -426,7 +462,7 @@ def _check_github(cfg: Config, git: Gitops, forges: dict | None) -> list[Check]:
                              "readable by group/other — chmod 600 it"))
         token_source = lambda owner: token
 
-    for project in cfg.projects:
+    for project in github_projects:
         name = project.name
         have_clone = git.is_repo(project.repo)
         if not have_clone:
@@ -450,6 +486,59 @@ def _check_github(cfg: Config, git: Gitops, forges: dict | None) -> list[Check]:
             out.append(Check(OK, f"[{name}] GitHub API", f"can read {slug}"))
         except Exception as e:
             out.append(Check(FAIL, f"[{name}] GitHub API", str(e)))
+        if have_clone:
+            try:
+                git.has_commits_ahead(project.repo, project.base_ref)  # resolves the base ref
+                out.append(Check(OK, f"[{name}] base ref {project.base_ref!r}"))
+            except Exception as e:
+                out.append(Check(FAIL, f"[{name}] base ref {project.base_ref!r}", str(e)))
+    return out
+
+
+def _check_gitlab(cfg: Config, git: Gitops, forges: dict | None, kinds: dict) -> list[Check]:
+    """Mirror _check_github for the GitLab projects in the fleet. Empty (and so
+    silent) unless at least one project resolves to GitLab, so a GitHub-only
+    fleet's doctor output is unchanged. GitLab auth is a single access token
+    (no App analog), so the credential check is just token presence."""
+    gitlab_projects = [p for p in cfg.projects if kinds.get(p.name) == "gitlab"]
+    if not gitlab_projects:
+        return []
+    out = []
+    token = None
+    if forges is None:  # live probe only when not injected with fakes
+        try:
+            token, source = creds.resolve_gitlab_token(cfg)
+        except creds.CredentialError as e:
+            return [Check(FAIL, "GitLab token", str(e))]
+        out.append(Check(OK, "GitLab token", f"from {source}"))
+        if not creds.file_permissions_ok(cfg.gitlab_token_file):
+            out.append(Check(WARN, f"{cfg.gitlab_token_file}",
+                             "readable by group/other — chmod 600 it"))
+
+    for project in gitlab_projects:
+        name = project.name
+        have_clone = git.is_repo(project.repo)
+        if not have_clone:
+            if project.git_url:
+                out.append(Check(WARN, f"[{name}] repo {project.repo}",
+                                 f"missing — will be cloned from {project.git_url} on first run"))
+            else:
+                out.append(Check(FAIL, f"[{name}] repo {project.repo}",
+                                 "does not exist — add git_url so the daemon can clone it"))
+                continue
+        try:
+            remote = git.remote_url(project.repo) if have_clone else project.git_url
+            host, slug = parse_remote(remote)
+            out.append(Check(OK, f"[{name}] origin", f"{remote} -> {slug} @ {host}"))
+        except Exception as e:
+            out.append(Check(FAIL, f"[{name}] origin remote", str(e)))
+            continue
+        forge = (forges or {}).get(name) or GitlabForge(token, slug, host=host)
+        try:
+            forge.repo_accessible()
+            out.append(Check(OK, f"[{name}] GitLab API", f"can read {slug}"))
+        except Exception as e:
+            out.append(Check(FAIL, f"[{name}] GitLab API", str(e)))
         if have_clone:
             try:
                 git.has_commits_ahead(project.repo, project.base_ref)  # resolves the base ref
@@ -493,7 +582,9 @@ def run_doctor(
     checks += _check_security(cfg)
     linear_checks = _check_linear(cfg, tracker)
     checks += linear_checks
-    checks += _check_github(cfg, git, forges)
+    kinds = _forge_kinds(cfg, git)
+    checks += _check_github(cfg, git, forges, kinds)
+    checks += _check_gitlab(cfg, git, forges, kinds)
 
     for c in checks:
         print(c.render(), file=stream)
