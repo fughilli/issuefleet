@@ -1,12 +1,20 @@
 # issuefleet
 
 A generic, restart-safe daemon that drains a **Linear** work queue into
-**GitHub pull requests** using a fleet of autonomous coding agents — one
-issue ⇒ one branch ⇒ one git worktree ⇒ one container. Label an issue,
-watch an agent claim it, discuss its plan in the issue thread, review its
-PR, merge; the worker is torn down and the next issue in the queue gets its
-slot. Works for any (Linear project → GitHub repo) pair, several at once,
-configured declaratively.
+**GitHub or GitLab** pull/merge requests using a fleet of autonomous coding
+agents — one issue ⇒ one branch ⇒ one git worktree ⇒ one container. Label an
+issue, watch an agent claim it, discuss its plan in the issue thread, review
+its PR, merge; the worker is torn down and the next issue in the queue gets
+its slot. Works for any (Linear project → GitHub/GitLab repo) pair, several at
+once (a fleet can mix both forges), configured declaratively.
+
+The forge is picked per project behind a narrow `Forge` port
+(`src/issuefleet/ports.py`): GitHub is the default, and GitLab slots in as a
+parallel implementation (`gitlab.py`) — merge requests stand in for pull
+requests, MR notes for review feedback, and commit statuses for CI. It's
+inferred from the remote host (gitlab.com / `gitlab.*` → GitLab, else GitHub)
+or set explicitly with `forge = "gitlab"` on a project. Everything below that
+says "GitHub" / "PR" applies to GitLab / "MR" too unless noted.
 
 ## The load-bearing idea: credentials never enter the agents
 
@@ -78,13 +86,15 @@ would silently eat their replies to the agent.
    printf '%s' 'lin_api_...' > ~/.config/issuefleet/linear.key
    chmod 600 ~/.config/issuefleet/linear.key
    ```
-2. **GitHub credential** — preferably the GitHub App (see Bot identities);
-   fallback: a fine-grained PAT with **Contents: RW** and **Pull requests:
-   RW** in `~/.config/issuefleet/github.key` (chmod 600). Clones, pushes,
-   and PRs all use this credential over HTTPS — deliberately never an SSH
-   key, which would carry the operator's full push rights. With branch
-   protection on the base ref, the bot is PR-only by construction (GitHub
-   has no "non-default branches only" push permission; protection or a
+2. **Forge credential** — for **GitHub**, preferably the GitHub App (see Bot
+   identities); fallback: a fine-grained PAT with **Contents: RW** and **Pull
+   requests: RW** in `~/.config/issuefleet/github.key` (chmod 600). For
+   **GitLab**, an access token (personal, group, or project) with the `api`
+   scope in `~/.config/issuefleet/gitlab.key` (chmod 600) — a fleet only needs
+   the token(s) for the forges its projects actually use. Clones, pushes, and
+   PRs/MRs all use this credential over HTTPS — deliberately never an SSH key,
+   which would carry the operator's full push rights. With branch protection
+   on the base ref, the bot is PR-only by construction (protection or a
    ruleset is the enforcement). Secrets never go in the config file — the
    parser rejects them.
 3. **The claim label** — create a label (default suggestion: `agent`) in the
@@ -231,12 +241,15 @@ replayed deliveries cost nothing.
   (Settings → Webhooks) for *Issue comments, Pull request reviews, Pull
   request review comments, Pull requests*, content type JSON, with a
   secret. Verified via `X-Hub-Signature-256` (HMAC-SHA256).
+- `POST /webhook/gitlab` — a GitLab project/group webhook for *Comments* and
+  *Merge request events*, with a **Secret token**. GitLab sends that token
+  verbatim in `X-Gitlab-Token` (a shared-secret compare, not an HMAC).
 - `POST /webhook/linear` — the OAuth app's webhook (or a workspace webhook);
   verified via `Linear-Signature` plus a 60-second timestamp replay guard.
 
 **Expose it through a tunnel, never directly**: point a Cloudflare Tunnel /
 Tailscale Funnel (or ngrok for experiments) at `localhost:8787` and give
-that HTTPS URL to GitHub/Linear. The listener binds loopback by default and
+that HTTPS URL to the forge/Linear. The listener binds loopback by default and
 answers GET with a health probe for tunnel checks.
 
 ## Introspection dashboard (web UI)
@@ -524,6 +537,8 @@ github_auth = "auto"                       # auto | token (PAT) | app (GitHub Ap
 github_app_id = ""                         # App ID; with the key file, auto=app
 github_app_key_file = "~/.config/issuefleet/github_app.pem"
 # github_app_installation_id = 12345678    # optional; default: discover per owner
+gitlab_token_env = ["GITLAB_TOKEN"]        # only needed for GitLab projects
+gitlab_token_file = "~/.config/issuefleet/gitlab.key"   # access token, `api` scope
 linear_auth = "auto"                       # auto | api_key (raw) | oauth (Bearer)
 linear_oauth_client_id = ""                # Linear agent install (see Bot identities)
 linear_oauth_client_secret_file = "~/.config/issuefleet/linear_oauth_client.secret"
@@ -534,6 +549,7 @@ enabled = false                            # true = push wake-ups + agent sessio
 bind = "127.0.0.1"                         # keep loopback; tunnel in front
 port = 8787
 github_secret_file = "~/.config/issuefleet/github_webhook.secret"
+gitlab_secret_file = "~/.config/issuefleet/gitlab_webhook.secret"   # X-Gitlab-Token (GitLab projects)
 linear_secret_file = "~/.config/issuefleet/linear_webhook.secret"
 
 [dashboard]
@@ -587,11 +603,12 @@ copy_from_repo = [".claude", ".claude-container-overlay"]
 launcher_args = ["--skills-ignore-new"]
 # container_config_dir = "~/.config/claude-container/config"  # default: launcher's shared dir
 
-[[projects]]                 # one block per (Linear project -> GitHub repo) pair
+[[projects]]                 # one block per (Linear project -> GitHub/GitLab repo) pair
 name = "splanc"              # short handle used in paths, sessions, logs
 linear_project = "Splanc"    # Linear project name (or UUID if names collide)
-repo = "~/Projects/splanc"   # local main checkout; `origin` must point at GitHub
+repo = "~/Projects/splanc"   # local main checkout; `origin` = the forge remote
 git_url = "git@github.com:you/splanc.git"  # daemon clones `repo` from here if missing
+# forge = "gitlab"           # github | gitlab; omit to infer from the remote host
 base_ref = "main"            # branch agents fork from and PRs target
 claim = { strategy = "label", value = "agent" }
 branch_template = "agent/{key}-{slug}"     # {key}=fug-12, {slug} from the title
@@ -632,8 +649,9 @@ When the fleet is full, eligible issues wait; `doctor` shows the order.
 | released (host-side) | operator released the branch for local edits; container stopped, worktree removed, claim held | adopted back from the dashboard (or the issue closes, dropping the record) |
 
 **Merge conflicts** are watched on the same PR poll. When a submitted PR
-stops merging cleanly (GitHub reports `mergeable: false` because other work
-landed on the base), the daemon does the one thing the credential-less worker
+stops merging cleanly (GitHub reports `mergeable: false`, GitLab reports the MR
+has conflicts, because other work landed on the base), the daemon does the one
+thing the credential-less worker
 container cannot — a host-side `fetch` refreshing `origin/<base_ref>` in the
 shared clone — then wakes the agent with a `merge_conflict` message telling it
 to `git rebase origin/<base_ref>`, resolve, and re-run `agentctl ready`. The

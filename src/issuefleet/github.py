@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import base64
 import logging
-import re
 
+from issuefleet.giturl import parse_remote
 from issuefleet.httpx import ApiError, urllib_transport
 from issuefleet.model import CiCheck, CiStatus, PrFeedback, PullRequest
 
@@ -26,18 +26,11 @@ _FAILING_CONCLUSIONS = frozenset(
     {"failure", "timed_out", "action_required", "startup_failure"}
 )
 
-_SSH_RE = re.compile(r"^(?:ssh://)?git@[^:/]+[:/](?P<slug>[^/]+/[^/]+?)(?:\.git)?/?$")
-_HTTPS_RE = re.compile(r"^https?://[^/]+/(?P<slug>[^/]+/[^/]+?)(?:\.git)?/?$")
-
 
 def parse_repo_slug(remote_url: str) -> str:
-    """owner/name from an SSH or HTTPS remote URL."""
-    remote_url = remote_url.strip()
-    for rx in (_SSH_RE, _HTTPS_RE):
-        m = rx.match(remote_url)
-        if m:
-            return m.group("slug")
-    raise ValueError(f"cannot parse owner/name from remote url {remote_url!r}")
+    """owner/name from an SSH or HTTPS remote URL (host discarded — GitHub is
+    always github.com here). See giturl.parse_remote for host-aware parsing."""
+    return parse_remote(remote_url)[1]
 
 
 def _to_pr(d: dict) -> PullRequest:

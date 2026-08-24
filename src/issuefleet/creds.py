@@ -178,3 +178,21 @@ def resolve_github_token(cfg: Config) -> tuple[str, str]:
         f"no GitHub token: set {envs} or write a fine-grained PAT "
         f"(Contents: RW, Pull requests: RW) to {cfg.github_token_file} (chmod 600)"
     )
+
+
+def resolve_gitlab_token(cfg: Config) -> tuple[str, str]:
+    """Env vars in configured order, then the key file. Returns (token,
+    source-description). Raises CredentialError if absent — the daemon only
+    calls this when a project actually resolves to GitLab."""
+    for env in cfg.gitlab_token_env:
+        v = os.environ.get(env)
+        if v:
+            return v.strip(), f"env ${env}"
+    v = _read_key_file(cfg.gitlab_token_file)
+    if v:
+        return v, str(cfg.gitlab_token_file)
+    envs = " or ".join(f"${e}" for e in cfg.gitlab_token_env)
+    raise CredentialError(
+        f"no GitLab token: set {envs} or write an access token "
+        f"(api scope) to {cfg.gitlab_token_file} (chmod 600)"
+    )

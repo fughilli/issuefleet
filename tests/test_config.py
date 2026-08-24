@@ -194,6 +194,37 @@ class ConfigTest(unittest.TestCase):
         data = {"projects": [dict(MINIMAL["projects"][0], git_url="git@github.com:a/b.git")]}
         self.assertEqual(config.parse(data).projects[0].git_url, "git@github.com:a/b.git")
 
+    def test_forge_field_defaults_none_and_validates(self):
+        self.assertIsNone(config.parse(MINIMAL).projects[0].forge)
+        data = {"projects": [dict(MINIMAL["projects"][0], forge="gitlab")]}
+        self.assertEqual(config.parse(data).projects[0].forge, "gitlab")
+        bad = {"projects": [dict(MINIMAL["projects"][0], forge="bitbucket")]}
+        with self.assertRaisesRegex(config.ConfigError, "forge must be one of"):
+            config.parse(bad)
+
+    def test_forge_field_round_trips_through_toml(self):
+        p = config.parse({"projects": [dict(MINIMAL["projects"][0], forge="gitlab")]}).projects[0]
+        rendered = config.project_to_toml(p)
+        self.assertIn('forge = "gitlab"', rendered)
+
+    def test_gitlab_creds_defaults_and_override(self):
+        cfg = config.parse(MINIMAL)
+        self.assertEqual(cfg.gitlab_token_env, ["GITLAB_TOKEN"])
+        data = dict(MINIMAL)
+        data["credentials"] = {
+            "gitlab_token_env": "GL_PAT",
+            "gitlab_token_file": "/tmp/gl.key",
+        }
+        cfg = config.parse(data)
+        self.assertEqual(cfg.gitlab_token_env, ["GL_PAT"])
+        self.assertEqual(str(cfg.gitlab_token_file), "/tmp/gl.key")
+
+    def test_gitlab_token_in_config_rejected(self):
+        data = dict(MINIMAL)
+        data["credentials"] = {"gitlab_token": "glpat-xxxxxxxxxxxx"}
+        with self.assertRaisesRegex(config.ConfigError, "refusing to read"):
+            config.parse(data)
+
     def test_local_checkout_is_rejected(self):
         # Removed feature: fail loudly rather than silently cloning instead.
         data = {"projects": [dict(MINIMAL["projects"][0], local_checkout="~/Projects/x")]}

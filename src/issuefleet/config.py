@@ -25,6 +25,8 @@ _FORBIDDEN_SECRET_KEYS = (
     "jira_api_token",
     "github_token",
     "gh_token",
+    "gitlab_token",
+    "gl_token",
     "token",
     "api_key",
     "bot_token",
@@ -40,6 +42,10 @@ TRACKERS = ("linear", "jira")
 # How the daemon authenticates to Jira. "basic" = email + API token (Atlassian
 # Cloud); "bearer" = a Personal Access Token (Jira Server/Data Center).
 JIRA_AUTH_MODES = ("basic", "bearer")
+
+# Which forge hosts a project. None => inferred from the remote host at
+# startup (see forge.forge_kind).
+FORGE_KINDS = ("github", "gitlab")
 
 # How the roadmap bot reaches a Discord channel. See DiscordSurfaceConfig.
 DISCORD_MODES = ("bot", "webhook")
@@ -119,6 +125,10 @@ class ProjectConfig:
     # parsed from this; the clone itself goes over HTTPS with the GitHub
     # App's scoped token.)
     git_url: str | None = None
+    # Which forge hosts this project: "github", "gitlab", or None to infer from
+    # the remote host (gitlab.com / gitlab.* -> gitlab, else github). Set it
+    # explicitly for a self-hosted GitLab on an unrecognizable host.
+    forge: str | None = None
     base_ref: str = "main"
     branch_template: str = "agent/{key}-{slug}"
     state_in_progress: str = "In Progress"
@@ -140,6 +150,10 @@ class WebhookConfig:
     # Secrets resolved env-then-file, same rules as API credentials.
     github_secret_env: str = "ISSUEFLEET_GITHUB_WEBHOOK_SECRET"
     github_secret_file: Path = Path("~/.config/issuefleet/github_webhook.secret").expanduser()
+    # GitLab webhooks send the configured secret verbatim in X-Gitlab-Token
+    # (a shared-secret compare, not an HMAC signature like GitHub/Linear).
+    gitlab_secret_env: str = "ISSUEFLEET_GITLAB_WEBHOOK_SECRET"
+    gitlab_secret_file: Path = Path("~/.config/issuefleet/gitlab_webhook.secret").expanduser()
     linear_secret_env: str = "ISSUEFLEET_LINEAR_WEBHOOK_SECRET"
     linear_secret_file: Path = Path("~/.config/issuefleet/linear_webhook.secret").expanduser()
 
@@ -368,6 +382,12 @@ class Config:
     github_app_id: str = ""  # numeric App ID (not secret)
     github_app_key_file: Path = Path("~/.config/issuefleet/github_app.pem").expanduser()
     github_app_installation_id: int | None = None  # None = discover per repo owner
+    # GitLab credential lookup (values are env var names / file paths, never
+    # secrets). A personal, group, or project access token; the same token opens
+    # merge requests and authenticates git-over-HTTPS. Only consulted for
+    # projects the forge factory resolves to GitLab.
+    gitlab_token_env: list[str] = field(default_factory=lambda: ["GITLAB_TOKEN"])
+    gitlab_token_file: Path = Path("~/.config/issuefleet/gitlab.key").expanduser()
     # Linear auth mode:
     #   "auto"  — infer from a static token's prefix (lin_api_ = raw personal
     #             key, lin_oauth_ = Bearer OAuth/agent token)
@@ -679,6 +699,12 @@ def parse_project(p: dict, where: str, tracker: str = "linear") -> ProjectConfig
             raise ConfigError(f"{where}: max_workers must be an integer")
         if max_workers < 1:
             raise ConfigError(f"{where}: max_workers must be >= 1")
+    forge = p.get("forge") or None
+    if forge is not None and forge not in FORGE_KINDS:
+        raise ConfigError(
+            f"{where}: forge must be one of {FORGE_KINDS} (or omit it to infer "
+            f"from the remote host), got {forge!r}"
+        )
     return ProjectConfig(
         name=p["name"],
         linear_project=p.get("linear_project", ""),
@@ -686,6 +712,7 @@ def parse_project(p: dict, where: str, tracker: str = "linear") -> ProjectConfig
         repo=_path(p["repo"]),
         claim=ClaimRule(strategy=strategy, value=claim_raw.get("value", "")),
         git_url=p.get("git_url") or None,
+        forge=forge,
         base_ref=p.get("base_ref") or "main",
         branch_template=p.get("branch_template") or "agent/{key}-{slug}",
         state_in_progress=p.get("state_in_progress") or "In Progress",
@@ -716,6 +743,8 @@ def project_to_toml(p: ProjectConfig) -> str:
     lines.append(f"repo = {_toml_str(str(p.repo))}")
     if p.git_url:
         lines.append(f"git_url = {_toml_str(p.git_url)}")
+    if p.forge:
+        lines.append(f"forge = {_toml_str(p.forge)}")
     lines.append(f"base_ref = {_toml_str(p.base_ref)}")
     if p.claim.strategy == "agent":
         lines.append("claim = { strategy = \"agent\" }")
@@ -884,6 +913,11 @@ def parse(data: dict, source: str = "<config>") -> Config:
         if creds["github_auth"] not in ("auto", "token", "app"):
             raise ConfigError(f"{source}: github_auth must be auto, token, or app")
         cfg.github_auth = creds["github_auth"]
+    if "gitlab_token_env" in creds:
+        v = creds["gitlab_token_env"]
+        cfg.gitlab_token_env = [v] if isinstance(v, str) else list(v)
+    if "gitlab_token_file" in creds:
+        cfg.gitlab_token_file = _path(creds["gitlab_token_file"])
     cfg.github_app_id = str(creds.get("github_app_id", "") or "")
     if "github_app_key_file" in creds:
         cfg.github_app_key_file = _path(creds["github_app_key_file"])
@@ -936,6 +970,10 @@ def parse(data: dict, source: str = "<config>") -> Config:
         cfg.webhooks.github_secret_env = hooks["github_secret_env"]
     if "github_secret_file" in hooks:
         cfg.webhooks.github_secret_file = _path(hooks["github_secret_file"])
+    if "gitlab_secret_env" in hooks:
+        cfg.webhooks.gitlab_secret_env = hooks["gitlab_secret_env"]
+    if "gitlab_secret_file" in hooks:
+        cfg.webhooks.gitlab_secret_file = _path(hooks["gitlab_secret_file"])
     if "linear_secret_env" in hooks:
         cfg.webhooks.linear_secret_env = hooks["linear_secret_env"]
     if "linear_secret_file" in hooks:

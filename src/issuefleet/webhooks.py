@@ -11,6 +11,7 @@ existing idempotence/dedupe still applies.
 Endpoints (bind to localhost and put a tunnel — Cloudflare Tunnel,
 Tailscale Funnel — in front; never expose the port directly):
     POST /webhook/github   X-Hub-Signature-256: sha256=<hex hmac-sha256(body)>
+    POST /webhook/gitlab   X-Gitlab-Token: <shared secret> (verbatim, not HMAC)
     POST /webhook/linear   Linear-Signature: <hex hmac-sha256(body)>,
                            webhookTimestamp (ms) must be fresh (replay guard)
 
@@ -53,6 +54,15 @@ def verify_github_signature(secret: str, body: bytes, header: str | None) -> boo
         return False
     expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(header[len("sha256=") :], expected)
+
+
+def verify_gitlab_token(secret: str, header: str | None) -> bool:
+    """GitLab authenticates a webhook with a shared secret sent verbatim in
+    X-Gitlab-Token (there's no request-body HMAC), so this is a constant-time
+    equality check rather than a signature verification."""
+    if not header:
+        return False
+    return hmac.compare_digest(header, secret)
 
 
 def verify_linear_signature(secret: str, body: bytes, header: str | None) -> bool:
@@ -108,11 +118,13 @@ class WebhookServer:
         wake,
         on_session=None,
         github_secret: str | None = None,
+        gitlab_secret: str | None = None,
         linear_secret: str | None = None,
     ):
         self.wake = wake
         self.on_session = on_session
         self.github_secret = github_secret
+        self.gitlab_secret = gitlab_secret
         self.linear_secret = linear_secret
         outer = self
 
@@ -135,6 +147,8 @@ class WebhookServer:
                 body = self.rfile.read(length)
                 if self.path == "/webhook/github":
                     self._github(body)
+                elif self.path == "/webhook/gitlab":
+                    self._gitlab(body)
                 elif self.path == "/webhook/linear":
                     self._linear(body)
                 else:
@@ -151,6 +165,20 @@ class WebhookServer:
                     return self._respond(401, "bad signature")
                 event = self.headers.get("X-GitHub-Event", "?")
                 log.info("github webhook: %s -> waking reconcile loop", event)
+                outer.wake()
+                self._respond(200, "ok")
+
+            def _gitlab(self, body: bytes) -> None:
+                if outer.gitlab_secret is None:
+                    log.warning("gitlab webhook received but no secret configured; rejected")
+                    return self._respond(403, "gitlab webhook not configured")
+                if not verify_gitlab_token(
+                    outer.gitlab_secret, self.headers.get("X-Gitlab-Token")
+                ):
+                    log.warning("gitlab webhook rejected: bad token (secret mismatch?)")
+                    return self._respond(401, "bad token")
+                event = self.headers.get("X-Gitlab-Event", "?")
+                log.info("gitlab webhook: %s -> waking reconcile loop", event)
                 outer.wake()
                 self._respond(200, "ok")
 
