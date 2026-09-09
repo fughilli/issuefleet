@@ -15,6 +15,8 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from issuefleet.httpx import USER_AGENT
+
 AUTHORIZE_URL = "https://linear.app/oauth/authorize"
 TOKEN_URL = "https://api.linear.app/oauth/token"
 AGENT_SCOPES = ["read", "write", "app:mentionable", "app:assignable"]
@@ -44,7 +46,10 @@ def _post_form(url: str, fields: dict) -> dict:
     req = urllib.request.Request(
         url,
         data=urllib.parse.urlencode(fields).encode(),
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": USER_AGENT,
+        },
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
