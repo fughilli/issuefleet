@@ -403,6 +403,9 @@ claim = {{ strategy = "agent" }}
 
     def test_missing_credentials_is_actionable(self):
         import os
+        from unittest import mock
+
+        from issuefleet import creds
 
         saved = {k: os.environ.pop(k, None) for k in ("LINEAR_API_KEY", "GITHUB_TOKEN", "GH_TOKEN")}
         try:
@@ -419,7 +422,9 @@ claim = {{ strategy = "label", value = "agent" }}
 """
             )
             out = io.StringIO()
-            code = run_doctor(p, git=FakeGit(self.root), stream=out)
+            with mock.patch.object(creds, "shutil") as sh:
+                sh.which.return_value = None
+                code = run_doctor(p, git=FakeGit(self.root), stream=out)
             self.assertEqual(code, 1)
             self.assertIn("linear.app/settings/api", out.getvalue())
             self.assertIn("fine-grained PAT", out.getvalue())
