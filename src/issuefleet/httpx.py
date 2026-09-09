@@ -2,6 +2,9 @@
 
 Clients take a ``transport`` callable so tests can assert exact requests
 offline; the default is urllib.
+
+Requests name themselves: urllib's default (``Python-urllib/3.x``) is a bot
+signature that a WAF in front of a self-hosted forge rejects outright.
 """
 
 from __future__ import annotations
@@ -10,7 +13,10 @@ import json
 import urllib.error
 import urllib.request
 
+from issuefleet import __version__
+
 TIMEOUT_S = 30
+USER_AGENT = f"issuefleet/{__version__} (+https://github.com/fughilli/issuefleet)"
 
 
 class ApiError(Exception):
@@ -22,6 +28,7 @@ class ApiError(Exception):
 
 def urllib_transport(method: str, url: str, headers: dict, payload: dict | None) -> dict:
     data = json.dumps(payload).encode() if payload is not None else None
+    headers = {"User-Agent": USER_AGENT, **headers}
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:

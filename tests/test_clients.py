@@ -4,11 +4,14 @@ construction and response mapping, fully offline."""
 import os
 import tempfile
 import unittest
+import urllib.request
 from pathlib import Path
+from unittest import mock
 
 from issuefleet import config, creds, oauth
 from issuefleet.github import GithubForge, parse_repo_slug
-from issuefleet.httpx import ApiError
+from issuefleet.httpx import USER_AGENT, ApiError, urllib_transport
+from issuefleet.publish import DISCORD_USER_AGENT
 from issuefleet.linear import (
     AppTokenProvider,
     LinearClient,
@@ -556,6 +559,51 @@ class CredsTest(unittest.TestCase):
         self.assertIsNone(client.token_provider)
         self.assertEqual(client.api_key, "lin_api_static")
 
+
+class UserAgentTest(unittest.TestCase):
+    """Outbound requests name issuefleet rather than urllib."""
+
+    def _captured_request(self, fn):
+        seen = {}
+
+        class FakeResp:
+            def read(self):
+                return b"{}"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_urlopen(req, timeout=None):
+            seen["req"] = req
+            return FakeResp()
+
+        with mock.patch.object(urllib.request, "urlopen", fake_urlopen):
+            fn()
+        return seen["req"]
+
+    def test_transport_sends_a_named_user_agent(self):
+        req = self._captured_request(
+            lambda: urllib_transport("GET", "https://example.test/x", {}, None)
+        )
+        self.assertEqual(req.get_header("User-agent"), USER_AGENT)
+
+    def test_caller_supplied_user_agent_wins(self):
+        """publish.py sends the exact UA Discord requires; ours must not clobber it."""
+        req = self._captured_request(
+            lambda: urllib_transport(
+                "GET", "https://example.test/x", {"User-Agent": DISCORD_USER_AGENT}, None
+            )
+        )
+        self.assertEqual(req.get_header("User-agent"), DISCORD_USER_AGENT)
+
+    def test_oauth_form_post_sends_it_too(self):
+        req = self._captured_request(
+            lambda: oauth._post_form("https://example.test/token", {"grant_type": "x"})
+        )
+        self.assertEqual(req.get_header("User-agent"), USER_AGENT)
 
 if __name__ == "__main__":
     unittest.main()
