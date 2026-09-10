@@ -58,6 +58,12 @@ worker shows as done, not stuck "Working…" until Linear times it out to
 "Error". In personal-key/comment mode the 👀 falls back to a deduped comment;
 the ⚙️/✅ are session-only to avoid thread spam.
 
+The same 👀 lands on the forge side: a comment on the PR/MR (top-level, review,
+or inline on GitHub; discussion or diff note on GitLab) is forwarded to the
+worker and 👀-reacted so the commenter sees it was picked up. A reaction, never
+a reply, so it cannot feed back into the feedback poll. A GitHub review summary
+body has no reactions endpoint and is forwarded without one.
+
 **Authoring issues.** Delegate (or @-mention) the bot on an issue such as
 "turn the WORKLOG backlog into tickets"; the worker reads the source, then
 calls `agentctl file-issue --title … --description-file …` once per ticket.

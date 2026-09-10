@@ -195,6 +195,26 @@ class GitlabForgeTest(unittest.TestCase):
         self.assertEqual(fb[1].path, "src/x.py")
         self.assertEqual(fb[1].reviewer, "bob")
 
+    def test_ack_feedback_awards_eyes_on_a_note(self):
+        t = RecordingTransport([{"id": 1, "name": "eyes"}])
+        self.assertTrue(GitlabForge("tok", "g/p", transport=t).ack_feedback(5, "nt-42"))
+        call = t.calls[0]
+        self.assertEqual(call["method"], "POST")
+        self.assertIn("/merge_requests/5/notes/42/award_emoji", call["url"])
+        self.assertEqual(call["payload"], {"name": "eyes"})
+
+    def test_ack_feedback_awards_eyes_on_a_diff_note(self):
+        t = RecordingTransport([{"id": 1, "name": "eyes"}])
+        self.assertTrue(GitlabForge("tok", "g/p", transport=t).ack_feedback(5, "dn-7"))
+        self.assertIn("/merge_requests/5/notes/7/award_emoji", t.calls[0]["url"])
+
+    def test_ack_feedback_swallows_api_error(self):
+        from issuefleet.httpx import ApiError
+
+        def boom(*a):
+            raise ApiError(409, "award_emoji", "already awarded")
+        self.assertFalse(GitlabForge("tok", "g/p", transport=boom).ack_feedback(5, "nt-1"))
+
     def test_ci_status_success_from_statuses(self):
         t = RecordingTransport(
             [[

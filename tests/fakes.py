@@ -227,6 +227,9 @@ class FakeForge:
         self.ci: dict[str, CiStatus] = {}  # keyed by head SHA
         self.fail_next_ci = 0
         self.fail_next_open = 0
+        self.acked: list[tuple[int, str]] = []
+        self.ack_unsupported = False
+        self.ack_raises = False
         self._next = 100
 
     def merge(self, number: int, merge_sha: str | None = None) -> None:
@@ -292,6 +295,14 @@ class FakeForge:
 
     def pr_feedback(self, number: int) -> list[PrFeedback]:
         return list(self.feedback.get(number, []))
+
+    def ack_feedback(self, number: int, feedback_id: str) -> bool:
+        if self.ack_raises:
+            raise RuntimeError("fake reaction blew up")
+        if self.ack_unsupported:
+            return False
+        self.acked.append((number, feedback_id))
+        return True
 
     def set_ci(self, number: int, state: str, *, settled=True, failing=None, total=None):
         """Test helper: attach a CI verdict to a PR's head SHA. `state` is one

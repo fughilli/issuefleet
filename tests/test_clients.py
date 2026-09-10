@@ -295,6 +295,30 @@ class GithubForgeTest(unittest.TestCase):
         forge = GithubForge("tok", "o/r", transport=t)
         self.assertEqual(forge.get_pr(5).head_sha, "deadbeef")
 
+    def test_ack_feedback_reacts_on_issue_comment(self):
+        t = RecordingTransport([{"id": 1, "content": "eyes"}])
+        self.assertTrue(GithubForge("tok", "o/r", transport=t).ack_feedback(5, "ic-42"))
+        call = t.calls[0]
+        self.assertEqual(call["method"], "POST")
+        self.assertEqual(call["url"], "https://api.github.com/repos/o/r/issues/comments/42/reactions")
+        self.assertEqual(call["payload"], {"content": "eyes"})
+
+    def test_ack_feedback_reacts_on_inline_review_comment(self):
+        t = RecordingTransport([{"id": 1, "content": "eyes"}])
+        self.assertTrue(GithubForge("tok", "o/r", transport=t).ack_feedback(5, "rc-99"))
+        self.assertEqual(t.calls[0]["url"],
+                         "https://api.github.com/repos/o/r/pulls/comments/99/reactions")
+
+    def test_ack_feedback_skips_review_body_with_no_reactions_endpoint(self):
+        t = RecordingTransport([])
+        self.assertFalse(GithubForge("tok", "o/r", transport=t).ack_feedback(5, "rv-7"))
+        self.assertEqual(t.calls, [])
+
+    def test_ack_feedback_swallows_api_error(self):
+        def boom(*a):
+            raise ApiError(404, "reactions", "gone")
+        self.assertFalse(GithubForge("tok", "o/r", transport=boom).ack_feedback(5, "ic-1"))
+
     def test_ci_status_folds_checks_and_statuses_to_success(self):
         t = RecordingTransport(
             [

@@ -179,6 +179,18 @@ class GitlabForge:
                 )
         return out
 
+    def ack_feedback(self, number: int, feedback_id: str) -> bool:
+        """Plain (``nt-``) and diff (``dn-``) notes are both MR notes, so one
+        ``notes/<id>/award_emoji`` endpoint covers them. Re-awarding an emoji
+        the note already carries is a 409, swallowed like any other failure."""
+        _, _, raw = feedback_id.partition("-")
+        try:
+            self._call("POST", self._mr(f"/{number}/notes/{raw}/award_emoji"), {"name": "eyes"})
+            return True
+        except ApiError as e:
+            log.debug("gitlab: 👀 award_emoji on %s failed: %s", feedback_id, e)
+            return False
+
     def ci_status(self, ref: str) -> CiStatus:
         """Fold the commit-statuses endpoint for ``ref`` into one verdict. It
         aggregates pipeline jobs and external commit statuses — GitLab's analog

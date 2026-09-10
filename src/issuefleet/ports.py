@@ -71,6 +71,13 @@ class Forge(Protocol):
         normalized. Caller dedupes by id."""
         ...
 
+    def ack_feedback(self, number: int, feedback_id: str) -> bool:
+        """React 👀 to a piece of PR/MR feedback so its author sees it was
+        picked up. A reaction, never a reply, so it cannot feed back into
+        pr_feedback(). Best-effort: False when the surface has no reactions
+        endpoint or the call fails. ``feedback_id`` is pr_feedback()'s id."""
+        ...
+
     def ci_status(self, ref: str) -> CiStatus:
         """Aggregate CI verdict (check runs + commit statuses) for a commit.
         `settled` is False while anything is still running; caller notifies
