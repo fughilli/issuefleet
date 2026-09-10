@@ -19,6 +19,7 @@ from issuefleet.doctor import run_doctor
 from issuefleet import gitops as gitops_mod
 from issuefleet.gitops import Gitops
 from issuefleet.linear import LinearClient, LinearTracker, client_from_config
+from issuefleet.trackers import build_tracker
 from issuefleet.mailbox import Mailbox
 from issuefleet.model import WorkerRecord
 from issuefleet.reconcile import Reconciler, build_forge_and_checkout
@@ -31,7 +32,7 @@ log = logging.getLogger("issuefleet")
 
 
 def build_stack(cfg: Config) -> Reconciler:
-    tracker = LinearTracker(client_from_config(cfg))
+    tracker = build_tracker(cfg)
     git = Gitops()
     from issuefleet import forge as forge_mod
 

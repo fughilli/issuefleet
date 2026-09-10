@@ -83,6 +83,23 @@ def resolve_linear_oauth_client(cfg: Config) -> tuple[str, str]:
     return cfg.linear_oauth_client_id, secret
 
 
+def resolve_jira_token(cfg: Config) -> tuple[str, str]:
+    """(token, source-description) for the Jira API token / PAT. Env-then-file,
+    same rule as every other secret. Raises CredentialError if absent."""
+    v = os.environ.get(cfg.jira_api_token_env)
+    if v:
+        return v.strip(), f"env ${cfg.jira_api_token_env}"
+    v = _read_key_file(cfg.jira_api_token_file)
+    if v:
+        return v, str(cfg.jira_api_token_file)
+    raise CredentialError(
+        f"no Jira API token: set ${cfg.jira_api_token_env} or write the token to "
+        f"{cfg.jira_api_token_file} (chmod 600). For Atlassian Cloud create one at "
+        "https://id.atlassian.com/manage-profile/security/api-tokens; for Jira "
+        "Server/Data Center use a Personal Access Token (jira_auth = \"bearer\")."
+    )
+
+
 def resolve_sigbot_key(cfg: Config) -> tuple[str, str]:
     """(key, source-description) for the fleet manager's sigbot API key.
     Env-then-file, same rule as every other secret. Raises CredentialError if
