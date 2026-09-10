@@ -529,10 +529,14 @@ class CredsTest(unittest.TestCase):
         self.assertEqual((tok, source), ("first", "env $GITHUB_TOKEN"))
 
     def test_missing_raises_actionable_error(self):
+        from unittest import mock
+
         with self.assertRaisesRegex(creds.CredentialError, "linear.app/settings/api"):
             creds.resolve_linear_key(self.cfg)
-        with self.assertRaisesRegex(creds.CredentialError, "fine-grained PAT"):
-            creds.resolve_github_token(self.cfg)
+        with mock.patch.object(creds, "shutil") as sh:
+            sh.which.return_value = None
+            with self.assertRaisesRegex(creds.CredentialError, "fine-grained PAT"):
+                creds.resolve_github_token(self.cfg)
 
     def test_gitlab_env_then_file(self):
         with self.assertRaisesRegex(creds.CredentialError, "no GitLab token"):
