@@ -8,7 +8,7 @@ Issue: {url}
 ## The issue
 
 {description}
-
+{attachments}
 ## How you work here
 
 You are one worker in a fleet. You have this git worktree to yourself, on
@@ -113,12 +113,30 @@ def _render_cross_project(siblings: list[dict] | None) -> str:
     return "\n" + _CROSS_PROJECT_SECTION.format(sibling_list=listed)
 
 
-def render_brief(issue, branch: str, base_ref: str, siblings: list[dict] | None = None) -> str:
+def _render_attachments(images: list[str] | None) -> str:
+    """The 'Attached images' block for the brief, or "" when the issue carried
+    none. Leading/trailing blank lines keep it spaced from the description and
+    the next heading; an empty value collapses to a single separating newline."""
+    if not images:
+        return ""
+    from issuefleet.attachments import render_image_block
+
+    return "\n" + render_image_block(images) + "\n"
+
+
+def render_brief(
+    issue,
+    branch: str,
+    base_ref: str,
+    siblings: list[dict] | None = None,
+    attachments: list[str] | None = None,
+) -> str:
     return BRIEF_TEMPLATE.format(
         key=issue.key,
         title=issue.title,
         url=issue.url,
         description=issue.description or "(no description on the issue)",
+        attachments=_render_attachments(attachments),
         branch=branch,
         base_ref=base_ref,
         cross_project=_render_cross_project(siblings),

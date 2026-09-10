@@ -651,6 +651,14 @@ the head SHA and the verdict, so a completed run notifies exactly once, a fresh
 push earns a new notification, and a re-run that flips failure→success tells the
 agent its fix landed.
 
+**Images** on the issue, in comments, or in PR/MR review feedback are fetched
+host-side with the Linear or forge credential, saved under the worktree's
+`.agent/attachments/`, and referenced in the worker's prompt so the agent can
+open them. GitLab upload references are rewritten to the token-authenticated
+uploads API, since the web route ignores the token. Best-effort: a download that
+fails, is oversized, or isn't an image is skipped and the link stays in the text.
+Credentials are sent only to the originating host.
+
 Teardown (merge, un-claim, or `stop`): signal the agent via a `shutdown`
 mailbox message → archive the mailbox + turn transcripts to
 `<state_dir>/archive/<project>-<KEY>-<timestamp>/` (the transcript outlives

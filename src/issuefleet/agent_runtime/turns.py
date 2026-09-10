@@ -199,7 +199,16 @@ def format_inbound(msgs: list[Message]) -> str:
             head = f"Upstream PR closed unmerged ({p.get('project', '?')})"
         else:
             head = "Notice from the orchestrator"
-        blocks.append(f"### {head}\n{p.get('text', p.get('body', ''))}")
+        body = p.get("text", p.get("body", ""))
+        images = p.get("images") or []
+        if images:
+            listed = "\n".join(f"- {path}" for path in images)
+            body = (
+                f"{body}\n\n"
+                "Attached image(s), downloaded into your worktree — open each with "
+                f"the Read tool to view it:\n{listed}"
+            )
+        blocks.append(f"### {head}\n{body}")
     blocks.append(
         "Address these, then continue. Use `agentctl status` to report, "
         "`agentctl ask` if blocked, `agentctl ready` to (re-)submit — or, if "
