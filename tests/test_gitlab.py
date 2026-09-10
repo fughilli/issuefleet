@@ -167,6 +167,18 @@ class GitlabForgeTest(unittest.TestCase):
             [self._mr_json(merge_status="checking")])).get_pr(5)
         self.assertIsNone(pr.mergeable)
 
+    def test_stale_post_push_snapshot_is_not_a_conflict(self):
+        mr = self._mr_json(has_conflicts=False, merge_status="conflict")
+        mr["merge_status"] = "can_be_merged"
+        pr = GitlabForge("tok", "g/p", transport=RecordingTransport([mr])).get_pr(5)
+        self.assertIsNone(pr.mergeable)
+
+    def test_has_conflicts_alone_marks_dirty(self):
+        mr = self._mr_json(has_conflicts=True, merge_status="commits_status")
+        pr = GitlabForge("tok", "g/p", transport=RecordingTransport([mr])).get_pr(5)
+        self.assertIs(pr.mergeable, False)
+        self.assertEqual(pr.mergeable_state, "dirty")
+
     def test_close_mr_uses_state_event(self):
         t = RecordingTransport([{}])
         GitlabForge("tok", "g/p", transport=t).close_pr(5)
