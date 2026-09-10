@@ -62,9 +62,12 @@ end-to-end flow — `docs/SMOKE_TEST.md` is the step-by-step procedure.
   `Forge.ack_feedback` reacts 👀 on a PR/MR comment the moment `_check_pr`
   routes it to the worker — GitHub reactions on `ic-`/`rc-`, GitLab
   `award_emoji` on `nt-`/`dn-`; a GitHub review summary body has no endpoint.
-  Best-effort, never blocks ingestion. Offline-tested; `ic-` and `nt-` verified
-  live by calling `ack_feedback` directly (👀 landed on both). `rc-`, `dn-` and
-  the reconcile wiring are unproven live.
+  Best-effort, never blocks ingestion. Verified live on both forges: all four
+  reactable surfaces (`ic-`, `rc-`, `nt-`, `dn-`) took the 👀, and `_check_pr`
+  drove it end to end — on GitHub through a real daemon tick (comment → 👀 →
+  the worker's turn, inside one poll cycle) and on GitLab by running the same
+  method against a live MR with a real forge. A second pass re-notified and
+  re-acked nothing on either, so `seen_feedback_ids` dedupe holds.
 
 - **FUG-41 — fleet manager** (branch `agent/fug-41-…`): a host-side singleton
   (`fleet_manager.py`) that bridges a Signal group (via a sigbot service) to the
