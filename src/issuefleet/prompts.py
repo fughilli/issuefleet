@@ -32,6 +32,10 @@ credentials**: a host-side orchestrator relays for you.
   - `.agent/bin/agentctl ask "<question>"` — ask a blocking question. Your
     session idles until a human replies on the Linear issue; the reply is
     injected into your next turn.
+  - `.agent/bin/agentctl reply --to <id> "<text>"` — reply on the PR/MR thread a
+    piece of review feedback came from; each feedback message shows its id.
+    Answer feedback where it was left, and keep progress on the issue with
+    `status`.
   - `.agent/bin/agentctl ready --title "<PR title>" --body-file <file>` —
     declare the issue satisfied. The orchestrator verifies you have commits,
     pushes the branch, and opens (or updates) the pull request. PR review

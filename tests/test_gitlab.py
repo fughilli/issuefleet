@@ -167,6 +167,54 @@ class GitlabForgeTest(unittest.TestCase):
             [self._mr_json(merge_status="checking")])).get_pr(5)
         self.assertIsNone(pr.mergeable)
 
+    def test_reply_posts_into_the_notes_discussion(self):
+        from issuefleet.model import PrFeedback
+
+        t = RecordingTransport([[{"id": "abc", "notes": [{"id": 1}]},
+                                 {"id": "def", "notes": [{"id": 42}, {"id": 43}]}], {}])
+        fb = PrFeedback(id="dn-43", kind="review_comment", reviewer="bob", body="x")
+        GitlabForge("tok", "g/p", transport=t).reply_to_feedback(5, fb, "fixed")
+        self.assertIn("/merge_requests/5/discussions?per_page=100&page=1", t.calls[0]["url"])
+        self.assertEqual(t.calls[1]["method"], "POST")
+        self.assertIn("/merge_requests/5/discussions/def/notes", t.calls[1]["url"])
+        self.assertEqual(t.calls[1]["payload"], {"body": "fixed"})
+
+    def test_reply_returns_the_new_note_id(self):
+        from issuefleet.model import PrFeedback
+
+        t = RecordingTransport([[{"id": "d1", "notes": [{"id": 42}]}], {"id": 77, "type": "DiffNote"}])
+        fb = PrFeedback(id="dn-42", kind="review_comment", reviewer="bob", body="x")
+        self.assertEqual(GitlabForge("tok", "g/p", transport=t).reply_to_feedback(5, fb, "x"), "dn-77")
+
+    def test_reply_with_a_malformed_id_raises_api_error(self):
+        from issuefleet.httpx import ApiError
+        from issuefleet.model import PrFeedback
+
+        t = RecordingTransport([])
+        fb = PrFeedback(id="nt-oops", kind="comment", reviewer="bob", body="x")
+        with self.assertRaises(ApiError):
+            GitlabForge("tok", "g/p", transport=t).reply_to_feedback(5, fb, "x")
+        self.assertEqual(t.calls, [])
+
+    def test_reply_raises_when_no_discussion_holds_the_note(self):
+        from issuefleet.httpx import ApiError
+        from issuefleet.model import PrFeedback
+
+        t = RecordingTransport([[{"id": "abc", "notes": [{"id": 1}]}]])
+        fb = PrFeedback(id="nt-9", kind="comment", reviewer="bob", body="x")
+        with self.assertRaises(ApiError):
+            GitlabForge("tok", "g/p", transport=t).reply_to_feedback(5, fb, "x")
+
+    def test_pr_feedback_reads_every_page_of_notes(self):
+        def n(i, body="b"):
+            return {"id": i, "body": body, "author": {"username": "a"}, "system": False, "type": None}
+
+        t = RecordingTransport([[n(i) for i in range(100)], [n(100, "newest")]])
+        fb = GitlabForge("tok", "g/p", transport=t).pr_feedback(5)
+        self.assertEqual(len(fb), 101)
+        self.assertEqual(fb[-1].body, "newest")
+        self.assertIn("order_by=created_at&per_page=100&page=2", t.calls[1]["url"])
+
     def test_close_mr_uses_state_event(self):
         t = RecordingTransport([{}])
         GitlabForge("tok", "g/p", transport=t).close_pr(5)

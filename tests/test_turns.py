@@ -282,6 +282,18 @@ class AgentctlTest(unittest.TestCase):
         self.assertEqual(turns.TurnState.load(self.agent_dir).phase, turns.PHASE_IDLE)
         self.assertEqual(self.mb.pending_outbox(), [])  # no message required
 
+    def test_reply(self):
+        agentctl.main(["reply", "--to", "rc-9", "good", "catch"])
+        [m] = self.mb.pending_outbox()
+        self.assertEqual((m.kind, m.payload), ("pr_reply", {"to": "rc-9", "text": "good catch"}))
+
+    def test_pr_feedback_render_shows_the_id_and_how_to_reply(self):
+        self.mb.put_inbox("pr_feedback", {"id": "rc-9", "kind": "review_comment",
+                                          "reviewer": "bob", "path": "a.py", "text": "why?"})
+        out = turns.format_inbound(self.mb.pending_inbox())
+        self.assertIn("[id `rc-9`]", out)
+        self.assertIn("agentctl reply --to <id>", out)
+
     def test_ready_sets_ready_phase(self):
         agentctl.main(["ready", "--title", "Fix the thing", "--body", "Does the work."])
         [m] = self.mb.pending_outbox()

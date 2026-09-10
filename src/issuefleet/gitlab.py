@@ -112,6 +112,18 @@ class GitlabForge:
     def _mr(self, path: str = "") -> str:
         return f"/projects/{self.project_id}/merge_requests{path}"
 
+    def _paged(self, path: str) -> list:
+        """Every item of a list endpoint. The transport exposes no headers, so
+        pages are requested until one comes back short."""
+        size, page, out = 100, 1, []
+        sep = "&" if "?" in path else "?"
+        while True:
+            batch = self._call("GET", f"{path}{sep}per_page={size}&page={page}")
+            out.extend(batch)
+            if len(batch) < size:
+                return out
+            page += 1
+
     # -- Forge port --------------------------------------------------------
 
     def find_pr(self, head_branch: str) -> PullRequest | None:
@@ -151,7 +163,7 @@ class GitlabForge:
         with a path), the rest are plain comments. System notes (label changes,
         pipeline events, …) are dropped — they aren't feedback to act on."""
         out: list[PrFeedback] = []
-        for n in self._call("GET", self._mr(f"/{number}/notes?sort=asc&order_by=created_at")):
+        for n in self._paged(self._mr(f"/{number}/notes?sort=asc&order_by=created_at")):
             if n.get("system"):
                 continue
             author = (n.get("author") or {}).get("username", "?")
@@ -190,6 +202,32 @@ class GitlabForge:
         except ApiError as e:
             log.debug("gitlab: 👀 award_emoji on %s failed: %s", feedback_id, e)
             return False
+
+    def reply_to_feedback(self, number: int, feedback: PrFeedback, body: str) -> str | None:
+        """Every note belongs to a discussion, and posting into it threads the
+        reply. The notes endpoint doesn't expose the discussion id, so the
+        discussion is found by note id. Returns the new note's feedback id.
+
+        A malformed id raises ApiError like any other forge failure: an unexpected
+        exception type would escape the relay's retry accounting and leave the
+        message pending forever."""
+        _, _, raw = feedback.id.partition("-")
+        try:
+            note_id = int(raw)
+        except ValueError:
+            raise ApiError(
+                400, self._mr(f"/{number}/discussions"), f"malformed feedback id {feedback.id!r}"
+            ) from None
+        for d in self._paged(self._mr(f"/{number}/discussions")):
+            if any(n.get("id") == note_id for n in d.get("notes") or []):
+                posted = self._call(
+                    "POST", self._mr(f"/{number}/discussions/{d['id']}/notes"), {"body": body}
+                )
+                new_id = (posted or {}).get("id")
+                if not new_id:
+                    return None
+                return f"{'dn' if posted.get('type') == 'DiffNote' else 'nt'}-{new_id}"
+        raise ApiError(404, self._mr(f"/{number}/discussions"), f"no discussion holds note {note_id}")
 
     def ci_status(self, ref: str) -> CiStatus:
         """Fold the commit-statuses endpoint for ``ref`` into one verdict. It

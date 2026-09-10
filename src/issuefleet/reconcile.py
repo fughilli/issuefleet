@@ -13,6 +13,7 @@ Design rules (from the brief):
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import threading
 import time
@@ -41,6 +42,10 @@ from issuefleet.registry import Registry
 log = logging.getLogger("issuefleet")
 
 _SEEN_IDS_CAP = 1000
+# Our own posted replies carry this marker. Matched only at the start of a line:
+# a human quoting our reply (GitHub "Quote reply" keeps HTML comments, prefixed
+# with "> ") must still reach the worker.
+_OWN_REPLY_MARKER = re.compile(r"^[ \t]*<!--\s*" + re.escape(MARKER_PREFIX), re.M)
 
 # A poll-claimed worker (missed session webhook) probes Linear for its agent
 # session this many ticks before giving up — enough to cover session-creation
@@ -1107,6 +1112,8 @@ class Reconciler:
                     self._handle_upstream_checkout(rec, project, mailbox, msg)
                 elif msg.kind == "upstream_pr":
                     self._handle_upstream_pr(rec, project, mailbox, msg)
+                elif msg.kind == "pr_reply":
+                    self._handle_pr_reply(rec, project, mailbox, msg)
                 elif msg.kind == "ready":
                     self._handle_ready(rec, project, mailbox, msg)
                 else:
@@ -1117,6 +1124,78 @@ class Reconciler:
                 # order; next tick retries (dedupe via marker).
                 log.exception("worker %s: relay of %s failed; will retry", rec.issue_key, msg.kind)
                 return
+
+    def _handle_pr_reply(
+        self, rec: WorkerRecord, project: ProjectConfig, mailbox: Mailbox, msg
+    ) -> None:
+        """Post a worker's reply where the feedback was left. The posted comment's
+        own id is recorded as seen, which is what keeps the reply from coming back
+        as new feedback; the marker in the body is the dedupe key for a retry, and
+        the fallback if we crash between posting and recording. The text is
+        scanned like a `ready` diff before it is published."""
+        to = msg.payload.get("to", "")
+        text = (msg.payload.get("text") or "").strip()
+        if rec.pr_number is None:
+            return self._reject_reply(mailbox, msg, "you have no open PR, so there is nothing to reply on")
+        forge = self.forges[project.name]
+        feedback = forge.pr_feedback(rec.pr_number)
+        if any(marker(msg.id) in fb.body for fb in feedback):
+            mailbox.archive_outbox(msg, receipt={"deduped": True})
+            return
+        target = next((fb for fb in feedback if fb.id == to), None)
+        if target is None:
+            return self._reject_reply(
+                mailbox, msg,
+                f"PR #{rec.pr_number} has no feedback with id `{to}`; use the id shown with the message",
+            )
+        if not text:
+            return self._reject_reply(mailbox, msg, "the reply was empty")
+        if not self._reply_security_ok(rec, mailbox, msg, text):
+            return
+        posted_id = forge.reply_to_feedback(
+            rec.pr_number, target, f"🤖 {text}\n\n{marker(msg.id)}"
+        )
+        if posted_id:
+            rec.seen_feedback_ids.append(posted_id)
+            rec.seen_feedback_ids = rec.seen_feedback_ids[-_SEEN_IDS_CAP:]
+            rec.touch()
+            self.registry.save()
+        mailbox.archive_outbox(msg, receipt={"relayed": "forge", "to": to})
+
+    def _reject_reply(self, mailbox: Mailbox, msg, reason: str) -> None:
+        mailbox.ensure().put_inbox(
+            "reply",
+            {"author": "issuefleet",
+             "text": f"Your reply to `{msg.payload.get('to', '?')}` was not posted: {reason}."},
+        )
+        mailbox.archive_outbox(msg, receipt={"rejected": reason})
+
+    def _reply_security_ok(self, rec: WorkerRecord, mailbox: Mailbox, msg, text: str) -> bool:
+        """Fails closed in block mode, like `ready`: a reply is public text."""
+        mode = self.cfg.security.mode
+        diff = "+++ b/reply\n@@ -0,0 +1 @@\n" + "".join(f"+{line}\n" for line in text.splitlines())
+        try:
+            verdict = self.gate.scan(diff)
+        except Exception:
+            log.exception("worker %s: security scan of a reply failed to run", rec.issue_key)
+            if mode == "warn":
+                return True
+            self._reject_reply(mailbox, msg, "the security gate could not scan it; send it again")
+            return False
+        if verdict.ok:
+            return True
+        if mode == "warn":
+            log.warning("worker %s: security gate flagged a reply (warn mode)", rec.issue_key)
+            return True
+        log.warning("worker %s: security gate BLOCKED a reply (%d finding(s))",
+                    rec.issue_key, len(verdict.findings))
+        found = "\n".join(f.describe() for f in verdict.findings)
+        self._reject_reply(
+            mailbox, msg,
+            "it appears to contain a credential. Findings (values redacted):\n"
+            f"{found}\nRewrite it without the secret and send it again",
+        )
+        return False
 
     def _handle_file_issue(self, rec: WorkerRecord, mailbox: Mailbox, msg) -> None:
         """Relay a worker's request to author a new Linear issue. Dedupe is by
@@ -1700,11 +1779,12 @@ class Reconciler:
 
         new_feedback = []
         for fb in forge.pr_feedback(rec.pr_number):
-            if fb.id in rec.seen_feedback_ids:
+            if fb.id in rec.seen_feedback_ids or _OWN_REPLY_MARKER.search(fb.body):
                 continue
             new_feedback.append(fb)
         for fb in new_feedback:
             payload = {
+                "id": fb.id,
                 "reviewer": fb.reviewer,
                 "kind": fb.kind,
                 "path": fb.path,

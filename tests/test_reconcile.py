@@ -512,6 +512,109 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(len(replies), 1)
         self.assertNotIn("images", replies[0].payload)
 
+    def _pr_with_feedback(self):
+        self.claim_one()
+        self.mailbox().put_outbox("ready", {"title": "T", "body": "B"})
+        self.rec.tick()
+        n = self.worker().pr_number
+        self.forge.add_feedback(n, "why this name?", kind="review_comment", reviewer="bob", path="src/x.py")
+        self.rec.tick()
+        [fb] = [m for m in self.mailbox().pending_inbox() if m.kind == "pr_feedback"]
+        return n, fb.payload["id"]
+
+    def _notes(self):
+        return [m.payload["text"] for m in self.mailbox().pending_inbox() if m.kind == "reply"]
+
+    def test_pr_feedback_payload_carries_the_id(self):
+        n, fid = self._pr_with_feedback()
+        self.assertEqual(fid, f"f1-{n}")
+
+    def test_pr_reply_posted_once_on_the_thread_with_marker(self):
+        n, fid = self._pr_with_feedback()
+        self.mailbox().put_outbox("pr_reply", {"to": fid, "text": "it mirrors the API"})
+        self.rec.tick()
+        self.rec.tick()
+        [(number, to, body)] = self.forge.replies
+        self.assertEqual((number, to), (n, fid))
+        self.assertIn("it mirrors the API", body)
+        self.assertIn(MARKER_PREFIX, body)
+        self.assertEqual(self.mailbox().pending_outbox(), [])
+
+    def test_a_human_quoting_our_reply_still_reaches_the_worker(self):
+        from issuefleet import marker
+
+        n, _ = self._pr_with_feedback()
+        self.forge.add_feedback(
+            n, f"> \U0001f916 an earlier reply\n> {marker('abc123')}\n\nstill unclear, please explain",
+            reviewer="bob",
+        )
+        self.rec.tick()
+        fb = [m for m in self.mailbox().pending_inbox() if m.kind == "pr_feedback"]
+        self.assertEqual(len(fb), 2)
+        self.assertIn("still unclear", fb[-1].payload["text"])
+
+    def test_our_own_reply_is_remembered_by_id(self):
+        n, fid = self._pr_with_feedback()
+        self.mailbox().put_outbox("pr_reply", {"to": fid, "text": "done"})
+        self.rec.tick()
+        posted = self.forge.feedback[n][-1].id
+        self.assertIn(posted, self.worker().seen_feedback_ids)
+
+    def test_own_reply_is_not_ingested_as_feedback(self):
+        n, fid = self._pr_with_feedback()
+        self.mailbox().put_outbox("pr_reply", {"to": fid, "text": "done"})
+        self.rec.tick()
+        self.rec.tick()
+        fb = [m for m in self.mailbox().pending_inbox() if m.kind == "pr_feedback"]
+        self.assertEqual(len(fb), 1)
+
+    def test_pr_reply_crash_after_post_does_not_double_post(self):
+        n, fid = self._pr_with_feedback()
+        m = self.mailbox().put_outbox("pr_reply", {"to": fid, "text": "half-delivered"})
+        from issuefleet import marker
+
+        self.forge.add_feedback(n, f"🤖 half-delivered\n\n{marker(m.id)}", reviewer="issuefleet")
+        self.rec.tick()
+        self.assertEqual(self.forge.replies, [])
+        self.assertEqual(self.mailbox().pending_outbox(), [])
+
+    def test_pr_reply_failure_stays_pending_then_retries(self):
+        n, fid = self._pr_with_feedback()
+        self.forge.fail_next_reply = 1
+        self.mailbox().put_outbox("pr_reply", {"to": fid, "text": "retry me"})
+        self.rec.tick()
+        self.assertEqual(len(self.mailbox().pending_outbox()), 1)
+        self.rec.tick()
+        self.assertEqual(len(self.forge.replies), 1)
+        self.assertEqual(self.mailbox().pending_outbox(), [])
+
+    def test_pr_reply_to_unknown_id_tells_the_worker(self):
+        self._pr_with_feedback()
+        self.mailbox().put_outbox("pr_reply", {"to": "nope", "text": "hello"})
+        self.rec.tick()
+        self.assertEqual(self.forge.replies, [])
+        self.assertTrue(any("`nope`" in t and "not posted" in t for t in self._notes()))
+
+    def test_pr_reply_without_a_pr_tells_the_worker(self):
+        self.claim_one()
+        self.mailbox().put_outbox("pr_reply", {"to": "f1-1", "text": "hello"})
+        self.rec.tick()
+        self.assertTrue(any("no open PR" in t for t in self._notes()))
+        self.assertEqual(self.mailbox().pending_outbox(), [])
+
+    def test_pr_reply_with_a_credential_is_blocked(self):
+        from issuefleet.security import RegexSecretScanner
+
+        n, fid = self._pr_with_feedback()
+        self.rec.gate = RegexSecretScanner()
+        secret = "AKIA" + "ABCDEFGHIJKLMNOP"
+        self.mailbox().put_outbox("pr_reply", {"to": fid, "text": f"use {secret}"})
+        self.rec.tick()
+        self.assertEqual(self.forge.replies, [])
+        notes = self._notes()
+        self.assertTrue(any("credential" in t for t in notes))
+        self.assertFalse(any(secret in t for t in notes))
+
     def test_merge_tears_down_completely(self):
         self.claim_one()
         self.mailbox().put_outbox("ready", {"title": "T", "body": "B"})

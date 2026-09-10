@@ -47,6 +47,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("text", nargs="*")
     p.add_argument("--file")
 
+    p = sub.add_parser(
+        "reply", help="reply on the PR/MR thread a piece of review feedback came from (relayed)"
+    )
+    p.add_argument("--to", required=True, metavar="ID", help="the feedback id shown with the message")
+    p.add_argument("text", nargs="*")
+    p.add_argument("--file", help="read the text from a file")
+
     p = sub.add_parser("ready", help="declare the issue satisfied; hand over PR title and body")
     p.add_argument("--title", required=True)
     g = p.add_mutually_exclusive_group(required=True)
@@ -111,6 +118,9 @@ def main(argv: list[str] | None = None) -> int:
         state.phase = turns.PHASE_WAITING
         state.save(agent_dir)
         print("question queued; the loop will idle after this turn until a human replies")
+    elif args.cmd == "reply":
+        mb.put_outbox("pr_reply", {"to": args.to, "text": _text_arg(args)})
+        print(f"reply to {args.to} queued for relay")
     elif args.cmd == "ready":
         body = args.body if args.body is not None else Path(args.body_file).read_text()
         mb.put_outbox("ready", {"title": args.title, "body": body, "new_pr": args.new_pr})

@@ -78,6 +78,13 @@ class Forge(Protocol):
         endpoint or the call fails. ``feedback_id`` is pr_feedback()'s id."""
         ...
 
+    def reply_to_feedback(self, number: int, feedback: PrFeedback, body: str) -> str | None:
+        """Post ``body`` as a reply to ``feedback``: in its thread where the forge
+        has threads, otherwise as a PR-level comment. Returns the posted comment's
+        own feedback id (same shape as ``pr_feedback``), so the caller can mark it
+        seen; None when the forge returns no id."""
+        ...
+
     def ci_status(self, ref: str) -> CiStatus:
         """Aggregate CI verdict (check runs + commit statuses) for a commit.
         `settled` is False while anything is still running; caller notifies
