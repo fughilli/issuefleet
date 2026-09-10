@@ -29,12 +29,24 @@ class GitError(Exception):
     pass
 
 
-def _git(args: list[str], cwd: Path | None = None) -> str:
-    proc = subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=300
+def _shown(args: list[str]) -> str:
+    """The command for an error message, with any ``http.extraheader`` value
+    masked: that is where the forge token travels, and a GitError is logged."""
+    return " ".join(
+        "http.extraheader=<redacted>" if a.startswith("http.extraheader=") else a
+        for a in args
     )
+
+
+def _git(args: list[str], cwd: Path | None = None) -> str:
+    try:
+        proc = subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=300
+        )
+    except subprocess.TimeoutExpired:
+        raise GitError(f"git {_shown(args)} timed out after 300s") from None
     if proc.returncode != 0:
-        raise GitError(f"git {' '.join(args)} failed ({proc.returncode}): {proc.stderr.strip()}")
+        raise GitError(f"git {_shown(args)} failed ({proc.returncode}): {proc.stderr.strip()}")
     return proc.stdout.strip()
 
 
