@@ -11,6 +11,7 @@ from pathlib import Path
 
 from issuefleet import config
 from issuefleet.config import Config, ProjectConfig, ClaimRule
+from issuefleet import gitops
 from issuefleet.gitops import GitError, Gitops
 from issuefleet.model import WorkerRecord
 from issuefleet.runner import TmuxRunner
@@ -45,6 +46,31 @@ class GitopsTest(unittest.TestCase):
         (self.wt / "change.txt").write_text(msg)
         run(["git", "add", "."], cwd=self.wt)
         run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", msg], cwd=self.wt)
+
+    def test_git_error_redacts_extraheader(self):
+        with self.assertRaises(GitError) as cm:
+            gitops._git(
+                ["-c", "http.extraheader=AUTHORIZATION: basic c2VjcmV0",
+                 "rev-parse", "--verify", "no-such-ref"],
+                cwd=self.repo,
+            )
+        msg = str(cm.exception)
+        self.assertNotIn("c2VjcmV0", msg)
+        self.assertIn("http.extraheader=<redacted>", msg)
+        self.assertIn("rev-parse --verify no-such-ref", msg)
+
+    def test_git_timeout_redacts_extraheader_and_drops_the_chained_cause(self):
+        from unittest import mock
+
+        argv = ["-c", "http.extraheader=AUTHORIZATION: basic c2VjcmV0", "fetch"]
+        expired = subprocess.TimeoutExpired(cmd=["git", *argv], timeout=300)
+        with mock.patch.object(gitops.subprocess, "run", side_effect=expired):
+            with self.assertRaises(GitError) as cm:
+                gitops._git(argv, cwd=self.repo)
+        self.assertNotIn("c2VjcmV0", str(cm.exception))
+        self.assertIn("timed out", str(cm.exception))
+        self.assertIsNone(cm.exception.__cause__)
+        self.assertTrue(cm.exception.__suppress_context__)
 
     def test_create_worktree_and_adopt(self):
         self.git.create_worktree(self.repo, "agent/fug-1-x", "main", self.wt)
