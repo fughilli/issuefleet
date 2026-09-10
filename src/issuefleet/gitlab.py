@@ -42,10 +42,15 @@ def _to_pr(d: dict) -> PullRequest:
     reports ``mergeable=False`` / ``mergeable_state="dirty"`` so the existing
     rebase-nudge path fires unchanged; a cleanly-mergeable one reports True; and
     anything GitLab is still computing (or is blocked for a non-conflict reason)
-    stays None, so the agent isn't nagged to rebase over a pending pipeline."""
+    stays None, so the agent isn't nagged to rebase over a pending pipeline.
+
+    Only ``has_conflicts`` decides "dirty". For a few seconds after a push
+    GitLab can answer ``detailed_merge_status="conflict"`` for the *previous*
+    head while ``has_conflicts`` is still false; acting on that field alone
+    sends the agent to rebase onto a base that never moved."""
     has_conflicts = bool(d.get("has_conflicts"))
     merge_status = d.get("detailed_merge_status") or d.get("merge_status")
-    if has_conflicts or merge_status == "conflict":
+    if has_conflicts:
         mergeable, mergeable_state = False, "dirty"
     elif merge_status in ("mergeable", "can_be_merged"):
         mergeable, mergeable_state = True, "clean"
