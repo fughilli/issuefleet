@@ -150,6 +150,24 @@ class GithubForge:
             )
         return out
 
+    def ack_feedback(self, number: int, feedback_id: str) -> bool:
+        """Issue comments (``ic-``) and inline review comments (``rc-``) take
+        reactions; a review summary body (``rv-``) has no reactions endpoint
+        and is skipped. ``number`` is unused: GitHub addresses comments by id."""
+        prefix, _, raw = feedback_id.partition("-")
+        if prefix == "ic":
+            path = f"/repos/{self.slug}/issues/comments/{raw}/reactions"
+        elif prefix == "rc":
+            path = f"/repos/{self.slug}/pulls/comments/{raw}/reactions"
+        else:
+            return False
+        try:
+            self._call("POST", path, {"content": "eyes"})
+            return True
+        except ApiError as e:
+            log.debug("github: 👀 reaction on %s failed: %s", feedback_id, e)
+            return False
+
     def ci_status(self, ref: str) -> CiStatus:
         """Fold the check-runs API and the combined commit-status API for
         ``ref`` into one verdict.

@@ -390,6 +390,33 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(len(fb), 1)
         self.assertEqual(fb[0].payload["reviewer"], "bob")
         self.assertEqual(fb[0].payload["path"], "src/x.py")
+        self.assertEqual(self.forge.acked, [(n, "f1-" + str(n))])
+
+    def test_feedback_acked_once_per_item_across_surfaces(self):
+        self.claim_one()
+        self.mailbox().put_outbox("ready", {"title": "T", "body": "B"})
+        self.rec.tick()
+        n = self.worker().pr_number
+        self.forge.add_feedback(n, "top-level", kind="comment", reviewer="alice")
+        self.forge.add_feedback(n, "[APPROVED] lgtm", kind="review", reviewer="carol")
+        self.forge.add_feedback(n, "rename", kind="review_comment", reviewer="bob", path="x.py")
+        self.rec.tick()
+        self.assertEqual([fid for _, fid in self.forge.acked],
+                         [f"f1-{n}", f"f2-{n}", f"f3-{n}"])
+        self.rec.tick()
+        self.assertEqual(len(self.forge.acked), 3)
+
+    def test_feedback_ack_failure_never_blocks_ingestion(self):
+        self.claim_one()
+        self.mailbox().put_outbox("ready", {"title": "T", "body": "B"})
+        self.rec.tick()
+        n = self.worker().pr_number
+        self.forge.ack_raises = True
+        self.forge.add_feedback(n, "please fix", reviewer="bob")
+        self.rec.tick()
+        fb = [m for m in self.mailbox().pending_inbox() if m.kind == "pr_feedback"]
+        self.assertEqual(len(fb), 1)
+        self.assertIn(f"f1-{n}", self.worker().seen_feedback_ids)
 
     def test_merge_tears_down_completely(self):
         self.claim_one()

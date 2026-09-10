@@ -1643,6 +1643,10 @@ class Reconciler:
                 },
             )
             rec.seen_feedback_ids.append(fb.id)
+            try:
+                forge.ack_feedback(rec.pr_number, fb.id)
+            except Exception:
+                log.exception("forge feedback ack failed (%s #%d)", fb.id, rec.pr_number)
         if new_feedback:
             rec.seen_feedback_ids = rec.seen_feedback_ids[-_SEEN_IDS_CAP:]
             rec.touch()

@@ -58,6 +58,14 @@ end-to-end flow — `docs/SMOKE_TEST.md` is the step-by-step procedure.
 
 ## Recent additions
 
+- **CLA-45 — 👀-ack PR/MR feedback** (branch `agent/cla-45-…`):
+  `Forge.ack_feedback` reacts 👀 on a PR/MR comment the moment `_check_pr`
+  routes it to the worker — GitHub reactions on `ic-`/`rc-`, GitLab
+  `award_emoji` on `nt-`/`dn-`; a GitHub review summary body has no endpoint.
+  Best-effort, never blocks ingestion. Offline-tested; `ic-` and `nt-` verified
+  live by calling `ack_feedback` directly (👀 landed on both). `rc-`, `dn-` and
+  the reconcile wiring are unproven live.
+
 - **FUG-41 — fleet manager** (branch `agent/fug-41-…`): a host-side singleton
   (`fleet_manager.py`) that bridges a Signal group (via a sigbot service) to the
   fleet, ticked alongside the reconciler in `issuefleet run` when
