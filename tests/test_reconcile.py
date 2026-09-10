@@ -418,6 +418,100 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(len(fb), 1)
         self.assertIn(f"f1-{n}", self.worker().seen_feedback_ids)
 
+    def _fake_images(self):
+        """Patch the attachment fetch so image ingest runs fully offline: any
+        URL 'downloads' to a tiny PNG. Returns the list of URLs fetched."""
+        from issuefleet import attachments
+
+        fetched = []
+
+        def fetch(url, headers):
+            fetched.append(url)
+            return "image/png", b"\x89PNG-fake"
+
+        self._orig_fetch = attachments._default_fetch
+        attachments._default_fetch = fetch
+        self.addCleanup(setattr, attachments, "_default_fetch", self._orig_fetch)
+        return fetched
+
+    def test_description_image_downloaded_into_brief(self):
+        self._fake_images()
+        w = self.claim_one(
+            description="See mock ![m](https://uploads.linear.app/a/b/shot.png)"
+        )
+        attach = Path(w.worktree) / ".agent" / "attachments"
+        files = list(attach.glob("*.png"))
+        self.assertEqual(len(files), 1)
+        brief = (Path(w.worktree) / ".agent" / "brief.md").read_text()
+        self.assertIn(".agent/attachments/", brief)
+        self.assertIn("Read tool", brief)
+
+    def test_comment_image_downloaded_and_forwarded(self):
+        self._fake_images()
+        self.claim_one()
+        self.tracker.human_comment(
+            "issue-1", "here ![p](https://uploads.linear.app/x/y/pic.png)"
+        )
+        self.rec.tick()
+        replies = [m for m in self.mailbox().pending_inbox() if m.kind == "reply"]
+        self.assertEqual(len(replies), 1)
+        images = replies[0].payload.get("images")
+        self.assertTrue(images and images[0].startswith(".agent/attachments/"))
+        self.assertTrue((Path(self.worker().worktree) / images[0]).is_file())
+
+    def test_pr_feedback_image_forwarded(self):
+        self._fake_images()
+        self.claim_one()
+        self.mailbox().put_outbox("ready", {"title": "T", "body": "B"})
+        self.rec.tick()
+        n = self.worker().pr_number
+        self.forge.add_feedback(
+            n, "look ![s](https://user-images.githubusercontent.com/1/2.png)",
+            kind="review_comment", reviewer="bob", path="src/x.py",
+        )
+        self.rec.tick()
+        fb = [m for m in self.mailbox().pending_inbox() if m.kind == "pr_feedback"]
+        self.assertEqual(len(fb), 1)
+        images = fb[0].payload.get("images")
+        self.assertTrue(images and images[0].endswith(".png"))
+
+    def test_gitlab_relative_upload_rewritten_and_authed(self):
+        from issuefleet import attachments
+
+        self.forge.host = "gl.test"
+        self.forge.api_root = "https://gl.test/api/v4"
+        self.forge.project_id = "g%2Fp"
+        self.forge._current_token = lambda: "gltok"
+
+        seen = {}
+
+        def fetch(url, headers):
+            seen["url"], seen["headers"] = url, headers
+            return "application/octet-stream", b"\x89PNGdata"
+
+        orig = attachments._default_fetch
+        attachments._default_fetch = fetch
+        self.addCleanup(setattr, attachments, "_default_fetch", orig)
+
+        self.claim_one()
+        self.tracker.human_comment("issue-1", "see ![p](/uploads/abc123/pic.png)")
+        self.rec.tick()
+        self.assertEqual(
+            seen["url"], "https://gl.test/api/v4/projects/g%2Fp/uploads/abc123/pic.png"
+        )
+        self.assertEqual(seen["headers"].get("PRIVATE-TOKEN"), "gltok")
+        replies = [m for m in self.mailbox().pending_inbox() if m.kind == "reply"]
+        self.assertTrue(replies[0].payload.get("images"))
+
+    def test_comment_without_image_has_no_images_key(self):
+        self._fake_images()
+        self.claim_one()
+        self.tracker.human_comment("issue-1", "plain text, no pictures here")
+        self.rec.tick()
+        replies = [m for m in self.mailbox().pending_inbox() if m.kind == "reply"]
+        self.assertEqual(len(replies), 1)
+        self.assertNotIn("images", replies[0].payload)
+
     def test_merge_tears_down_completely(self):
         self.claim_one()
         self.mailbox().put_outbox("ready", {"title": "T", "body": "B"})

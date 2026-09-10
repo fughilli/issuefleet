@@ -60,6 +60,18 @@ class TurnsTest(unittest.TestCase):
         self.assertIn("use approach B", d.prompt)
         self.assertIn("alice", d.prompt)
 
+    def test_reply_with_images_points_at_local_paths(self):
+        state = self.reload()
+        state.phase = turns.PHASE_WAITING
+        state.save(self.agent_dir)
+        self.mb.put_inbox(
+            "reply",
+            {"author": "alice", "text": "see this", "images": [".agent/attachments/ab.png"]},
+        )
+        d = self.decide()
+        self.assertIn(".agent/attachments/ab.png", d.prompt)
+        self.assertIn("Read tool", d.prompt)
+
     def test_asking_a_question_idles(self):
         self.decide_and_commit()  # first turn
         # During the turn the agent runs `agentctl ask`.

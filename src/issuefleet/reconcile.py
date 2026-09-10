@@ -18,6 +18,7 @@ import threading
 import time
 from pathlib import Path
 
+from issuefleet import attachments as attachments_mod
 from issuefleet import marker, MARKER_PREFIX
 from issuefleet import config as config_mod
 from issuefleet import gitops
@@ -973,7 +974,7 @@ class Reconciler:
 
         self._bind_agent_session(rec)
         self._drain_outbox(rec, project, mailbox)
-        self._ingest_comments(rec, mailbox)
+        self._ingest_comments(rec, mailbox, project)
         self._check_pr(rec, project, mailbox)
         self._check_upstream(rec, mailbox)
 
@@ -1507,7 +1508,76 @@ class Reconciler:
             )
         mailbox.archive_outbox(msg, receipt={"pr": pr.number, "url": pr.url})
 
-    def _ingest_comments(self, rec: WorkerRecord, mailbox: Mailbox) -> None:
+    def _image_auth(self, project: ProjectConfig):
+        """A ``url -> headers`` function: the Linear token for Linear uploads, the
+        project's forge token for GitHub/GitLab attachments, nothing otherwise."""
+        forge = self.forges.get(project.name)
+        client = getattr(self.tracker, "client", None)
+
+        def auth_for_url(url: str) -> dict:
+            from urllib.parse import urlsplit
+
+            try:
+                parts = urlsplit(url)
+            except ValueError:
+                return {}
+            host = (parts.hostname or "").lower()
+            path = parts.path or ""
+            if host == "uploads.linear.app":
+                hdr = getattr(client, "auth_header", None)
+                if callable(hdr):
+                    try:
+                        return {"Authorization": hdr()}
+                    except Exception:
+                        return {}
+                return {}
+            token = self._forge_token(forge)
+            if not token:
+                return {}
+            if host.endswith("githubusercontent.com") or host == "github.com":
+                return {"Authorization": f"Bearer {token}"}
+            if "/uploads/" in path:
+                return {"PRIVATE-TOKEN": token}
+            return {}
+
+        return auth_for_url
+
+    @staticmethod
+    def _forge_token(forge) -> str | None:
+        """The forge's token, or None when the forge doesn't expose one."""
+        fn = getattr(forge, "_current_token", None)
+        if not callable(fn):
+            return None
+        try:
+            return fn()
+        except Exception:
+            return None
+
+    def _image_resolve(self, project: ProjectConfig):
+        """GitLab's upload resolver for a GitLab project, else None."""
+        forge = self.forges.get(project.name)
+        host = getattr(forge, "host", None)
+        api_root = getattr(forge, "api_root", None)
+        project_id = getattr(forge, "project_id", None)
+        if host and api_root and project_id:
+            return attachments_mod.gitlab_resolver(host, api_root, project_id)
+        return None
+
+    def _ingest_images(self, text: str, rec: WorkerRecord, project: ProjectConfig) -> list[str]:
+        """Download images referenced in ``text``; any failure yields [] so ingestion
+        is never blocked."""
+        try:
+            return attachments_mod.download_images(
+                text, rec.worktree,
+                auth_for_url=self._image_auth(project),
+                resolve=self._image_resolve(project),
+            )
+        except Exception as e:
+            log.warning("worker %s: image ingest failed (%s); leaving links inline",
+                        rec.issue_key, e)
+            return []
+
+    def _ingest_comments(self, rec: WorkerRecord, mailbox: Mailbox, project: ProjectConfig) -> None:
         comments = self.tracker.comments_since(rec.issue_id, rec.comment_cursor)
         # The marker filters every post we author directly. Identity is only
         # a valid filter when we authenticate AS AN APP: then viewer-authored
@@ -1526,9 +1596,11 @@ class Reconciler:
                 advanced = True
             if MARKER_PREFIX in c.body or (app_viewer is not None and c.author_id == app_viewer):
                 continue
-            mailbox.ensure().put_inbox(
-                "reply", {"author": c.author_name, "text": c.body, "source": "linear"}
-            )
+            payload = {"author": c.author_name, "text": c.body, "source": "linear"}
+            images = self._ingest_images(c.body, rec, project)
+            if images:
+                payload["images"] = images
+            mailbox.ensure().put_inbox("reply", payload)
             last_user_comment = c.id
         if last_user_comment is not None:
             # 👀 once per ingest batch that carried real user input (not once
@@ -1632,16 +1704,17 @@ class Reconciler:
                 continue
             new_feedback.append(fb)
         for fb in new_feedback:
-            mailbox.ensure().put_inbox(
-                "pr_feedback",
-                {
-                    "reviewer": fb.reviewer,
-                    "kind": fb.kind,
-                    "path": fb.path,
-                    "text": fb.body,
-                    "url": fb.url,
-                },
-            )
+            payload = {
+                "reviewer": fb.reviewer,
+                "kind": fb.kind,
+                "path": fb.path,
+                "text": fb.body,
+                "url": fb.url,
+            }
+            images = self._ingest_images(fb.body, rec, project)
+            if images:
+                payload["images"] = images
+            mailbox.ensure().put_inbox("pr_feedback", payload)
             rec.seen_feedback_ids.append(fb.id)
             try:
                 forge.ack_feedback(rec.pr_number, fb.id)
@@ -2028,9 +2101,19 @@ class Reconciler:
         self.git.add_worktree_exclude(project.repo, worktree, "siblings/")
         for rel in worker_mod.inherit_repo_files(project.repo, worktree, self.cfg.copy_from_repo):
             self.git.add_worktree_exclude(project.repo, worktree, rel)
+        try:
+            description_images = attachments_mod.download_images(
+                issue.description, worktree,
+                auth_for_url=self._image_auth(project),
+                resolve=self._image_resolve(project),
+            )
+        except Exception as e:
+            log.warning("[%s] description image ingest failed (%s)", issue.key, e)
+            description_images = []
         session_uuid = worker_mod.provision(
             worktree, issue, branch, project.base_ref, self.cfg,
             siblings=self._siblings(project),
+            attachments=description_images,
         )
 
         rec = WorkerRecord(
