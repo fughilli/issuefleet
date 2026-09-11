@@ -10,16 +10,18 @@ not strand existing workers in an empty session store.
 ## Install both runtimes in the worker image
 
 The existing `claude-container` launcher still provides Docker isolation, mapped
-user IDs, project overlays and linked-worktree mounts. Its ordinary 1.7.0 image
-does **not** contain Codex. IssueFleet includes a base image with both CLIs:
+user IDs, project overlays and linked-worktree mounts. IssueFleet builds the
+matching base from pinned source, then adds Codex to provide both CLIs:
 
 ```sh
-docker build -f deploy/worker/Dockerfile -t issuefleet-worker:codex .
+docker buildx bake --file deploy/worker/docker-bake.hcl --load worker
 ```
 
-The Dockerfile pins `nezhar/claude-container:1.7.0` and `@openai/codex@0.154.0`.
-Use `--build-arg CODEX_VERSION=...` when deliberately upgrading the CLI, and
-retest first-turn execution, resume and takeover. The launcher must support
+The Bake file pins `fughilli/claude-container` at commit
+`4cf93d4a062563470f332902785c3b603d9b2c29`, whose launcher matches the verified
+1.7.0 installation. The Dockerfile pins `@openai/codex@0.154.0`.
+Use `--set worker.args.CODEX_VERSION=...` when deliberately upgrading the CLI,
+and retest first-turn execution, resume and takeover. The launcher must support
 `--mount` and `--skills-ignore-new` (verified with launcher 1.7.0).
 
 ```toml
