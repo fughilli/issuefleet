@@ -98,6 +98,16 @@ class ClaimRule:
 
 
 @dataclass
+class WorkerRuntimeConfig:
+    """Resolved settings for a new worker; persisted for its entire lifetime."""
+
+    runtime: str = "claude"
+    model: str | None = None
+    reasoning_effort: str | None = None
+    args: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ProjectConfig:
     name: str  # short handle, used in paths and logs
     linear_project: str  # Linear project name or UUID
@@ -119,6 +129,9 @@ class ProjectConfig:
     state_done: str = "Done"
     delete_remote_branch: bool = True
     max_workers: int | None = None  # per-project cap; None = only global cap
+    # Partial overrides of [agent]. A runtime switch starts with that runtime's
+    # defaults, so a Claude model or CLI flag cannot leak into a Codex worker.
+    agent: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -187,6 +200,11 @@ class FleetManagerConfig:
     # escalates to the human (deterministic, no LLM); 'claude' asks the model
     # whether ticket/board context answers it first.
     advisor: str = "conservative"
+    provider: str = "anthropic"
+    model: str | None = None
+    reasoning_effort: str | None = None
+    max_output_tokens: int | None = None
+    max_turns: int = 12
 
 
 # The default roadmap system prompt. The persona is the brief's; the formatting
@@ -312,6 +330,11 @@ class Config:
     max_auto_turns: int = 50
     max_restarts: int = 3
     claude_args: list[str] = field(default_factory=list)
+    agent_runtime: WorkerRuntimeConfig = field(default_factory=WorkerRuntimeConfig)
+    codex_home: Path = field(
+        default_factory=lambda: _path("${ISSUEFLEET_CODEX_HOME}")
+    )
+    container_image: str | None = None
     # Workspace-local state copied from the parent checkout into each fresh
     # worktree (copy-if-missing), e.g. .claude/settings.local.json, which is
     # untracked and would otherwise be absent there. Git-excluded in the
@@ -351,6 +374,10 @@ class Config:
     linear_api_key_file: Path = Path("~/.config/issuefleet/linear.key").expanduser()
     github_token_env: list[str] = field(default_factory=lambda: ["GITHUB_TOKEN", "GH_TOKEN"])
     github_token_file: Path = Path("~/.config/issuefleet/github.key").expanduser()
+    openai_api_key_env: str = "OPENAI_API_KEY"
+    openai_api_key_file: Path = field(
+        default_factory=lambda: Path("~/.config/issuefleet/openai.key").expanduser()
+    )
     # GitHub auth mode: "token" (PAT/machine user), "app" (GitHub App — PRs
     # open as <app>[bot]), or "auto" (app when app_id + key file exist).
     github_auth: str = "auto"
@@ -397,6 +424,27 @@ class Config:
                 return p
         raise ConfigError(f"no [[projects]] entry named {name!r}")
 
+    def runtime_for(self, project_name: str | None = None) -> WorkerRuntimeConfig:
+        overrides = self.project(project_name).agent if project_name else {}
+        base = self.agent_runtime
+        if overrides.get("runtime", base.runtime) != base.runtime:
+            base = WorkerRuntimeConfig(runtime=overrides["runtime"])
+        values = {
+            "runtime": base.runtime, "model": base.model,
+            "reasoning_effort": base.reasoning_effort, "args": list(base.args),
+            **overrides,
+        }
+        result = WorkerRuntimeConfig(**values)
+        result.args = list(result.args)
+        _validate_runtime(result, f"project {project_name!r}" if project_name else "[agent]")
+        if result.runtime == "claude" and self.claude_args:
+            _validate_runtime(
+                WorkerRuntimeConfig(result.runtime, result.model, result.reasoning_effort,
+                                    [*self.claude_args, *result.args]),
+                f"project {project_name!r} claude_args",
+            )
+        return result
+
     def added_projects_path(self) -> Path:
         """The drop-in file runtime-added projects are persisted to and reloaded
         from. Under state_dir by default (writable in every deployment), never
@@ -429,6 +477,7 @@ _PATH_VARS = {
     # never copied — a snapshot's OAuth token is revoked when the host
     # rotates its own.
     "ISSUEFLEET_CLAUDE_CONFIG": "~/.config/claude-container/config",
+    "ISSUEFLEET_CODEX_HOME": "~/.config/issuefleet/codex",
 }
 
 
@@ -473,6 +522,54 @@ def _parse_worker_env(table: object, source: str) -> dict[str, EnvSource]:
 
 
 _ADVISOR_KINDS = ("conservative", "claude")
+
+
+def _optional_string(value, where: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip() or any(c in value for c in "\n\r\x00"):
+        raise ConfigError(f"{where}: expected a non-empty single-line string")
+    return value
+
+
+def _string_args(value, where: str) -> list[str]:
+    if not isinstance(value, list) or any(
+        not isinstance(v, str) or "\x00" in v for v in value
+    ):
+        raise ConfigError(f"{where}: expected an array of strings")
+    return list(value)
+
+
+def _validate_runtime(runtime: WorkerRuntimeConfig, where: str) -> None:
+    if runtime.runtime not in ("claude", "codex"):
+        raise ConfigError(f"{where}: runtime must be claude or codex")
+    efforts = ("low", "medium", "high", "xhigh", "max")
+    if runtime.reasoning_effort is not None and runtime.reasoning_effort not in efforts:
+        raise ConfigError(f"{where}: reasoning_effort must be one of {efforts}")
+    from issuefleet.agent_runtime.runtimes import validate_runtime_args
+
+    try:
+        validate_runtime_args(runtime.runtime, runtime.args, runtime.model, runtime.reasoning_effort)
+    except ValueError as e:
+        raise ConfigError(f"{where}: {e}") from e
+
+
+def _runtime_overrides(table, where: str) -> dict:
+    if not isinstance(table, dict):
+        raise ConfigError(f"{where}: expected a table")
+    _reject_secrets(table, where)
+    unknown = set(table) - {"runtime", "model", "reasoning_effort", "args"}
+    if unknown:
+        raise ConfigError(f"{where}: unknown runtime setting(s): {', '.join(sorted(unknown))}")
+    result = {}
+    for key in ("runtime", "model", "reasoning_effort"):
+        if key in table:
+            result[key] = _optional_string(table[key], f"{where}.{key}")
+    if "args" in table:
+        result["args"] = _string_args(table["args"], f"{where}.args")
+    if "runtime" in result and result["runtime"] not in ("claude", "codex"):
+        raise ConfigError(f"{where}: runtime must be claude or codex")
+    return result
 _SECURITY_MODES = ("block", "warn", "off")
 _DEEP_SCAN_KINDS = ("off", "claude")
 
@@ -495,6 +592,9 @@ def _parse_security(table: dict, source: str) -> SecurityConfig:
 
 
 def _parse_fleet_manager(table: dict, source: str) -> FleetManagerConfig:
+    unknown = set(table) - set(FleetManagerConfig.__dataclass_fields__)
+    if unknown:
+        raise ConfigError(f"{source} [fleet_manager]: unknown setting(s): {', '.join(sorted(unknown))}")
     fm = FleetManagerConfig(
         enabled=bool(table.get("enabled", False)),
         base_url=str(table.get("base_url", "")),
@@ -504,7 +604,26 @@ def _parse_fleet_manager(table: dict, source: str) -> FleetManagerConfig:
         report_interval_s=int(table.get("report_interval_s", 3600)),
         assign_goals=bool(table.get("assign_goals", True)),
         advisor=str(table.get("advisor", "conservative")),
+        provider=table.get("provider", "anthropic"),
+        model=_optional_string(table.get("model"), f"{source} [fleet_manager].model"),
+        reasoning_effort=_optional_string(
+            table.get("reasoning_effort"), f"{source} [fleet_manager].reasoning_effort"
+        ),
+        max_output_tokens=table.get("max_output_tokens"),
+        max_turns=table.get("max_turns", 12),
     )
+    if fm.provider not in ("anthropic", "openai"):
+        raise ConfigError(f"{source} [fleet_manager]: provider must be anthropic or openai")
+    efforts = ("low", "medium", "high", "max") if fm.provider == "anthropic" else (
+        "low", "medium", "high", "xhigh", "max"
+    )
+    if fm.reasoning_effort is not None and fm.reasoning_effort not in efforts:
+        raise ConfigError(f"{source} [fleet_manager]: invalid reasoning_effort for {fm.provider}")
+    if fm.provider == "anthropic" and fm.reasoning_effort is not None:
+        raise ConfigError(f"{source} [fleet_manager]: reasoning_effort is supported by openai only")
+    for name, value in (("max_turns", fm.max_turns), ("max_output_tokens", fm.max_output_tokens)):
+        if value is not None and (type(value) is not int or value < 1):
+            raise ConfigError(f"{source} [fleet_manager]: {name} must be a positive integer")
     if "api_key_env" in table:
         fm.api_key_env = str(table["api_key_env"])
     if "api_key_file" in table:
@@ -671,6 +790,7 @@ def parse_project(p: dict, where: str) -> ProjectConfig:
         state_done=p.get("state_done") or "Done",
         delete_remote_branch=bool(p.get("delete_remote_branch", True)),
         max_workers=max_workers,
+        agent=_runtime_overrides(p.get("agent", {}), f"{where}.agent"),
     )
 
 
@@ -712,6 +832,15 @@ def project_to_toml(p: ProjectConfig) -> str:
     lines.append(f"delete_remote_branch = {str(p.delete_remote_branch).lower()}")
     if p.max_workers is not None:
         lines.append(f"max_workers = {p.max_workers}")
+    if p.agent:
+        fields = []
+        for key, value in p.agent.items():
+            rendered = (
+                "[" + ", ".join(_toml_str(v) for v in value) + "]"
+                if isinstance(value, list) else _toml_str(value)
+            )
+            fields.append(f"{key} = {rendered}")
+        lines.append("agent = { " + ", ".join(fields) + " }")
     return "\n".join(lines) + "\n"
 
 
@@ -785,8 +914,14 @@ def _merge_added_projects(cfg: Config) -> None:
                 "config.toml entry", path, p.name
             )
             continue
-        known.add(p.name)
         cfg.projects.append(p)
+        try:
+            cfg.runtime_for(p.name)
+        except ConfigError as e:
+            cfg.projects.pop()
+            log.warning("skipping invalid project in drop-in %s: %s", path, e)
+            continue
+        known.add(p.name)
 
 
 def parse(data: dict, source: str = "<config>") -> Config:
@@ -812,6 +947,18 @@ def parse(data: dict, source: str = "<config>") -> Config:
             raise ConfigError(f"{source}: [{name}] must be a table")
         _reject_secrets(table, f"{source} [{name}]")
 
+    agent_keys = {
+        "runtime", "model", "reasoning_effort", "args", "max_auto_turns", "max_restarts",
+        "claude_args", "copy_from_repo", "launcher_args", "mount_sibling_git",
+        "claude_container", "container_config_dir", "container_image", "codex_home", "env",
+        # Older deployed configs contain this ignored launcher setting. Keep
+        # accepting it without changing the launcher's platform behavior.
+        "docker_platform",
+    }
+    unknown_agent = set(agent) - agent_keys
+    if unknown_agent:
+        raise ConfigError(f"{source} [agent]: unknown setting(s): {', '.join(sorted(unknown_agent))}")
+
     raw_projects = data.get("projects", [])
     if not raw_projects:
         raise ConfigError(f"{source}: at least one [[projects]] entry is required")
@@ -830,7 +977,12 @@ def parse(data: dict, source: str = "<config>") -> Config:
         max_workers=int(daemon.get("max_workers", 4)),
         max_auto_turns=int(agent.get("max_auto_turns", 50)),
         max_restarts=int(agent.get("max_restarts", 3)),
-        claude_args=list(agent.get("claude_args", [])),
+        claude_args=_string_args(agent.get("claude_args", []), f"{source} [agent].claude_args"),
+        agent_runtime=WorkerRuntimeConfig(**_runtime_overrides(
+            {k: agent[k] for k in ("runtime", "model", "reasoning_effort", "args") if k in agent},
+            f"{source} [agent]",
+        )),
+        container_image=_optional_string(agent.get("container_image"), f"{source} [agent].container_image"),
         copy_from_repo=list(
             agent.get("copy_from_repo", [".claude", ".claude-container-overlay"])
         ),
@@ -846,6 +998,13 @@ def parse(data: dict, source: str = "<config>") -> Config:
         cfg.added_projects_file = _path(daemon["added_projects_file"])
     if "container_config_dir" in agent:
         cfg.container_config_dir = _path(agent["container_config_dir"])
+    if "codex_home" in agent:
+        cfg.codex_home = _path(_optional_string(agent["codex_home"], f"{source} [agent].codex_home"))
+    if not cfg.codex_home.is_absolute():
+        raise ConfigError(f"{source} [agent]: codex_home must be an absolute path")
+    cfg.runtime_for()
+    for project in projects:
+        cfg.runtime_for(project.name)
     cfg.worker_env = _parse_worker_env(agent.get("env", {}), source)
     if "linear_api_key_env" in creds:
         cfg.linear_api_key_env = creds["linear_api_key_env"]
@@ -856,6 +1015,10 @@ def parse(data: dict, source: str = "<config>") -> Config:
         cfg.github_token_env = [v] if isinstance(v, str) else list(v)
     if "github_token_file" in creds:
         cfg.github_token_file = _path(creds["github_token_file"])
+    if "openai_api_key_env" in creds:
+        cfg.openai_api_key_env = _optional_string(creds["openai_api_key_env"], "openai_api_key_env")
+    if "openai_api_key_file" in creds:
+        cfg.openai_api_key_file = _path(_optional_string(creds["openai_api_key_file"], "openai_api_key_file"))
     if "github_auth" in creds:
         if creds["github_auth"] not in ("auto", "token", "app"):
             raise ConfigError(f"{source}: github_auth must be auto, token, or app")

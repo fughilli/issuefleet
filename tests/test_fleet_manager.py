@@ -289,7 +289,7 @@ class FleetManagerTest(unittest.TestCase):
         self.assertIn("Splanc", seen["user_message"])
         self.assertIn("list_workers", [t.name for t in seen["tools"]])
 
-    def test_agent_failure_falls_back_to_scripted_dispatch(self):
+    def test_agent_failure_reports_error_without_scripted_mutation(self):
         from issuefleet.agent import AgentError
 
         def boom(**kw):
@@ -297,9 +297,8 @@ class FleetManagerTest(unittest.TestCase):
 
         fm = self._fm(agent_key="sk-test")
         self._ask_agent(fm, "goal: ship it faster", boom)
-        # The scripted path still recorded the goal rather than dropping it.
-        self.assertEqual(len(self.tracker.created), 1)
-        self.assertEqual(self.tracker.created[0]["title"], "ship it faster")
+        self.assertEqual(self.tracker.created, [])
+        self.assertIn("No actions were attempted", self.signal.sent[-1])
 
     def test_without_a_key_the_scripted_dispatch_runs(self):
         def never(**kw):
@@ -308,6 +307,45 @@ class FleetManagerTest(unittest.TestCase):
         fm = self._fm()  # no agent_key
         self._ask_agent(fm, "goal: ship it faster", never)
         self.assertEqual(len(self.tracker.created), 1)
+
+    def test_configured_manager_backend_is_passed_to_tool_loop(self):
+        self.cfg.fleet_manager.provider = "openai"
+        self.cfg.fleet_manager.model = "gpt-6-astra"
+        self.cfg.fleet_manager.reasoning_effort = "high"
+        self.cfg.fleet_manager.max_output_tokens = 20000
+        seen = {}
+
+        def run(**kwargs):
+            seen.update(kwargs)
+            return "No workers need attention."
+
+        self._ask_agent(self._fm(agent_key="test"), "Fleet status?", run)
+        self.assertEqual(seen["provider"], "openai")
+        self.assertEqual(seen["model"], "gpt-6-astra")
+        self.assertEqual(seen["reasoning_effort"], "high")
+        self.assertEqual(seen["max_tokens"], 20000)
+
+    def test_agent_error_after_tool_attempt_does_not_replay_as_new_goal(self):
+        from issuefleet.agent import AgentError
+
+        def fail(**kwargs):
+            raise AgentError("response lost after tool ran", tools_executed=True)
+
+        self._ask_agent(self._fm(agent_key="test"), "Build a dashboard", fail)
+        self.assertEqual(self.tracker.created, [])
+        self.assertIn("not replayed", self.signal.sent[-1])
+
+    def test_openai_error_before_tools_does_not_turn_question_into_goal(self):
+        from issuefleet.agent import AgentError
+
+        self.cfg.fleet_manager.provider = "openai"
+
+        def fail(**kwargs):
+            raise AgentError("response incomplete: output budget exhausted")
+
+        self._ask_agent(self._fm(agent_key="test"), "Which workers are active?", fail)
+        self.assertEqual(self.tracker.created, [])
+        self.assertIn("No actions were attempted", self.signal.sent[-1])
 
     def test_file_goal_tool_files_and_reports_the_key(self):
         fm = self._fm(agent_key="sk-test")

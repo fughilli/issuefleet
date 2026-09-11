@@ -95,7 +95,7 @@ class FleetManager:
         self.signal = signal
         self.advisor = advisor
         self.registry = registry
-        # An Anthropic key turns the inbound path agentic (see _handle_inbound).
+        # A provider key turns the inbound path agentic (see _handle_inbound).
         # Absent, the deterministic dispatch below is the whole behaviour.
         self.agent_key = agent_key
         self._clock = clock
@@ -220,7 +220,7 @@ class FleetManager:
     def _handle_inbound(self, m, text: str) -> None:
         """Route one inbound Signal message.
 
-        The manager is an agent: with an Anthropic key it hands the message to a
+        The manager is an agent: with its provider key it hands the message to a
         tool loop that can inspect the fleet and act, then replies in plain
         English. _handle_scripted below is the fallback for a daemon with no key
         — a dispatch table that can only file goals and relay replies, which is
@@ -235,7 +235,17 @@ class FleetManager:
                 self.signal.react(m.id, _DONE)
                 return
             except AgentError as e:
-                log.warning("fleet manager: agent failed (%s); using scripted dispatch", e)
+                # A failed model request is not permission to interpret the
+                # input as a new goal or a reply to some other pending worker.
+                # A tool may also already have changed the board.
+                log.warning("fleet manager: agent failed; request not replayed (%s)", e)
+                self.signal.send(
+                    "The manager encountered an error. "
+                    + ("Some actions may have completed; check the board before retrying. "
+                       if e.tools_executed else "No actions were attempted. ")
+                    + "I have not replayed your request."
+                )
+                return
         self._handle_scripted(m, text)
         # Only on the success path: a raised handler leaves 👀 standing, which
         # reads correctly as "seen, but stuck".
@@ -279,6 +289,11 @@ class FleetManager:
                 f"Message from {m.author or 'the operator'} in the Signal group:\n\n{text}"
             ),
             tools=self._agent_tools(m),
+            provider=self.fm.provider,
+            model=self.fm.model,
+            reasoning_effort=self.fm.reasoning_effort,
+            max_tokens=self.fm.max_output_tokens,
+            max_turns=self.fm.max_turns,
         )
         if reply:
             self.signal.send(reply)

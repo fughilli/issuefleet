@@ -407,7 +407,7 @@ class Reconciler:
         local session), but the registry entry is KEPT in ``released`` phase, so
         the issue stays claimed — the daemon won't re-claim it or restart it —
         and the branch survives. The agent's session UUID and turn count are
-        remembered so ``adopt`` can resume the same Claude conversation."""
+        remembered so ``adopt`` can resume the same conversation."""
         project = self.cfg.project(rec.project)
         mailbox = Mailbox(Path(rec.worktree) / ".agent" / "mailbox")
         log.info("dashboard: releasing %s (branch %s) to the operator", rec.issue_key, rec.branch)
@@ -430,6 +430,19 @@ class Reconciler:
                  "I'll resume here if it's adopted back."},
             )
 
+        # Stop before snapshotting: a last thread.started event or agentctl write
+        # must be included in the state we will resume after adoption.
+        self.runner.stop(rec)
+        try:
+            from issuefleet.agent_runtime.turns import TurnState
+
+            state = TurnState.load(Path(rec.worktree) / ".agent")
+            rec.released_turns = state.turns_taken
+            for name in ("runtime", "model", "reasoning_effort", "runtime_args", "runtime_session_id", "runtime_home"):
+                setattr(rec, name, getattr(state, name))
+        except FileNotFoundError:
+            pass
+
         # Archive the transcript before the worktree goes — it must outlive the
         # branch, same as a wind-down.
         agent_dir = Path(rec.worktree) / ".agent"
@@ -439,11 +452,11 @@ class Reconciler:
             shutil.copytree(
                 agent_dir, dest, ignore=shutil.ignore_patterns("bin", "tmp"), dirs_exist_ok=True
             )
+            # copytree merges historical logs. A completed input journal must
+            # not survive from a previous release and be replayed on adoption.
+            if not (agent_dir / "pending-codex-turn.json").exists():
+                (dest / "pending-codex-turn.json").unlink(missing_ok=True)
 
-        try:
-            self.runner.stop(rec)
-        except Exception:
-            log.exception("worker %s: stopping the session for release failed", rec.issue_key)
         self._remove_upstream_worktrees(rec)  # before the dir they live in goes
         try:
             self.git.remove_worktree(Path(rec.repo), Path(rec.worktree), rec.branch)
@@ -487,7 +500,7 @@ class Reconciler:
     def _adopt_released(self, rec: WorkerRecord) -> None:
         """Re-take a released worker: rebuild its worktree from the (kept)
         branch, reconcile it with origin, re-provision preserving the session so
-        its Claude conversation resumes, and restart the container.
+        its conversation resumes, and restart the container.
 
         The fetch refreshes both ``origin/<branch>`` and ``origin/<base_ref>``,
         so whatever the operator did while holding the branch is picked up:
@@ -528,17 +541,43 @@ class Reconciler:
         self.git.add_worktree_exclude(project.repo, worktree, "siblings/")
         for rel in worker_mod.inherit_repo_files(project.repo, worktree, self.cfg.copy_from_repo):
             self.git.add_worktree_exclude(project.repo, worktree, rel)
-        # Resume the same Claude session: turns_taken > 0 makes the loop use
-        # `--resume`. Come back as `running` so it takes a re-orientation turn.
-        from issuefleet.agent_runtime.turns import PHASE_RUNNING
+        # Restore the entire conversation snapshot, independent of current
+        # runtime defaults. Started sessions take a re-orientation turn.
+        from issuefleet.agent_runtime.turns import PHASE_FRESH, PHASE_RUNNING, TurnState
+
+        archive = self.registry.archive_dir_for(rec)
+        if (archive / "state.json").is_file():
+            previous_state = TurnState.load(archive)
+        else:
+            previous_state = TurnState(
+                session_uuid=rec.session_uuid,
+                turns_taken=rec.released_turns,
+                runtime=rec.runtime,
+                model=rec.model,
+                reasoning_effort=rec.reasoning_effort,
+                runtime_args=list(rec.runtime_args),
+                runtime_session_id=rec.runtime_session_id,
+                runtime_home=rec.runtime_home,
+            )
+        previous_state.working_acked = False
+        previous_state.auto_turns = 0
+        previous_state.budget_reported = False
+        resume_phase = PHASE_RUNNING
+        if previous_state.turns_taken == 0 and not previous_state.runtime_session_id:
+            resume_phase = PHASE_FRESH
 
         worker_mod.provision(
             worktree, issue, rec.branch, rec.base_ref, self.cfg,
             session_uuid=rec.session_uuid,
             turns_taken=max(1, rec.released_turns),
-            phase=PHASE_RUNNING,
+            phase=resume_phase,
             siblings=self._siblings(project),
+            project_name=project.name,
+            previous_state=previous_state,
         )
+        pending = archive / "pending-codex-turn.json"
+        if pending.is_file():
+            shutil.copy2(pending, worktree / ".agent" / pending.name)
 
         rec.phase = PHASE_ACTIVE
         rec.released_at = None
@@ -934,6 +973,10 @@ class Reconciler:
             return  # kept only so the issue isn't re-claimed; operator's move
 
         if not self.runner.alive(rec):
+            # A lost tmux client may leave its container writing the checkout.
+            # Confirm termination before syncing, restarting, or declaring the
+            # worker crashed and its worktree safe for inspection.
+            self.runner.stop(rec)
             if rec.restarts >= self.cfg.max_restarts:
                 rec.phase = PHASE_CRASHED
                 rec.touch()
@@ -954,10 +997,13 @@ class Reconciler:
                 return
             log.warning("worker %s: session dead, restarting (%d so far)", rec.issue_key, rec.restarts)
             self._sync_branch(rec, project, mailbox)
-            self.runner.start(rec, self.cfg)
             rec.restarts += 1
             rec.touch()
             self.registry.save()
+            # A launch can fail before a process exists (missing pinned auth
+            # home, invalid launcher, etc.). Those attempts must exhaust the
+            # same durable restart budget as processes that start then crash.
+            self.runner.start(rec, self.cfg)
             # Write the "you were restarted" note only once the session is
             # actually live. A worker that can never start (the macOS script(1)
             # bug, e.g.) otherwise accrues one identical unread note per tick,
@@ -1967,7 +2013,12 @@ class Reconciler:
                  "body": f"Worker wound down: {reason}."},
             )
 
-        # 2. Archive mailbox + transcripts somewhere durable, outside the
+        # 2. Confirm the container has stopped before reading its final state
+        # or deleting anything it can still write. A failed stop keeps the
+        # claim and worktree intact so a later tick can safely retry.
+        self.runner.stop(rec)
+
+        # 3. Archive mailbox + transcripts somewhere durable, outside the
         # worktree — the transcript must outlive the branch.
         agent_dir = Path(rec.worktree) / ".agent"
         if agent_dir.is_dir():
@@ -1977,13 +2028,8 @@ class Reconciler:
                 agent_dir, dest, ignore=shutil.ignore_patterns("bin", "tmp"), dirs_exist_ok=True
             )
 
-        # 3. Stop the container/session, remove the worktree, prune. Each is
-        # best-effort: the registry entry MUST be dropped (step 5) so a
-        # failure here can't leave a worker no `stop` can ever clear.
-        try:
-            self.runner.stop(rec)
-        except Exception:
-            log.exception("worker %s: stopping the session failed", rec.issue_key)
+        # Remove the stopped worker's worktree and prune. A git cleanup failure
+        # does not leave a live writer, so bookkeeping can still complete.
         self._remove_upstream_worktrees(rec)  # before the dir they live in goes
         try:
             self.git.remove_worktree(Path(rec.repo), Path(rec.worktree), rec.branch)
@@ -2114,6 +2160,7 @@ class Reconciler:
             worktree, issue, branch, project.base_ref, self.cfg,
             siblings=self._siblings(project),
             attachments=description_images,
+            project_name=project.name,
         )
 
         rec = WorkerRecord(
@@ -2131,6 +2178,11 @@ class Reconciler:
             claim_origin=origin or ("session" if session else "poll"),
             agent_session_id=getattr(session, "session_id", None),
         )
+        from issuefleet.agent_runtime.turns import TurnState
+
+        state = TurnState.load(worktree / ".agent")
+        for name in ("runtime", "model", "reasoning_effort", "runtime_args", "runtime_session_id", "runtime_home"):
+            setattr(rec, name, getattr(state, name))
         # Register before the runner/tracker side effects: if we crash here,
         # the next tick's liveness check starts the session; if we crashed
         # before this line, the next tick re-runs the (idempotent) setup.

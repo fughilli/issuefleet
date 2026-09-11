@@ -656,6 +656,11 @@ class ReconcileTest(unittest.TestCase):
     def test_adopt_rebuilds_worktree_and_resumes_same_session(self):
         w = self.claim_one()
         session_uuid = w.session_uuid
+        from issuefleet.agent_runtime.turns import TurnState
+
+        prior = TurnState.load(Path(w.worktree) / ".agent")
+        prior.turns_taken = 3
+        prior.save(Path(w.worktree) / ".agent")
         self.rec.enqueue_release("FUG-1")
         self.rec._drain_release_requests()
         self.runner.started.clear()
@@ -676,7 +681,7 @@ class ReconcileTest(unittest.TestCase):
             (Path(rec.worktree) / ".agent" / "state.json").read_text()
         )
         self.assertEqual(state["session_uuid"], session_uuid)
-        self.assertGreater(state["turns_taken"], 0)
+        self.assertEqual(state["turns_taken"], 3)
         # A re-orientation note is left for the resumed agent.
         info = [m for m in self.mailbox().pending_inbox() if m.kind == "info"]
         self.assertTrue(any("adopted back" in m.payload.get("text", "").lower() for m in info))
@@ -698,6 +703,33 @@ class ReconcileTest(unittest.TestCase):
         )
         self.assertIn("reflog", info)
         self.assertIn("rebased", info.lower())
+
+    def test_adopt_never_started_codex_still_receives_original_brief(self):
+        from issuefleet.agent_runtime.turns import TurnState, decide
+
+        self.cfg.projects[0].agent = {"runtime": "codex", "model": "gpt-6-astra"}
+        w = self.claim_one()
+        self.rec._release(w)
+        self.rec._adopt_released(w)
+        agent_dir = Path(w.worktree) / ".agent"
+        state = TurnState.load(agent_dir)
+        decision = decide(agent_dir, self.mailbox(), state)
+        self.assertEqual(state.turns_taken, 0)
+        self.assertIsNone(state.runtime_session_id)
+        self.assertIn(w.issue_title, decision.prompt)
+
+    def test_completed_codex_journal_is_not_resurrected_by_second_release(self):
+        self.cfg.projects[0].agent = {"runtime": "codex"}
+        w = self.claim_one()
+        journal = Path(w.worktree) / ".agent" / "pending-codex-turn.json"
+        journal.write_text('{"prompt": "old input", "message_ids": []}')
+        self.rec._release(w)
+        self.rec._adopt_released(w)
+        self.assertTrue(journal.is_file())
+        journal.unlink()  # successful resumed turn clears its input journal
+        self.rec._release(w)
+        self.rec._adopt_released(w)
+        self.assertFalse(journal.exists())
 
     def test_adopt_of_released_worker_whose_issue_closed_drops_it(self):
         self._release()
@@ -907,6 +939,48 @@ class ReconcileTest(unittest.TestCase):
 
     # -- crash handling ----------------------------------------------------
 
+    def test_restart_stops_orphan_before_branch_sync_and_launch(self):
+        from unittest.mock import patch
+
+        w = self.claim_one()
+        self.runner.dead.add(w.tmux_session)
+        events = []
+        stop, sync, start = self.runner.stop, self.rec._sync_branch, self.runner.start
+        def stopping(*args):
+            events.append("stop")
+            return stop(*args)
+        def syncing(*args):
+            events.append("sync")
+            return sync(*args)
+        def starting(*args):
+            events.append("start")
+            return start(*args)
+        with patch.object(self.runner, "stop", side_effect=stopping), \
+             patch.object(self.rec, "_sync_branch", side_effect=syncing), \
+             patch.object(self.runner, "start", side_effect=starting):
+            self.rec._service(w)
+        self.assertEqual(events, ["stop", "sync", "start"])
+
+    def test_unknown_orphan_state_blocks_restart_and_crash_declaration(self):
+        from unittest.mock import patch
+        from issuefleet.runner import RunnerError
+
+        w = self.claim_one()
+        self.runner.dead.add(w.tmux_session)
+        for restarts in (0, self.cfg.max_restarts):
+            with self.subTest(restarts=restarts):
+                w.restarts = restarts
+                with patch.object(self.runner, "stop", side_effect=RunnerError("Docker unavailable")), \
+                     patch.object(self.rec, "_sync_branch") as sync, \
+                     patch.object(self.runner, "start") as start:
+                    with self.assertRaisesRegex(RunnerError, "Docker unavailable"):
+                        self.rec._service(w)
+                sync.assert_not_called()
+                start.assert_not_called()
+                self.assertEqual(w.phase, PHASE_ACTIVE)
+                self.assertEqual(w.restarts, restarts)
+                self.assertTrue(Path(w.worktree).is_dir())
+
     def test_dead_session_restarted_bounded_then_reported(self):
         self.claim_one()
         w = self.worker()
@@ -929,6 +1003,32 @@ class ReconcileTest(unittest.TestCase):
         self.tracker.add_issue(make_issue(3))
         self.rec.tick()
         self.assertEqual(len(self.registry.all()), 3)
+
+    def test_launch_exceptions_exhaust_durable_restart_budget(self):
+        from unittest.mock import patch
+        from issuefleet.runner import RunnerError
+
+        w = self.claim_one()
+        self.runner.dead.add(w.tmux_session)
+        with patch.object(self.runner, "start", side_effect=RunnerError("Codex home is missing")):
+            for expected in range(1, self.cfg.max_restarts + 1):
+                self.rec.tick()
+                self.assertEqual(self.worker().restarts, expected)
+                self.assertEqual(Registry(self.cfg.state_dir).get(w.issue_id).restarts, expected)
+            self.rec.tick()
+        self.assertEqual(self.worker().phase, PHASE_CRASHED)
+
+    def test_unconfirmed_stop_never_deletes_worktree_or_drops_claim(self):
+        from unittest.mock import patch
+        from issuefleet.runner import RunnerError
+
+        w = self.claim_one()
+        with patch.object(self.runner, "stop", side_effect=RunnerError("Docker unavailable")):
+            with self.assertRaises(RunnerError):
+                self.rec._wind_down(w, self.cfg.projects[0], self.mailbox(), "operator stop", False)
+        self.assertIsNotNone(self.worker())
+        self.assertTrue(Path(w.worktree).is_dir())
+        self.assertEqual(self.git.removed, [])
 
     def test_restart_fast_forwards_the_branch_before_the_agent_resumes(self):
         # A worker stopped while someone pushed to its branch must not resume

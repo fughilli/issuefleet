@@ -8,6 +8,61 @@ its PR, merge; the worker is torn down and the next issue in the queue gets
 its slot. Works for any (Linear project → GitHub/GitLab repo) pair, several at
 once (a fleet can mix both forges), configured declaratively.
 
+## Choose the manager model and worker runtimes
+
+The fleet manager and coding workers are configured independently. The manager
+supports Anthropic or OpenAI's Responses API; workers run Claude Code or Codex
+inside their existing isolated containers. Existing configurations keep Claude.
+
+For an Astra manager with Claude workers by default and Codex on one project:
+
+```toml
+[fleet_manager]
+enabled = true
+provider = "openai"
+model = "gpt-6-astra"
+reasoning_effort = "high"
+# Keep your existing base_url, board_project, and board_team settings here.
+
+[credentials]
+openai_api_key_env = "OPENAI_API_KEY"
+openai_api_key_file = "~/.config/issuefleet/openai.key"
+
+[agent]
+runtime = "claude"
+container_image = "issuefleet-worker:codex"
+
+[[projects]]
+name = "backend"
+linear_project = "Backend"
+repo = "~/repos/backend"
+claim = { strategy = "label", value = "agent" }
+
+[projects.agent]
+runtime = "codex"
+model = "gpt-6-astra"
+reasoning_effort = "high"
+```
+
+The manager key comes from the named environment variable, then the file; keep
+the file mode `600`. A Codex ChatGPT login is a separate credential and does not
+authenticate the manager API. An explicitly selected OpenAI manager requires its
+key at startup. `provider = "anthropic"` retains the existing Anthropic key lookup;
+omit `reasoning_effort` for that provider. Manager `max_turns` defaults to 12;
+`max_output_tokens` defaults to 32768 for OpenAI and 4096 for Anthropic.
+
+Worker `runtime`, `model`, `reasoning_effort`, and `args` are global defaults in
+`[agent]`, with overrides in `[projects.agent]`. Switching runtime resets the
+inherited model, effort, and arguments. A worker snapshots its selection and
+Codex home at creation, retaining them across restarts and release/adopt; changes
+apply to new workers. Legacy `claude_args` applies only to Claude workers.
+
+Build the image containing both CLIs and authenticate the dedicated worker home
+using [the Codex runtime setup](docs/CODEX_RUNTIME.md), then restart the daemon.
+The Docker deployment mounts `${ISSUEFLEET_CODEX_HOME}` at the same absolute path
+in the daemon and workers. The manager's `advisor`, roadmap model, and security
+scanner retain their own independent settings.
+
 The forge is picked per project behind a narrow `Forge` port
 (`src/issuefleet/ports.py`): GitHub is the default, and GitLab slots in as a
 parallel implementation (`gitlab.py`) — merge requests stand in for pull
@@ -380,10 +435,12 @@ Setup:
 2. Create the top-level board as a Linear project and set `board_project` /
    `board_team`. To have recorded goals *worked* by the fleet, also list that
    project under `[[projects]]` with `claim.strategy = "agent"`.
-3. Set `[fleet_manager] enabled = true`. Provide an `ANTHROPIC_API_KEY` (or
-   `~/.config/issuefleet/anthropic.key`) to get the agentic manager above — the
-   same key also enables `advisor = "claude"` for worker-question triage. Both
-   fall back to their conservative, non-LLM behaviour without it.
+3. Set `[fleet_manager] enabled = true` and choose its `provider` and `model`.
+   For OpenAI, provide `OPENAI_API_KEY` or `~/.config/issuefleet/openai.key`;
+   the manager requires this key at startup. The default Anthropic provider
+   uses `ANTHROPIC_API_KEY` or `~/.config/issuefleet/anthropic.key`, also used
+   independently by `advisor = "claude"` for worker-question triage. Without
+   an Anthropic key, those components retain their conservative, non-LLM mode.
 4. `issuefleet doctor` verifies the key, the client, and the advisor; once the
    daemon is up, `issuefleet fleet` shows the Signal cursor and any pending
    escalations.

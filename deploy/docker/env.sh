@@ -10,6 +10,9 @@ export ISSUEFLEET_CONFIG="${ISSUEFLEET_CONFIG:-$HOME/.config/issuefleet}"
 # revoked the moment the host rotates its token. This is the launcher's
 # documented shared-config model.
 export ISSUEFLEET_CLAUDE_CONFIG="${ISSUEFLEET_CLAUDE_CONFIG:-$HOME/.config/claude-container/config}"
+# Dedicated writable Codex credentials + sessions, mounted at the same path
+# in the daemon and its workers. Keep separate from the read-only manager keys.
+export ISSUEFLEET_CODEX_HOME="${ISSUEFLEET_CODEX_HOME:-$HOME/.config/issuefleet/codex}"
 # The daemon container runs as YOUR uid (root would break every worker:
 # claude refuses bypassPermissions as root). Docker-socket access is
 # handled in-container by entrypoint.sh, which stats the REAL mounted
@@ -26,6 +29,7 @@ export ISSUEFLEET_PROJECTS="${ISSUEFLEET_PROJECTS:-$HOME/Projects}"
 # docker from creating root-owned dirs at mount time on Linux.)
 mkdir -p "$ISSUEFLEET_ROOT"/{worktrees,repos,state,bin}
 mkdir -p "$ISSUEFLEET_PROJECTS"
+mkdir -p "$ISSUEFLEET_CODEX_HOME"
 
 # Called by up/doctor (not down): seed what can be seeded safely and name
 # what the operator still has to provide. The launcher is a plain script,

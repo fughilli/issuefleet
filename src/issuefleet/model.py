@@ -171,6 +171,14 @@ class WorkerRecord:
     base_ref: str
     session_uuid: str  # Claude Code session id, pinned at creation
     tmux_session: str
+    # Snapshotted from agent state before release. Old records remain Claude;
+    # changing config never switches an existing conversation to a new runtime.
+    runtime: str = "claude"
+    model: str | None = None
+    reasoning_effort: str | None = None
+    runtime_args: list[str] = field(default_factory=list)
+    runtime_session_id: str | None = None
+    runtime_home: str | None = None
     phase: str = PHASE_ACTIVE
     claim_origin: str = "poll"  # "poll" (label/assignee/state rule) | "session" | "adopt"
     # Set while phase == released: when the branch was handed to the operator,

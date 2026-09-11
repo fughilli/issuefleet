@@ -114,6 +114,19 @@ class SnapshotTest(unittest.TestCase):
         wt = provision_worktree(self.root / "wt", turns={2: ["x"], 1: ["y"], 10: ["z"]})
         self.assertEqual(turn_files(wt / ".agent"), [1, 2, 10])
 
+    def test_retry_logs_are_visible_without_duplicate_turn_links(self):
+        wt = provision_worktree(self.root / "wt", turns={1: [INIT_LINE]})
+        retry = wt / ".agent" / "logs" / "turn-0001-retry-01.jsonl"
+        retry.write_text(ASSISTANT_LINE + "\n" + RESULT_LINE)
+        state_dir = self.root / "state"
+        Registry(state_dir).add(make_record(wt))
+        view = FleetView(state_dir)
+        self.assertEqual(view.turns("FUG-1"), [1])
+        events = view.transcript("FUG-1", 1)
+        self.assertEqual(events[-1]["kind"], "result")
+        self.assertTrue(any(e["kind"] == "text" for e in events))
+        self.assertIn(ASSISTANT_LINE, view.raw_turn("FUG-1", 1))
+
 
 class DiagnoseTest(unittest.TestCase):
     """The 'why it isn't running' explanation is pure over a snapshot dict, so

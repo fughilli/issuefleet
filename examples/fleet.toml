@@ -13,6 +13,9 @@ linear_api_key_env = "LINEAR_API_KEY"
 linear_api_key_file = "~/.config/issuefleet/linear.key"
 github_token_env = ["GITHUB_TOKEN", "GH_TOKEN"]
 github_token_file = "~/.config/issuefleet/github.key"
+# OpenAI manager API credential (independent of the worker's Codex login).
+openai_api_key_env = "OPENAI_API_KEY"
+openai_api_key_file = "~/.config/issuefleet/openai.key"
 # GitHub App identity (preferred): PRs open as <app>[bot], short-lived
 # tokens, one app-level webhook. auto switches to app when id + key exist.
 github_auth = "auto"
@@ -133,6 +136,12 @@ bot_token_file = "~/.config/issuefleet/discord.token"
 #                            # always posts under its own account name.
 
 [agent]
+runtime = "claude"  # claude | codex; override per project using [projects.agent]
+# model = "gpt-6-astra"       # use with runtime = "codex"
+# reasoning_effort = "high"
+# args = []                   # extra runtime options; session/output flags are managed
+# container_image = "issuefleet-worker:codex"  # build deploy/worker/Dockerfile first
+# codex_home = "${ISSUEFLEET_CODEX_HOME}"       # dedicated writable login + sessions
 max_auto_turns = 50
 max_restarts = 3
 claude_args = []

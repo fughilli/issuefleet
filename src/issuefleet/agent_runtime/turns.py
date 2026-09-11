@@ -13,8 +13,11 @@ consumer of decisions and their exit codes:
 
 from __future__ import annotations
 
+import copy
+import fcntl
 import json
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -25,7 +28,7 @@ EXIT_IDLE = 10
 EXIT_READY = 20
 EXIT_SHUTDOWN = 30
 EXIT_BUDGET = 40
-EXIT_ERROR = 50  # claude invocation failed; outer loop retries bounded
+EXIT_ERROR = 50  # runtime invocation failed; outer loop retries bounded
 
 # Agent-side phases (distinct from the registry's host-side phase).
 PHASE_FRESH = "fresh"  # no first turn yet
@@ -57,19 +60,64 @@ class TurnState:
     budget_reported: bool = False
     idle_poll_s: int = 15
     claude_args: list[str] = field(default_factory=list)
+    # Missing fields in old state files retain Claude's original behavior.
+    # session_uuid remains the fleet/Claude identity; Codex assigns its own
+    # conversation ID and that must never be inferred from the fleet UUID.
+    runtime: str = "claude"
+    model: str | None = None
+    reasoning_effort: str | None = None
+    runtime_args: list[str] = field(default_factory=list)
+    runtime_session_id: str | None = None
+    runtime_home: str | None = None
+    _snapshot: dict | None = field(default=None, init=False, repr=False, compare=False)
+    _source_path: Path | None = field(default=None, init=False, repr=False, compare=False)
 
     @classmethod
     def load(cls, agent_dir: Path) -> "TurnState":
         p = Path(agent_dir) / "state.json"
         data = json.loads(p.read_text())
-        known = {f for f in cls.__dataclass_fields__}
-        return cls(**{k: v for k, v in data.items() if k in known})
+        known = {name for name, spec in cls.__dataclass_fields__.items() if spec.init}
+        state = cls(**{k: v for k, v in data.items() if k in known})
+        state._snapshot = copy.deepcopy(state._values())
+        state._source_path = p.resolve()
+        return state
+
+    def _values(self) -> dict:
+        return {name: getattr(self, name) for name, spec in self.__dataclass_fields__.items()
+                if spec.init}
 
     def save(self, agent_dir: Path) -> None:
         p = Path(agent_dir) / "state.json"
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(self.__dict__, indent=2))
-        os.rename(tmp, p)
+        # agentctl and the JSONL reader can save concurrently. Merge only
+        # fields this loaded instance changed, under a process lock, so a
+        # phase update cannot erase the newly captured runtime session ID.
+        # The unique temporary file also prevents concurrent rename races.
+        with (Path(agent_dir) / "state.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            values = self._values()
+            if self._snapshot is None or self._source_path != p.resolve() or not p.exists():
+                merged = values
+            else:
+                merged = json.loads(p.read_text())
+                merged.update({key: value for key, value in values.items()
+                               if value != self._snapshot[key]})
+            tmp_name = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", dir=p.parent,
+                                                 prefix=".state-", delete=False) as tmp:
+                    tmp_name = tmp.name
+                    tmp.write(json.dumps(merged, indent=2))
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+                os.replace(tmp_name, p)
+            finally:
+                if tmp_name and os.path.exists(tmp_name):
+                    os.unlink(tmp_name)
+            for key in values:
+                if key in merged:
+                    setattr(self, key, merged[key])
+            self._snapshot = copy.deepcopy(self._values())
+            self._source_path = p.resolve()
 
 
 @dataclass
@@ -139,7 +187,8 @@ def decide(agent_dir: Path, mailbox: Mailbox, state: TurnState) -> Decision:
     return Decision(
         action="run",
         exit_code=EXIT_CONTINUE,
-        prompt=_CONTINUE_PROMPT,
+        prompt=(_CONTINUE_PROMPT + "\n\n" + format_inbound(context)
+                if context else _CONTINUE_PROMPT),
         consume=context,
     )
 

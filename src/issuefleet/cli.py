@@ -116,10 +116,17 @@ def build_fleet_manager(cfg: Config, reconciler: Reconciler):
     signal = SigbotClient(fm.base_url, api_key)
     anthropic_key = creds.resolve_anthropic_key(cfg)
     advisor = build_advisor(fm.advisor, anthropic_key)
-    # The same key makes the inbound Signal path agentic; without it the manager
-    # falls back to its deterministic dispatch (see FleetManager._handle_inbound).
+    manager_key = creds.resolve_manager_key(cfg)
+    if fm.provider == "openai" and not manager_key:
+        raise creds.CredentialError(
+            f"OpenAI fleet manager needs ${cfg.openai_api_key_env} or "
+            f"{cfg.openai_api_key_file} (chmod 600)"
+        )
+    # Manager and advisor credentials are independent. Legacy Anthropic setups
+    # without a key retain their deterministic dispatch.
     return FleetManager(
-        cfg, reconciler.tracker, signal, advisor, reconciler.registry, agent_key=anthropic_key
+        cfg, reconciler.tracker, signal, advisor, reconciler.registry,
+        agent_key=manager_key
     )
 
 

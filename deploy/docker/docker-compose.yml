@@ -77,6 +77,7 @@ services:
       # Lets config.toml use ${ISSUEFLEET_ROOT}/... paths portably.
       - ISSUEFLEET_ROOT=${ISSUEFLEET_ROOT}
       - ISSUEFLEET_CLAUDE_CONFIG=${ISSUEFLEET_CLAUDE_CONFIG}
+      - ISSUEFLEET_CODEX_HOME=${ISSUEFLEET_CODEX_HOME}
       # Same, for a `repo` that points at a checkout the daemon doesn't own.
       # Must be passed: the daemon's fallback is ~/Projects, and ~ is /root
       # in here — which would miss the same-path mount below.
@@ -98,6 +99,7 @@ services:
       # (same-path, read-WRITE so token refreshes persist) — never a copy,
       # which the host rotating its OAuth token would revoke.
       - ${ISSUEFLEET_CLAUDE_CONFIG:?not set - run via bazel or source env.sh}:${ISSUEFLEET_CLAUDE_CONFIG:?not set - run via bazel or source env.sh}
+      - ${ISSUEFLEET_CODEX_HOME:?not set - run via bazel or source env.sh}:${ISSUEFLEET_CODEX_HOME:?not set - run via bazel or source env.sh}
       - ${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/state:${ISSUEFLEET_ROOT:?not set - run via bazel (defaults to HOME/.issuefleet) or export it}/state
       # Checkouts outside the data root (a `repo` pointing at your own working
       # tree). Read-write: the daemon registers worktrees in that repo's .git.

@@ -267,6 +267,85 @@ class RoadmapCheckTest(unittest.TestCase):
 
 
 class WorkerRuntimeCheckTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def cfg(self, runtimes=("codex",)):
+        return config.parse({
+            "daemon": {"state_dir": str(self.root / "state")},
+            "agent": {"codex_home": str(self.root / "codex"),
+                      "container_image": "test-worker:fixed"},
+            "projects": [{"name": f"p{i}", "linear_project": "X", "repo": str(self.root),
+                          "claim": {"strategy": "agent"}, "agent": {"runtime": runtime}}
+                         for i, runtime in enumerate(runtimes)],
+        })
+
+    def test_codex_only_skips_claude_permission_settings(self):
+        from issuefleet.doctor import _check_container_settings
+
+        self.assertEqual(_check_container_settings(self.cfg()), [])
+
+    def test_codex_auth_missing_is_failure_not_host_login_success(self):
+        from issuefleet.doctor import _check_codex_home
+
+        checks = _check_codex_home(self.cfg())
+        self.assertEqual([check.status for check in checks], ["fail", "fail"])
+        self.assertIn("CODEX_HOME", checks[1].detail)
+
+    def test_codex_auth_file_checked_without_reading_or_printing_secret(self):
+        from issuefleet.doctor import _check_codex_home
+
+        cfg = self.cfg()
+        cfg.codex_home.mkdir()
+        auth = cfg.codex_home / "auth.json"
+        auth.write_text("DO-NOT-PRINT")
+        auth.chmod(0o600)
+        checks = _check_codex_home(cfg)
+        self.assertEqual([check.status for check in checks], ["ok", "ok"])
+        self.assertNotIn("DO-NOT-PRINT", " ".join(check.render() for check in checks))
+
+    def test_image_checks_each_runtime_in_restricted_disposable_container(self):
+        from unittest import mock
+        import subprocess
+        from issuefleet.doctor import _check_container_runtimes
+
+        with mock.patch("issuefleet.doctor.shutil.which", return_value="/bin/docker"), \
+             mock.patch("issuefleet.doctor.subprocess.run", side_effect=[
+                 subprocess.CompletedProcess([], 0, "Claude 1.2.3\n", ""),
+                 subprocess.CompletedProcess([], 127, "", "no codex"),
+             ]) as probe:
+            checks = _check_container_runtimes(self.cfg(("claude", "codex")))
+        self.assertEqual([check.status for check in checks], ["ok", "fail"])
+        self.assertIn("codex", checks[1].detail)
+        self.assertEqual(probe.call_count, 2)
+        for call in probe.call_args_list:
+            argv = call.args[0]
+            self.assertIn("--pull=never", argv)
+            self.assertIn("--network=none", argv)
+            self.assertIn("--read-only", argv)
+            self.assertNotIn("--mount", argv)
+
+    def test_timed_out_image_probe_cleans_up_only_its_own_container(self):
+        from unittest import mock
+        import subprocess
+        from issuefleet.doctor import _check_container_runtimes
+
+        with mock.patch("issuefleet.doctor.shutil.which", return_value="/bin/docker"), \
+             mock.patch("issuefleet.doctor.subprocess.run", side_effect=[
+                 subprocess.TimeoutExpired("docker", 30),
+                 subprocess.CompletedProcess([], 0),
+             ]) as probe:
+            checks = _check_container_runtimes(self.cfg())
+        self.assertEqual(checks[0].status, "fail")
+        run_argv, cleanup_argv = [call.args[0] for call in probe.call_args_list]
+        name = run_argv[run_argv.index("--name") + 1]
+        self.assertTrue(name.startswith("issuefleet-doctor-"))
+        self.assertEqual(cleanup_argv, ["docker", "rm", "--force", name])
+
     def test_root_euid_fails_with_guidance(self):
         from unittest import mock
 
@@ -403,11 +482,14 @@ claim = {{ strategy = "agent" }}
 
     def test_missing_credentials_is_actionable(self):
         import os
+        from unittest import mock
 
         saved = {k: os.environ.pop(k, None) for k in ("LINEAR_API_KEY", "GITHUB_TOKEN", "GH_TOKEN")}
         try:
             p = self.write_config(
                 f"""
+[daemon]
+state_dir = "{self.root}/state"
 [credentials]
 linear_api_key_file = "{self.root}/nope.key"
 github_token_file = "{self.root}/nope2.key"
@@ -419,7 +501,8 @@ claim = {{ strategy = "label", value = "agent" }}
 """
             )
             out = io.StringIO()
-            code = run_doctor(p, git=FakeGit(self.root), stream=out)
+            with mock.patch("issuefleet.creds.shutil.which", return_value=None):
+                code = run_doctor(p, git=FakeGit(self.root), stream=out)
             self.assertEqual(code, 1)
             self.assertIn("linear.app/settings/api", out.getvalue())
             self.assertIn("fine-grained PAT", out.getvalue())

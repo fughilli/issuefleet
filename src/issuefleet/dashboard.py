@@ -44,6 +44,7 @@ def worker_snapshot(rec: WorkerRecord, runner: TmuxRunner) -> dict:
     ``status`` output and the web dashboard, so the two never drift."""
     agent_dir = Path(rec.worktree) / ".agent"
     turn_phase = None
+    state = {}
     turns_taken = auto_turns = max_auto_turns = None
     try:
         state = json.loads((agent_dir / "state.json").read_text())
@@ -65,6 +66,9 @@ def worker_snapshot(rec: WorkerRecord, runner: TmuxRunner) -> dict:
         "issue_title": rec.issue_title,
         "issue_url": rec.issue_url,
         "project": rec.project,
+        "runtime": state.get("runtime", rec.runtime),
+        "model": state.get("model", rec.model),
+        "runtime_session_id": state.get("runtime_session_id", rec.runtime_session_id),
         "phase": rec.phase,
         "alive": runner.alive(rec),
         "turn_phase": turn_phase,
@@ -188,7 +192,19 @@ def turn_files(agent_dir: Path) -> list[int]:
             out.append(int(f.stem.split("-")[1]))
         except (IndexError, ValueError):
             continue
-    return sorted(out)
+    return sorted(set(out))
+
+
+def _turn_log_paths(agent_dir: Path, n: int) -> list[Path]:
+    logs = agent_dir / "logs"
+    first = logs / f"turn-{n:04d}.jsonl"
+    retries = []
+    for path in logs.glob(f"turn-{n:04d}-retry-*.jsonl"):
+        try:
+            retries.append((int(path.stem.rsplit("-", 1)[1]), path))
+        except ValueError:
+            continue
+    return ([first] if first.is_file() else []) + [path for _, path in sorted(retries)]
 
 
 def _tool_result_text(content) -> str:
@@ -207,6 +223,35 @@ def _tool_result_text(content) -> str:
 
 def _events_from(ev: dict) -> list[dict]:
     kind = ev.get("type")
+    if kind == "thread.started":
+        return [{"kind": "system", "model": ev.get("model", "Codex"),
+                 "session_id": str(ev.get("thread_id", ""))[:8]}]
+    if kind in ("turn.completed", "turn.failed", "error"):
+        events = []
+        if kind != "turn.completed":
+            error = ev.get("error") or ev
+            text = error.get("message", "Runtime error") if isinstance(error, dict) else str(error)
+            events.append({"kind": "tool_result", "text": text, "is_error": True})
+        events.append({"kind": "result", "is_error": kind != "turn.completed"})
+        return events
+    if kind in ("item.started", "item.completed"):
+        item = ev.get("item") or {}
+        if not isinstance(item, dict):
+            return []
+        item_kind = item.get("type")
+        if item_kind == "agent_message" and kind == "item.completed":
+            return [{"kind": "text", "text": item.get("text", "")}]
+        if item_kind == "command_execution":
+            if kind == "item.started":
+                return [{"kind": "tool_use", "name": "shell",
+                         "input": {"command": item.get("command", "")}}]
+            return [{"kind": "tool_result", "text": item.get("aggregated_output", ""),
+                     "is_error": item.get("exit_code", 0) != 0}]
+        if item_kind in ("file_change", "mcp_tool_call") and kind == "item.completed":
+            return [{"kind": "tool_use", "name": item_kind, "input": item}]
+        if item_kind == "error" and kind == "item.completed":
+            return [{"kind": "tool_result", "text": item.get("message", ""), "is_error": True}]
+        return []
     if kind == "system" and ev.get("subtype") == "init":
         return [{
             "kind": "system",
@@ -353,18 +398,25 @@ class FleetView:
         rec = self.find(key)
         if rec is None:
             return None
-        path = Path(rec.worktree) / ".agent" / "logs" / f"turn-{n:04d}.jsonl"
-        if not path.is_file():
+        paths = _turn_log_paths(Path(rec.worktree) / ".agent", n)
+        if not paths:
             return None
-        return parse_transcript(path)
+        events = []
+        for path in paths:
+            if "-retry-" in path.name:
+                events.append({"kind": "raw", "text": f"Resumed attempt: {path.name}"})
+            events.extend(parse_transcript(path))
+        return events
 
     def raw_turn(self, key: str, n: int) -> str | None:
         rec = self.find(key)
         if rec is None:
             return None
-        path = Path(rec.worktree) / ".agent" / "logs" / f"turn-{n:04d}.jsonl"
+        paths = _turn_log_paths(Path(rec.worktree) / ".agent", n)
+        if not paths:
+            return None
         try:
-            return path.read_text()
+            return "".join(path.read_text().rstrip("\n") + "\n" for path in paths)
         except OSError:
             return None
 
@@ -727,6 +779,8 @@ def render_worker(
         "Title": snap["issue_title"],
         "Linear": f"<a href='{_h(snap['issue_url'])}'>{_h(snap['issue_url'])}</a>",
         "Project": snap["project"],
+        "Runtime": _h(snap.get("runtime", "claude")),
+        "Model": _h(snap.get("model") or "runtime default"),
         "Session": _alive_pill(snap) + f" · phase {_h(snap['phase'])} · claim {_h(snap['claim_origin'])}",
         "Agent": (
             f"{_h(snap['turn_phase'])} · turn {_h(snap['turns_taken'])} · "
