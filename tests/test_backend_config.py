@@ -11,7 +11,7 @@ from unittest import mock
 from issuefleet import config, creds
 from issuefleet.agent_runtime.turns import TurnState
 from issuefleet.dashboard import _events_from, render_transcript
-from issuefleet.model import Issue, WorkerRecord
+from issuefleet.model import Issue, IssueLabel, WorkerRecord
 from issuefleet.worker import provision
 
 
@@ -19,6 +19,24 @@ BASE = {"projects": [{"name": "app", "linear_project": "App", "repo": "/tmp/app"
 
 
 class BackendConfigTest(unittest.TestCase):
+    @staticmethod
+    def profile_data():
+        data = copy.deepcopy(BASE)
+        data["agent"] = {
+            "runtime": "claude",
+            "profile_label_group_id": "group-worker-profile",
+            "profiles": [
+                {
+                    "name": "codex-astra",
+                    "label_id": "label-codex-astra",
+                    "runtime": "codex",
+                    "model": "gpt-6-astra",
+                    "reasoning_effort": "high",
+                }
+            ],
+        }
+        return data
+
     def test_defaults_preserve_claude(self):
         cfg = config.parse(BASE)
         self.assertEqual(cfg.fleet_manager.provider, "anthropic")
@@ -63,6 +81,77 @@ class BackendConfigTest(unittest.TestCase):
         selected = config.parse(data).runtime_for("app")
         self.assertEqual(selected.model, "gpt-6-astra")
         self.assertEqual(selected.reasoning_effort, "medium")
+
+    def test_linear_profile_selects_complete_runtime_by_stable_ids(self):
+        cfg = config.parse(self.profile_data())
+        issue = Issue(
+            "i", "TEST-1", "Title", "Body", "", 0, "Todo", "unstarted",
+            label_details=[IssueLabel(
+                "label-codex-astra", "Codex Astra", "group-worker-profile", "Worker profile"
+            )],
+        )
+        selected = cfg.runtime_for_issue("app", issue)
+        self.assertEqual(selected.profile, "codex-astra")
+        self.assertEqual(selected.source, "linear-label:Codex Astra")
+        self.assertEqual(
+            selected.runtime,
+            config.WorkerRuntimeConfig("codex", "gpt-6-astra", "high", []),
+        )
+
+    def test_linear_profile_toml_shape_loads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(
+                '[agent]\nruntime = "claude"\n'
+                'profile_label_group_id = "group-worker-profile"\n'
+                '[[agent.profiles]]\nname = "codex-astra"\n'
+                'label_id = "label-codex-astra"\nruntime = "codex"\n'
+                'model = "gpt-6-astra"\nreasoning_effort = "high"\n'
+                '[[projects]]\nname = "app"\nlinear_project = "App"\nrepo = "/tmp/app"\n'
+            )
+            cfg = config.load(path)
+        self.assertEqual(cfg.profile_label_group_id, "group-worker-profile")
+        self.assertEqual(cfg.worker_profiles[0].runtime.model, "gpt-6-astra")
+
+    def test_linear_profile_is_optional_and_default_is_project_aware(self):
+        data = self.profile_data()
+        data["projects"][0]["agent"] = {"runtime": "claude", "model": "claude-opus-5"}
+        selected = config.parse(data).runtime_for_issue(
+            "app", Issue("i", "TEST-1", "Title", "Body", "", 0, "Todo", "unstarted")
+        )
+        self.assertIsNone(selected.profile)
+        self.assertEqual(selected.source, "project:app")
+        self.assertEqual(selected.runtime.model, "claude-opus-5")
+
+    def test_invalid_or_ambiguous_linear_profile_fails_closed(self):
+        cfg = config.parse(self.profile_data())
+        issue = Issue(
+            "i", "TEST-1", "Title", "Body", "", 0, "Todo", "unstarted",
+            label_details=[IssueLabel("unknown", "New profile", "group-worker-profile")],
+        )
+        with self.assertRaisesRegex(config.ConfigError, "has no .* mapping"):
+            cfg.runtime_for_issue("app", issue)
+        issue.label_details.append(
+            IssueLabel("label-codex-astra", "Codex Astra", "group-worker-profile")
+        )
+        with self.assertRaisesRegex(config.ConfigError, "multiple labels"):
+            cfg.runtime_for_issue("app", issue)
+        issue.label_details = [
+            IssueLabel("label-codex-astra", "Codex Astra", "wrong-group")
+        ]
+        with self.assertRaisesRegex(config.ConfigError, "belongs to group"):
+            cfg.runtime_for_issue("app", issue)
+
+    def test_profile_configuration_requires_complete_unique_mappings(self):
+        for mutate, message in (
+            (lambda agent: agent.pop("profile_label_group_id"), "profile_label_group_id"),
+            (lambda agent: agent["profiles"][0].pop("model"), "runtime and model"),
+            (lambda agent: agent["profiles"].append(dict(agent["profiles"][0])), "duplicate"),
+        ):
+            data = self.profile_data()
+            mutate(data["agent"])
+            with self.subTest(message=message), self.assertRaisesRegex(config.ConfigError, message):
+                config.parse(data)
 
     def test_project_overrides_survive_drop_in_serialization(self):
         data = copy.deepcopy(BASE)
@@ -131,6 +220,24 @@ class BackendConfigTest(unittest.TestCase):
             state = TurnState.load(worktree / ".agent")
             self.assertEqual(state.runtime, "codex")
             self.assertEqual(state.runtime_session_id, "persistent-thread")
+
+    def test_provision_snapshots_linear_profile_and_ignores_later_label_changes(self):
+        cfg = config.parse(self.profile_data())
+        issue = Issue(
+            "i", "TEST-1", "Title", "Body", "", 0, "Todo", "unstarted",
+            label_details=[IssueLabel(
+                "label-codex-astra", "Codex Astra", "group-worker-profile"
+            )],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp)
+            provision(worktree, issue, "agent/test", "main", cfg, project_name="app")
+            issue.label_details = []
+            provision(worktree, issue, "agent/test", "main", cfg, project_name="app")
+            state = TurnState.load(worktree / ".agent")
+        self.assertEqual(state.runtime_profile, "codex-astra")
+        self.assertEqual(state.runtime_source, "linear-label:Codex Astra")
+        self.assertEqual((state.runtime, state.model), ("codex", "gpt-6-astra"))
 
     def test_manager_builder_selects_openai_key_and_rejects_missing_key(self):
         from types import SimpleNamespace

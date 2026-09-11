@@ -438,7 +438,10 @@ class Reconciler:
 
             state = TurnState.load(Path(rec.worktree) / ".agent")
             rec.released_turns = state.turns_taken
-            for name in ("runtime", "model", "reasoning_effort", "runtime_args", "runtime_session_id", "runtime_home"):
+            for name in (
+                "runtime", "model", "reasoning_effort", "runtime_args", "runtime_profile",
+                "runtime_source", "runtime_session_id", "runtime_home",
+            ):
                 setattr(rec, name, getattr(state, name))
         except FileNotFoundError:
             pass
@@ -556,6 +559,8 @@ class Reconciler:
                 model=rec.model,
                 reasoning_effort=rec.reasoning_effort,
                 runtime_args=list(rec.runtime_args),
+                runtime_profile=rec.runtime_profile,
+                runtime_source=rec.runtime_source,
                 runtime_session_id=rec.runtime_session_id,
                 runtime_home=rec.runtime_home,
             )
@@ -746,6 +751,14 @@ class Reconciler:
                     self.pending_session_claims.pop(issue_id)
                     continue
                 self._claim_one(issue, project, session=evt)
+                self.pending_session_claims.pop(issue_id)
+            except config_mod.ConfigError as e:
+                log.error("session claim of %s rejected: %s", evt.issue_key, e)
+                self._emit_activity_quietly(
+                    evt.session_id,
+                    {"type": "error", "body": f"IssueFleet could not select a worker: {e}. "
+                     "Fix the Linear profile label or fleet configuration, then delegate again."},
+                )
                 self.pending_session_claims.pop(issue_id)
             except Exception:
                 log.exception("session claim of %s failed; will retry next tick", evt.issue_key)
@@ -2095,6 +2108,18 @@ class Reconciler:
         for issue, project in claim_now:
             try:
                 self._claim_one(issue, project)
+            except config_mod.ConfigError as e:
+                log.error("claiming %s rejected: %s", issue.key, e)
+                try:
+                    self._post_once(
+                        issue.id,
+                        f"worker-profile-error-{issue.id}",
+                        f"⚠️ IssueFleet could not select a worker: {e}. "
+                        "Fix the Linear worker profile label or fleet configuration; "
+                        "the issue will be retried automatically.",
+                    )
+                except Exception:
+                    log.exception("reporting worker profile error for %s failed", issue.key)
             except Exception:
                 log.exception("claiming %s failed; will retry next tick", issue.key)
 
@@ -2102,6 +2127,10 @@ class Reconciler:
         self, issue: Issue, project: ProjectConfig, session=None,
         branch: str | None = None, origin: str | None = None,
     ) -> None:
+        # Validate the issue-level profile before fetch, worktree creation, or
+        # any other claim side effect. The exact selection is passed through to
+        # provisioning so this claim cannot race a config or label refresh.
+        selection = self.cfg.runtime_for_issue(project.name, issue)
         # `branch` is supplied only when adopting a branch made outside
         # issuefleet — otherwise it's derived from the template as usual.
         branch = branch or project.branch_template.format(
@@ -2161,6 +2190,7 @@ class Reconciler:
             siblings=self._siblings(project),
             attachments=description_images,
             project_name=project.name,
+            runtime_selection=selection,
         )
 
         rec = WorkerRecord(
@@ -2181,7 +2211,10 @@ class Reconciler:
         from issuefleet.agent_runtime.turns import TurnState
 
         state = TurnState.load(worktree / ".agent")
-        for name in ("runtime", "model", "reasoning_effort", "runtime_args", "runtime_session_id", "runtime_home"):
+        for name in (
+            "runtime", "model", "reasoning_effort", "runtime_args", "runtime_profile",
+            "runtime_source", "runtime_session_id", "runtime_home",
+        ):
             setattr(rec, name, getattr(state, name))
         # Register before the runner/tracker side effects: if we crash here,
         # the next tick's liveness check starts the session; if we crashed
@@ -2195,13 +2228,18 @@ class Reconciler:
                 rec.agent_session_id,
                 {"type": "thought",
                  "body": f"Worker claimed: branch `{branch}` in an isolated worktree. "
-                 "Plan and progress will stream here."},
+                 f"Runtime `{rec.runtime}`, model `{rec.model or 'runtime default'}`, "
+                 f"effort `{rec.reasoning_effort or 'runtime default'}` "
+                 f"(selection `{rec.runtime_source}`). Plan and progress will stream here."},
             )
         else:
             self._post_once(
                 issue.id,
                 f"claim-{issue.id}",
                 f"🤖 Claimed by issuefleet. Branch `{branch}`, worktree `{worktree}`.\n"
+                f"Worker: runtime `{rec.runtime}`, model `{rec.model or 'runtime default'}`, "
+                f"effort `{rec.reasoning_effort or 'runtime default'}`, "
+                f"selection `{rec.runtime_source}`.\n"
                 f"Watch live: `tmux attach -t {tmux_session}` on the orchestrator host "
                 f"(or `issuefleet logs {issue.key}`).",
             )

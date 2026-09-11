@@ -289,6 +289,17 @@ class WorkerRuntimeCheckTest(unittest.TestCase):
 
         self.assertEqual(_check_container_settings(self.cfg()), [])
 
+    def test_selectable_profile_runtime_is_included_in_checks(self):
+        from issuefleet.doctor import _worker_runtimes
+
+        cfg = self.cfg(("claude",))
+        cfg.profile_label_group_id = "group-worker-profile"
+        cfg.worker_profiles = [config.WorkerProfileConfig(
+            "codex-astra", "label-codex-astra",
+            config.WorkerRuntimeConfig("codex", "gpt-6-astra", "high"),
+        )]
+        self.assertEqual(_worker_runtimes(cfg), {"claude", "codex"})
+
     def test_codex_auth_missing_is_failure_not_host_login_success(self):
         from issuefleet.doctor import _check_codex_home
 

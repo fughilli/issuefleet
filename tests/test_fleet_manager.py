@@ -498,7 +498,13 @@ class FleetManagerTest(unittest.TestCase):
         ))
 
     def test_list_workers_tool_flags_who_is_awaiting_the_human(self):
-        self._worker(key="FUG-9")
+        worker = self._worker(key="FUG-9")
+        worker.runtime = "codex"
+        worker.model = "gpt-6-astra"
+        worker.reasoning_effort = "high"
+        worker.runtime_profile = "codex-astra"
+        worker.runtime_source = "linear-label:Codex Astra"
+        self.registry.save()
         fm = self._fm(agent_key="sk-test")
         fm.state["pending"].append(
             {"msg_id": "x", "issue_id": "i", "issue_key": "FUG-9", "question": "?"}
@@ -512,6 +518,9 @@ class FleetManagerTest(unittest.TestCase):
         out = tools["list_workers"].run({})
         self.assertIn("FUG-9", out)
         self.assertIn("awaiting_human=yes", out)
+        self.assertIn("manager provider=anthropic model=claude-opus-5", out)
+        self.assertIn("runtime=codex model=gpt-6-astra reasoning_effort=high", out)
+        self.assertIn("profile=codex-astra source=linear-label:Codex Astra", out)
 
     def test_list_open_issues_accepts_the_config_name_not_just_the_linear_one(self):
         # The live bug: list_workers reports the config name ("p"), the tracker

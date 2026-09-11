@@ -85,7 +85,15 @@ class SnapshotTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_snapshot_reads_state_and_mailbox(self):
-        wt = provision_worktree(self.root / "wt", turns={1: [INIT_LINE], 2: [ASSISTANT_LINE]})
+        wt = provision_worktree(
+            self.root / "wt",
+            turns={1: [INIT_LINE], 2: [ASSISTANT_LINE]},
+            state={
+                "runtime": "codex", "model": "gpt-6-astra",
+                "reasoning_effort": "high", "runtime_profile": "codex-astra",
+                "runtime_source": "linear-label:Codex Astra",
+            },
+        )
         rec = make_record(wt, pr_number=7, pr_url="https://gh/pr/7", restarts=2)
         # A stub runner that never shells out to tmux.
         runner = TmuxRunner(log_dir=self.root / "logs")
@@ -98,6 +106,9 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(snap["pr_number"], 7)
         self.assertEqual(snap["restarts"], 2)
         self.assertIsNotNone(snap["last_activity_s"])
+        self.assertEqual(snap["reasoning_effort"], "high")
+        self.assertEqual(snap["runtime_profile"], "codex-astra")
+        self.assertEqual(snap["runtime_source"], "linear-label:Codex Astra")
 
     def test_snapshot_tolerates_missing_state(self):
         wt = (self.root / "bare")

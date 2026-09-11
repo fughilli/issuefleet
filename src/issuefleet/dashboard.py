@@ -68,6 +68,9 @@ def worker_snapshot(rec: WorkerRecord, runner: TmuxRunner) -> dict:
         "project": rec.project,
         "runtime": state.get("runtime", rec.runtime),
         "model": state.get("model", rec.model),
+        "reasoning_effort": state.get("reasoning_effort", rec.reasoning_effort),
+        "runtime_profile": state.get("runtime_profile", rec.runtime_profile),
+        "runtime_source": state.get("runtime_source", rec.runtime_source),
         "runtime_session_id": state.get("runtime_session_id", rec.runtime_session_id),
         "phase": rec.phase,
         "alive": runner.alive(rec),
@@ -677,11 +680,18 @@ def render_index(snaps: list[dict], stopped: str | None = None) -> str:
             f"<a href='{_h(s['pr_url'])}'>#{_h(s['pr_number'])}</a>"
             if s["pr_number"] else "<span class='muted'>—</span>"
         )
+        profile = s.get("runtime_profile") or "default"
+        worker = (
+            f"{_h(s.get('runtime', 'claude'))} · "
+            f"{_h(s.get('model') or 'runtime default')}<br>"
+            f"<span class='muted'>{_h(profile)}</span>"
+        )
         rows.append(
             "<tr>"
             f"<td><a href='/worker/{_h(s['issue_key'])}'>{_h(s['issue_key'])}</a><br>"
             f"<span class='muted'>{_h(s['issue_title'])}</span></td>"
             f"<td>{_h(s['project'])}</td>"
+            f"<td>{worker}</td>"
             f"<td>{_alive_pill(s)}</td>"
             f"<td>{turn}</td>"
             f"<td>{pr}</td>"
@@ -690,7 +700,7 @@ def render_index(snaps: list[dict], stopped: str | None = None) -> str:
             "</tr>"
         )
     table = (
-        "<table><thead><tr><th>Issue</th><th>Project</th><th>Session</th>"
+        "<table><thead><tr><th>Issue</th><th>Project</th><th>Worker</th><th>Session</th>"
         "<th>Agent</th><th>PR</th><th>Last activity</th><th>In/Out</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
     )
@@ -781,6 +791,9 @@ def render_worker(
         "Project": snap["project"],
         "Runtime": _h(snap.get("runtime", "claude")),
         "Model": _h(snap.get("model") or "runtime default"),
+        "Reasoning effort": _h(snap.get("reasoning_effort") or "runtime default"),
+        "Worker profile": _h(snap.get("runtime_profile") or "default"),
+        "Selected by": _h(snap.get("runtime_source") or "legacy-default"),
         "Session": _alive_pill(snap) + f" · phase {_h(snap['phase'])} · claim {_h(snap['claim_origin'])}",
         "Agent": (
             f"{_h(snap['turn_phase'])} · turn {_h(snap['turns_taken'])} · "

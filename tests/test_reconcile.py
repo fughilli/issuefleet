@@ -10,7 +10,7 @@ from fakes import FakeForge, FakeGit, FakeRunner, FakeTracker, make_issue
 
 from issuefleet import MARKER_PREFIX, config
 from issuefleet.mailbox import Mailbox
-from issuefleet.model import PHASE_ACTIVE, PHASE_CRASHED, PHASE_RELEASED
+from issuefleet.model import PHASE_ACTIVE, PHASE_CRASHED, PHASE_RELEASED, IssueLabel
 from issuefleet.reconcile import Reconciler, slugify
 from issuefleet.registry import Registry
 
@@ -79,6 +79,40 @@ class ReconcileTest(unittest.TestCase):
         self.assertIn(w.branch, body)
         self.assertIn("tmux attach", body)
         self.assertIn(MARKER_PREFIX + "claim-issue-1", body)
+
+    def test_claim_resolves_linear_profile_before_side_effects_and_reports_selection(self):
+        self.cfg.profile_label_group_id = "group-worker-profile"
+        self.cfg.worker_profiles = [config.WorkerProfileConfig(
+            name="codex-astra",
+            label_id="label-codex-astra",
+            runtime=config.WorkerRuntimeConfig("codex", "gpt-6-astra", "high"),
+        )]
+        worker = self.claim_one(label_details=[IssueLabel(
+            "label-codex-astra", "Codex Astra", "group-worker-profile", "Worker profile"
+        )])
+        self.assertEqual((worker.runtime, worker.model), ("codex", "gpt-6-astra"))
+        self.assertEqual(worker.reasoning_effort, "high")
+        self.assertEqual(worker.runtime_profile, "codex-astra")
+        self.assertEqual(worker.runtime_source, "linear-label:Codex Astra")
+        self.assertIn("selection `linear-label:Codex Astra`", self.tracker.posted[0][1])
+
+    def test_invalid_linear_profile_does_not_create_a_worktree_and_is_reported_once(self):
+        self.cfg.profile_label_group_id = "group-worker-profile"
+        self.cfg.worker_profiles = [config.WorkerProfileConfig(
+            name="codex-astra",
+            label_id="label-codex-astra",
+            runtime=config.WorkerRuntimeConfig("codex", "gpt-6-astra", "high"),
+        )]
+        self.tracker.add_issue(make_issue(label_details=[
+            IssueLabel("label-unmapped", "Codex Future", "group-worker-profile")
+        ]))
+        self.rec.tick()
+        self.rec.tick()
+        self.assertIsNone(self.worker())
+        self.assertEqual(self.git.worktrees, [])
+        errors = [body for _, body in self.tracker.posted if "could not select a worker" in body]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("Codex Future", errors[0])
 
     def test_claim_prefetches_origin_with_forge_token(self):
         w = self.claim_one()

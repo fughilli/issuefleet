@@ -108,6 +108,24 @@ class WorkerRuntimeConfig:
 
 
 @dataclass
+class WorkerProfileConfig:
+    """One Linear-selectable, fully resolved worker runtime profile."""
+
+    name: str
+    label_id: str
+    runtime: WorkerRuntimeConfig
+
+
+@dataclass
+class WorkerRuntimeSelection:
+    """Runtime plus the source that selected it for a new issue."""
+
+    runtime: WorkerRuntimeConfig
+    profile: str | None
+    source: str
+
+
+@dataclass
 class ProjectConfig:
     name: str  # short handle, used in paths and logs
     linear_project: str  # Linear project name or UUID
@@ -331,6 +349,8 @@ class Config:
     max_restarts: int = 3
     claude_args: list[str] = field(default_factory=list)
     agent_runtime: WorkerRuntimeConfig = field(default_factory=WorkerRuntimeConfig)
+    profile_label_group_id: str | None = None
+    worker_profiles: list[WorkerProfileConfig] = field(default_factory=list)
     codex_home: Path = field(
         default_factory=lambda: _path("${ISSUEFLEET_CODEX_HOME}")
     )
@@ -444,6 +464,64 @@ class Config:
                 f"project {project_name!r} claude_args",
             )
         return result
+
+    def runtime_for_issue(self, project_name: str | None, issue) -> WorkerRuntimeSelection:
+        """Resolve a new issue's runtime from its Linear profile label.
+
+        Profiles are opt-in. Without them, or without a label from the configured
+        group, the existing project/global default remains authoritative. Linear
+        group membership and profile matching use immutable IDs; display names
+        are only used in operator-facing diagnostics.
+        """
+        default = self.runtime_for(project_name)
+        default_source = "agent-default"
+        if project_name is not None and self.project(project_name).agent:
+            default_source = f"project:{project_name}"
+        if not self.worker_profiles:
+            return WorkerRuntimeSelection(default, None, default_source)
+
+        profiles_by_label = {profile.label_id: profile for profile in self.worker_profiles}
+        for label in getattr(issue, "label_details", []):
+            if label.id in profiles_by_label and label.group_id != self.profile_label_group_id:
+                raise ConfigError(
+                    f"issue {issue.key}: configured worker profile label {label.name!r} "
+                    f"({label.id}) belongs to group {label.group_id!r}, expected "
+                    f"{self.profile_label_group_id!r}"
+                )
+
+        labels = [
+            label for label in getattr(issue, "label_details", [])
+            if label.group_id == self.profile_label_group_id
+        ]
+        if not labels:
+            return WorkerRuntimeSelection(default, None, default_source)
+        if len(labels) > 1:
+            shown = ", ".join(f"{label.name} ({label.id})" for label in labels)
+            raise ConfigError(
+                f"issue {issue.key}: multiple labels from worker profile group "
+                f"{self.profile_label_group_id!r}: {shown}"
+            )
+
+        label = labels[0]
+        profile = profiles_by_label.get(label.id)
+        if profile is None:
+            raise ConfigError(
+                f"issue {issue.key}: Linear worker profile label {label.name!r} "
+                f"({label.id}) has no [[agent.profiles]] mapping"
+            )
+        runtime = WorkerRuntimeConfig(
+            profile.runtime.runtime,
+            profile.runtime.model,
+            profile.runtime.reasoning_effort,
+            list(profile.runtime.args),
+        )
+        return WorkerRuntimeSelection(runtime, profile.name, f"linear-label:{label.name}")
+
+    def configured_worker_runtimes(self) -> list[WorkerRuntimeConfig]:
+        """All defaults and selectable profiles that a new worker can use."""
+        runtimes = [self.runtime_for(p.name) for p in self.projects]
+        runtimes.extend(p.runtime for p in self.worker_profiles)
+        return runtimes
 
     def added_projects_path(self) -> Path:
         """The drop-in file runtime-added projects are persisted to and reloaded
@@ -570,6 +648,55 @@ def _runtime_overrides(table, where: str) -> dict:
     if "runtime" in result and result["runtime"] not in ("claude", "codex"):
         raise ConfigError(f"{where}: runtime must be claude or codex")
     return result
+
+
+def _parse_worker_profiles(agent: dict, source: str) -> tuple[str | None, list[WorkerProfileConfig]]:
+    raw_profiles = agent.get("profiles", [])
+    if not isinstance(raw_profiles, list):
+        raise ConfigError(f"{source} [agent].profiles: expected an array of tables")
+    group_id = _optional_string(
+        agent.get("profile_label_group_id"), f"{source} [agent].profile_label_group_id"
+    )
+    if raw_profiles and group_id is None:
+        raise ConfigError(
+            f"{source} [agent]: profile_label_group_id is required when profiles are configured"
+        )
+
+    profiles: list[WorkerProfileConfig] = []
+    names: set[str] = set()
+    label_ids: set[str] = set()
+    for index, raw in enumerate(raw_profiles, 1):
+        where = f"{source} [[agent.profiles]] #{index}"
+        if not isinstance(raw, dict):
+            raise ConfigError(f"{where}: expected a table")
+        _reject_secrets(raw, where)
+        unknown = set(raw) - {
+            "name", "label_id", "runtime", "model", "reasoning_effort", "args"
+        }
+        if unknown:
+            raise ConfigError(
+                f"{where}: unknown setting(s): {', '.join(sorted(unknown))}"
+            )
+        name = _optional_string(raw.get("name"), f"{where}.name")
+        label_id = _optional_string(raw.get("label_id"), f"{where}.label_id")
+        if name is None or label_id is None:
+            missing = "name" if name is None else "label_id"
+            raise ConfigError(f"{where}: {missing} is required")
+        if name.casefold() in names:
+            raise ConfigError(f"{where}: duplicate profile name {name!r}")
+        if label_id in label_ids:
+            raise ConfigError(f"{where}: duplicate profile label_id {label_id!r}")
+        if "runtime" not in raw or "model" not in raw:
+            raise ConfigError(f"{where}: runtime and model are required")
+        runtime = WorkerRuntimeConfig(**_runtime_overrides(
+            {k: raw[k] for k in ("runtime", "model", "reasoning_effort", "args") if k in raw},
+            where,
+        ))
+        _validate_runtime(runtime, where)
+        profiles.append(WorkerProfileConfig(name=name, label_id=label_id, runtime=runtime))
+        names.add(name.casefold())
+        label_ids.add(label_id)
+    return group_id, profiles
 _SECURITY_MODES = ("block", "warn", "off")
 _DEEP_SCAN_KINDS = ("off", "claude")
 
@@ -949,6 +1076,7 @@ def parse(data: dict, source: str = "<config>") -> Config:
 
     agent_keys = {
         "runtime", "model", "reasoning_effort", "args", "max_auto_turns", "max_restarts",
+        "profile_label_group_id", "profiles",
         "claude_args", "copy_from_repo", "launcher_args", "mount_sibling_git",
         "claude_container", "container_config_dir", "container_image", "codex_home", "env",
         # Older deployed configs contain this ignored launcher setting. Keep
@@ -971,6 +1099,8 @@ def parse(data: dict, source: str = "<config>") -> Config:
     if len(set(names)) != len(names):
         raise ConfigError(f"{source}: duplicate [[projects]] name")
 
+    profile_label_group_id, worker_profiles = _parse_worker_profiles(agent, source)
+
     cfg = Config(
         projects=projects,
         poll_interval_s=int(daemon.get("poll_interval_s", 60)),
@@ -982,6 +1112,8 @@ def parse(data: dict, source: str = "<config>") -> Config:
             {k: agent[k] for k in ("runtime", "model", "reasoning_effort", "args") if k in agent},
             f"{source} [agent]",
         )),
+        profile_label_group_id=profile_label_group_id,
+        worker_profiles=worker_profiles,
         container_image=_optional_string(agent.get("container_image"), f"{source} [agent].container_image"),
         copy_from_repo=list(
             agent.get("copy_from_repo", [".claude", ".claude-container-overlay"])

@@ -57,6 +57,43 @@ inherited model, effort, and arguments. A worker snapshots its selection and
 Codex home at creation, retaining them across restarts and release/adopt; changes
 apply to new workers. Legacy `claude_args` applies only to Claude workers.
 
+To choose per issue in Linear, create an exclusive label group such as **Worker
+profile**, add one label per allowed choice, and map their stable IDs:
+
+```toml
+[agent]
+runtime = "claude"                     # fallback when the issue has no profile label
+profile_label_group_id = "<group UUID>"
+container_image = "issuefleet-worker:codex"
+
+[[agent.profiles]]
+name = "codex-astra"
+label_id = "<Codex Astra label UUID>"
+runtime = "codex"
+model = "gpt-6-astra"
+reasoning_effort = "high"
+
+[[agent.profiles]]
+name = "claude-opus"
+label_id = "<Claude Opus label UUID>"
+runtime = "claude"
+model = "claude-opus-5"
+```
+
+Run `issuefleet linear-labels` to print the group and label UUIDs. Select the
+profile by changing the issue's label before it is claimed; a comment such as
+"Codex Astra" is ordinary task context and does not change execution. No profile
+label preserves the project override or global default. A worker persists the
+choice it started with, so changing a label cannot silently switch an active
+conversation. Wind down and re-claim the issue to start a new worker under a
+different profile. An unmapped or ambiguous label in the configured group fails
+before a worktree or container is created and is reported on the Linear issue.
+
+The fleet manager remains fleet-wide configuration because one manager handles
+all issues. `issuefleet status` and the manager's `list_workers` tool show its
+resolved provider/model. Status, the dashboard, claim updates, and `list_workers`
+show each worker's runtime, model, effort, profile, and selection source.
+
 Build the image containing both CLIs and authenticate the dedicated worker home
 using [the Codex runtime setup](docs/CODEX_RUNTIME.md), then restart the daemon.
 The Docker deployment mounts `${ISSUEFLEET_CODEX_HOME}` at the same absolute path

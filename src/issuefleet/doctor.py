@@ -54,7 +54,7 @@ def _writable_ancestor(path: Path) -> bool:
 
 def _worker_runtimes(cfg: Config) -> set[str]:
     """Check configured workers and still-persisted workers after a config edit."""
-    runtimes = {cfg.runtime_for(p.name).runtime for p in cfg.projects}
+    runtimes = {runtime.runtime for runtime in cfg.configured_worker_runtimes()}
     runtimes.update(worker_runtime(rec) for rec in Registry(cfg.state_dir).all())
     return runtimes
 
@@ -201,7 +201,7 @@ def _check_codex_home(cfg: Config) -> list[Check]:
     if "codex" not in _worker_runtimes(cfg):
         return []
     homes = set()
-    if any(cfg.runtime_for(p.name).runtime == "codex" for p in cfg.projects):
+    if any(runtime.runtime == "codex" for runtime in cfg.configured_worker_runtimes()):
         homes.add(Path(cfg.codex_home).resolve())
     homes.update(worker_codex_home(rec, cfg) for rec in Registry(cfg.state_dir).all()
                  if worker_runtime(rec) == "codex")
@@ -463,6 +463,39 @@ def _check_linear(cfg: Config, tracker) -> list[Check]:
     except Exception as e:
         out.append(Check(FAIL, "Linear API", str(e)))
         return out
+
+    if cfg.worker_profiles:
+        try:
+            labels = tracker.workspace_labels()
+            by_id = {label["id"]: label for label in labels}
+            group = by_id.get(cfg.profile_label_group_id)
+            if group is None or not group.get("isGroup"):
+                out.append(Check(
+                    FAIL, "Linear worker profile group",
+                    f"{cfg.profile_label_group_id!r} is not a workspace label group; "
+                    "run `issuefleet linear-labels`",
+                ))
+            else:
+                out.append(Check(
+                    OK, "Linear worker profile group",
+                    f"{group['name']} ({group['id']})",
+                ))
+            for profile in cfg.worker_profiles:
+                label = by_id.get(profile.label_id)
+                parent_id = (label.get("parent") or {}).get("id") if label else None
+                if label is None or label.get("isGroup") or parent_id != cfg.profile_label_group_id:
+                    out.append(Check(
+                        FAIL, f"worker profile {profile.name!r}",
+                        f"label {profile.label_id!r} is missing or outside the configured group",
+                    ))
+                else:
+                    out.append(Check(
+                        OK, f"worker profile {profile.name!r}",
+                        f"Linear label {label['name']!r} -> {profile.runtime.runtime}/"
+                        f"{profile.runtime.model}",
+                    ))
+        except Exception as e:
+            out.append(Check(FAIL, "Linear worker profiles", str(e)))
 
     for project in cfg.projects:
         try:

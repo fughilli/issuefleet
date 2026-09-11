@@ -142,6 +142,7 @@ runtime = "claude"  # claude | codex; override per project using [projects.agent
 # args = []                   # extra runtime options; session/output flags are managed
 # container_image = "issuefleet-worker:codex"  # build deploy/worker/Dockerfile first
 # codex_home = "${ISSUEFLEET_CODEX_HOME}"       # dedicated writable login + sessions
+# profile_label_group_id = "<Worker profile group UUID>"  # issuefleet linear-labels
 max_auto_turns = 50
 max_restarts = 3
 claude_args = []
@@ -166,6 +167,15 @@ launcher_args = ["--skills-ignore-new"]   # needs claude-container > 1.6.12
 # [agent.env]
 # TS_AUTHKEY = { file = "~/.config/issuefleet/tailscale.key" }
 # HITL_SERVERS = { value = "hitl-rig" }
+
+# Optional per-issue selection. Linear labels in the configured group map to
+# complete runtime tuples; no profile label keeps the default above.
+# [[agent.profiles]]
+# name = "codex-astra"
+# label_id = "<Codex Astra label UUID>"
+# runtime = "codex"
+# model = "gpt-6-astra"
+# reasoning_effort = "high"
 
 # The motivating case: Linear project "Splanc" feeding fughilli/splanc.
 # With the Linear agent installed, strategy "agent" means claims happen

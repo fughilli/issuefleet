@@ -1,4 +1,4 @@
-"""The issuefleet CLI: doctor / run / once / status / attach / stop / takeover / logs."""
+"""The issuefleet CLI: configure, inspect, and operate the worker fleet."""
 
 from __future__ import annotations
 
@@ -469,11 +469,21 @@ def cmd_linear_oauth(cfg: Config) -> int:
 
 
 def cmd_status(cfg: Config) -> int:
+    from issuefleet.agent import DEFAULT_MODEL, DEFAULT_OPENAI_MODEL
     from issuefleet.dashboard import worker_snapshot
 
     registry = Registry(cfg.state_dir)
     runner = TmuxRunner(log_dir=cfg.state_dir / "logs")
     workers = registry.all()
+    manager = cfg.fleet_manager
+    manager_model = manager.model or (
+        DEFAULT_OPENAI_MODEL if manager.provider == "openai" else DEFAULT_MODEL
+    )
+    print(
+        f"manager {'enabled' if manager.enabled else 'disabled'}: provider "
+        f"{manager.provider}; model {manager_model}; effort "
+        f"{manager.reasoning_effort or 'provider default'}"
+    )
     if not workers:
         print("fleet empty")
         return 0
@@ -493,6 +503,11 @@ def cmd_status(cfg: Config) -> int:
             if s["last_activity_s"] is not None else "no turns yet"
         )
         print(f"{s['issue_key']} [{s['project']}] {s['phase']}/{alive} — {s['issue_title']}")
+        print(
+            f"    worker: runtime {s['runtime']}; model {s['model'] or 'runtime default'}; "
+            f"effort {s['reasoning_effort'] or 'runtime default'}; "
+            f"profile {s['runtime_profile'] or 'default'}; selected by {s['runtime_source']}"
+        )
         print(f"    agent: {turn_info}; {pr}; restarts {s['restarts']}; {activity}")
         print(
             f"    branch {s['branch']}; outbox pending {s['outbox_pending']}, "
@@ -500,6 +515,25 @@ def cmd_status(cfg: Config) -> int:
         )
         print(f"    watch: tmux attach -t {s['tmux_session']}")
         print(f"    turn logs: {agent_dir / 'logs'}   pane log: {runner.log_path(rec)}")
+    return 0
+
+
+def cmd_linear_labels(cfg: Config) -> int:
+    """Print grouped Linear label IDs used to configure worker profiles."""
+    labels = LinearTracker(client_from_config(cfg)).workspace_labels()
+    groups = {label["id"]: label for label in labels if label.get("isGroup")}
+    children: dict[str, list[dict]] = {}
+    for label in labels:
+        parent_id = (label.get("parent") or {}).get("id")
+        if parent_id:
+            children.setdefault(parent_id, []).append(label)
+    if not groups:
+        print("No Linear label groups found. Create a label group such as 'Worker profile' first.")
+        return 0
+    for group in sorted(groups.values(), key=lambda item: item["name"].casefold()):
+        print(f"{group['name']}  group_id={group['id']}")
+        for label in sorted(children.get(group["id"], []), key=lambda item: item["name"].casefold()):
+            print(f"    {label['name']}  label_id={label['id']}")
     return 0
 
 
@@ -666,6 +700,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="log would-be actions; mutate nothing")
     sub.add_parser("run", parents=[common], help="the daemon")
     sub.add_parser("status", parents=[common], help="fleet state")
+    sub.add_parser("linear-labels", parents=[common],
+                   help="list Linear label groups and stable IDs for worker profiles")
     sub.add_parser("fleet", parents=[common],
                    help="fleet-manager state (Signal cursor, pending escalations)")
     p = sub.add_parser("roadmap", parents=[common],
@@ -711,6 +747,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_run(cfg)
         if args.cmd == "status":
             return cmd_status(cfg)
+        if args.cmd == "linear-labels":
+            return cmd_linear_labels(cfg)
         if args.cmd == "fleet":
             return cmd_fleet(cfg)
         if args.cmd == "roadmap":

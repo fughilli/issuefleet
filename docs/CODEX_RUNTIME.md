@@ -104,6 +104,50 @@ effort and arguments for an existing conversation survive release/adopt.
 Runtime arguments also apply to interactive takeover, so use options supported
 by both interfaces. IssueFleet owns session selection and machine-output flags.
 
+## Select a worker profile in Linear
+
+Use a Linear label group for per-issue selection. Linear permits one label from
+a group on an issue, and IssueFleet also rejects multiple group members before
+claiming. Configure by immutable IDs so renaming a label does not change what it
+runs:
+
+```sh
+issuefleet linear-labels
+```
+
+```toml
+[agent]
+runtime = "claude"
+profile_label_group_id = "<Worker profile group UUID>"
+container_image = "issuefleet-worker:codex"
+
+[[agent.profiles]]
+name = "codex-astra"
+label_id = "<Codex Astra label UUID>"
+runtime = "codex"
+model = "gpt-6-astra"
+reasoning_effort = "high"
+
+[[agent.profiles]]
+name = "codex-fast"
+label_id = "<Codex Fast label UUID>"
+runtime = "codex"
+model = "<another supported Codex model>"
+reasoning_effort = "medium"
+```
+
+Add **Codex Astra** or **Codex Fast** to a Linear issue before applying the
+claim label, assignment, or delegation that starts it. With no worker profile
+label, the project/global default applies. Profile mappings require an explicit
+runtime and model. An unmapped label in the configured group is treated as a
+configuration error instead of silently running the fallback.
+
+The selected tuple and its source are persisted in both the worker state and
+registry. Label and config edits affect only future workers. `issuefleet status`,
+the dashboard, the Linear claim message, and the fleet manager expose the exact
+selection. The manager provider/model stays under `[fleet_manager]`; it is one
+fleet-wide orchestration loop and is not selected per issue.
+
 `issuefleet takeover KEY` runs `codex resume <recorded-thread-id>`. If a Codex
 worker never recorded a thread ID, takeover fails clearly instead of selecting
 another conversation. After an interrupted interactive session, IssueFleet

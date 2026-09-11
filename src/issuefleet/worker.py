@@ -95,6 +95,7 @@ def provision(
     attachments: list[str] | None = None,
     project_name: str | None = None,
     previous_state: TurnState | None = None,
+    runtime_selection=None,
 ) -> str:
     """Create/refresh the .agent dir. Idempotent: an existing state.json is
     preserved (re-adoption after an orchestrator restart must not reset the
@@ -129,7 +130,8 @@ def provision(
     state_path = agent_dir / "state.json"
     if state_path.exists():
         return TurnState.load(agent_dir).session_uuid
-    runtime = config.runtime_for(project_name)
+    selection = runtime_selection or config.runtime_for_issue(project_name, issue)
+    runtime = selection.runtime
     state = previous_state or TurnState(
         session_uuid=session_uuid or str(uuid.uuid4()),
         turns_taken=turns_taken,
@@ -139,6 +141,8 @@ def provision(
         model=runtime.model,
         reasoning_effort=runtime.reasoning_effort,
         runtime_args=list(runtime.args),
+        runtime_profile=selection.profile,
+        runtime_source=selection.source,
         runtime_home=str(config.codex_home.resolve()) if runtime.runtime == "codex" else None,
     )
     if phase is not None:

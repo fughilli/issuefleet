@@ -67,6 +67,8 @@ class TurnState:
     model: str | None = None
     reasoning_effort: str | None = None
     runtime_args: list[str] = field(default_factory=list)
+    runtime_profile: str | None = None
+    runtime_source: str = "legacy-default"
     runtime_session_id: str | None = None
     runtime_home: str | None = None
     _snapshot: dict | None = field(default=None, init=False, repr=False, compare=False)

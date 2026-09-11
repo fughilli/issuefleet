@@ -33,7 +33,7 @@ from pathlib import Path
 
 from issuefleet import MARKER_PREFIX, marker
 from issuefleet.advisor import BlockedQuestion
-from issuefleet.agent import AgentError, Tool, run_agent
+from issuefleet.agent import AgentError, DEFAULT_MODEL, DEFAULT_OPENAI_MODEL, Tool, run_agent
 from issuefleet.mailbox import Mailbox
 from issuefleet.model import PHASE_ACTIVE
 from issuefleet.sigbot import SignalError
@@ -332,15 +332,25 @@ class FleetManager:
 
         def list_workers(_):
             workers = self.registry.all()
+            manager_model = self.fm.model or (
+                DEFAULT_OPENAI_MODEL if self.fm.provider == "openai" else DEFAULT_MODEL
+            )
+            lines = [
+                f"manager provider={self.fm.provider} model={manager_model} "
+                f"reasoning_effort={self.fm.reasoning_effort or 'provider-default'}"
+            ]
             if not workers:
-                return "No workers are registered."
-            lines = []
+                lines.append("No workers are registered.")
+                return "\n".join(lines)
             for w in workers:
                 pending = [
                     p for p in self.state["pending"] if p["issue_key"].lower() == w.issue_key.lower()
                 ]
                 lines.append(
                     f"{w.issue_key} [{w.project}] phase={w.phase} "
+                    f"runtime={w.runtime} model={w.model or 'runtime-default'} "
+                    f"reasoning_effort={w.reasoning_effort or 'runtime-default'} "
+                    f"profile={w.runtime_profile or 'default'} source={w.runtime_source} "
                     f"restarts={w.restarts} branch={w.branch} "
                     f"PR={('#' + str(w.pr_number)) if w.pr_number else 'none'} "
                     f"awaiting_human={'yes' if pending else 'no'} — {w.issue_title}"
@@ -489,8 +499,9 @@ class FleetManager:
             "required": ["issue_key"],
         }
         return [
-            Tool("list_workers", "Every registered worker: issue, project, phase, turn, "
-                 "branch, PR, and whether it is waiting on a human answer.",
+            Tool("list_workers", "The manager provider/model and every registered worker: "
+                 "issue, project, runtime/model/profile, phase, branch, PR, and whether it "
+                 "is waiting on a human answer.",
                  {"type": "object", "properties": {}}, list_workers),
             Tool("list_open_issues",
                  "Open issues in a project. Omit 'project' for the top-level goals "
