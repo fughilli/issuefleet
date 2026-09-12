@@ -59,7 +59,10 @@ class LinearClientTest(unittest.TestCase):
             "priority": 2,
             "createdAt": "2026-07-01T00:00:00.000Z",
             "state": {"name": "Todo", "type": "unstarted"},
-            "labels": {"nodes": [{"name": "agent"}]},
+            "labels": {"nodes": [{
+                "id": "label-agent", "name": "agent",
+                "parent": {"id": "group-routing", "name": "Routing"},
+            }]},
             "assignee": None,
             "team": {"id": "team-1"},
         }
@@ -95,9 +98,30 @@ class LinearClientTest(unittest.TestCase):
         issues = tracker.open_issues(cfg.projects[0])
         self.assertEqual([i.key for i in issues], ["FUG-7", "FUG-8"])
         self.assertEqual(issues[0].labels, ["agent"])
+        self.assertEqual(issues[0].label_details[0].id, "label-agent")
+        self.assertEqual(issues[0].label_details[0].group_id, "group-routing")
+        self.assertIn("parent { id name }", t.calls[2]["payload"]["query"])
         self.assertEqual(issues[0].description, "")  # None normalized
         # Second page passed the cursor.
         self.assertEqual(t.calls[3]["payload"]["variables"]["after"], "c1")
+
+    def test_workspace_labels_paginates_with_group_metadata(self):
+        t = RecordingTransport([
+            {"data": {"issueLabels": {
+                "nodes": [{"id": "group", "name": "Worker profile", "isGroup": True,
+                           "parent": None}],
+                "pageInfo": {"hasNextPage": True, "endCursor": "next"},
+            }}},
+            {"data": {"issueLabels": {
+                "nodes": [{"id": "astra", "name": "Codex Astra", "isGroup": False,
+                           "parent": {"id": "group", "name": "Worker profile"}}],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }}},
+        ])
+        labels = LinearTracker(LinearClient("k", transport=t)).workspace_labels()
+        self.assertEqual([label["id"] for label in labels], ["group", "astra"])
+        self.assertIsNone(t.calls[0]["payload"]["variables"]["after"])
+        self.assertEqual(t.calls[1]["payload"]["variables"]["after"], "next")
 
     def test_issue_fields_adapt_to_schema(self):
         # Workspace WITH Issue.delegate: field included, mapped through.
@@ -531,8 +555,9 @@ class CredsTest(unittest.TestCase):
     def test_missing_raises_actionable_error(self):
         with self.assertRaisesRegex(creds.CredentialError, "linear.app/settings/api"):
             creds.resolve_linear_key(self.cfg)
-        with self.assertRaisesRegex(creds.CredentialError, "fine-grained PAT"):
-            creds.resolve_github_token(self.cfg)
+        with mock.patch("issuefleet.creds.shutil.which", return_value=None):
+            with self.assertRaisesRegex(creds.CredentialError, "fine-grained PAT"):
+                creds.resolve_github_token(self.cfg)
 
     def test_gitlab_env_then_file(self):
         with self.assertRaisesRegex(creds.CredentialError, "no GitLab token"):

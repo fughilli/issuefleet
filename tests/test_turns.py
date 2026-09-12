@@ -221,6 +221,18 @@ class TurnsTest(unittest.TestCase):
         self.assertEqual(d.exit_code, turns.EXIT_CONTINUE)
         self.assertIn("PR opened at", d.prompt)
 
+    def test_info_is_injected_before_continuation_consumes_it(self):
+        state = self.reload()
+        state.phase = turns.PHASE_RUNNING
+        state.turns_taken = 2
+        state.save(self.agent_dir)
+        self.mb.put_inbox("info", {"text": "Adopted back into the fleet after local work."})
+        decision = self.decide_and_commit()
+        self.assertEqual(decision.exit_code, turns.EXIT_CONTINUE)
+        self.assertIn("Adopted back into the fleet after local work.", decision.prompt)
+        self.assertIn("Continue working", decision.prompt)
+        self.assertEqual(self.mb.pending_inbox(), [])
+
     def test_idle_phase_idles_and_wakes_like_ready(self):
         state = self.reload()
         state.phase = turns.PHASE_IDLE
@@ -245,6 +257,60 @@ class TurnsTest(unittest.TestCase):
         p.write_text(json.dumps(data))
         self.assertEqual(self.reload().max_auto_turns, 3)
 
+    def test_old_state_files_keep_claude_defaults(self):
+        import json
+
+        (self.agent_dir / "state.json").write_text(json.dumps({
+            "session_uuid": "old-session", "turns_taken": 8, "claude_args": ["--verbose"],
+        }))
+        state = self.reload()
+        self.assertEqual(state.runtime, "claude")
+        self.assertIsNone(state.runtime_session_id)
+        self.assertIsNone(state.model)
+        self.assertEqual(state.runtime_args, [])
+        self.assertEqual(state.session_uuid, "old-session")
+        self.assertEqual(state.claude_args, ["--verbose"])
+
+    def test_stale_phase_save_cannot_erase_new_session_id(self):
+        agentctl_state = self.reload()
+        stream_state = self.reload()
+        stream_state.runtime_session_id = "codex-thread"
+        stream_state.save(self.agent_dir)
+        agentctl_state.phase = turns.PHASE_READY
+        agentctl_state.ever_ready = True
+        agentctl_state.save(self.agent_dir)
+        state = self.reload()
+        self.assertEqual(state.runtime_session_id, "codex-thread")
+        self.assertEqual(state.phase, turns.PHASE_READY)
+        self.assertTrue(state.ever_ready)
+
+    def test_stale_session_save_cannot_erase_new_phase(self):
+        stream_state = self.reload()
+        agentctl_state = self.reload()
+        agentctl_state.phase = turns.PHASE_WAITING
+        agentctl_state.save(self.agent_dir)
+        stream_state.runtime_session_id = "codex-thread"
+        stream_state.save(self.agent_dir)
+        self.assertEqual(self.reload().phase, turns.PHASE_WAITING)
+        self.assertEqual(self.reload().runtime_session_id, "codex-thread")
+
+    def test_save_to_new_agent_directory_restores_complete_state(self):
+        state = self.reload()
+        state.runtime = "codex"
+        state.runtime_session_id = "codex-thread"
+        state.phase = turns.PHASE_READY
+        state.turns_taken = 5
+        state.save(self.agent_dir)
+        restored = self.agent_dir.parent / "restored"
+        restored.mkdir()
+        turns.TurnState(session_uuid="new").save(restored)
+        self.reload().save(restored)
+        actual = turns.TurnState.load(restored)
+        self.assertEqual(actual.runtime, "codex")
+        self.assertEqual(actual.runtime_session_id, "codex-thread")
+        self.assertEqual(actual.turns_taken, 5)
+        self.assertEqual(actual.phase, turns.PHASE_READY)
+
 
 class AgentctlTest(unittest.TestCase):
     def setUp(self):
@@ -263,7 +329,7 @@ class AgentctlTest(unittest.TestCase):
     def tearDown(self):
         import os
 
-        del os.environ["ISSUEFLEET_AGENT_DIR"]
+        os.environ.pop("ISSUEFLEET_AGENT_DIR", None)
         self.tmp.cleanup()
 
     def test_status(self):
@@ -323,7 +389,7 @@ class AgentctlTest(unittest.TestCase):
         sub = self.workspace / "src" / "deep"
         sub.mkdir(parents=True)
         found = agentctl.find_agent_dir(start=sub)
-        self.assertEqual(found, self.agent_dir)
+        self.assertEqual(found, self.agent_dir.resolve())
         os.environ["ISSUEFLEET_AGENT_DIR"] = str(self.agent_dir)
 
 

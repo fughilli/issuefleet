@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shlex
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -98,6 +99,56 @@ class ClaimRule:
 
 
 @dataclass
+class WorkerRuntimeConfig:
+    """Resolved settings for a new worker; persisted for its entire lifetime."""
+
+    runtime: str = "claude"
+    model: str | None = None
+    reasoning_effort: str | None = None
+    args: list[str] = field(default_factory=list)
+
+
+@dataclass
+class WorkerProfileConfig:
+    """One Linear-selectable, fully resolved worker runtime profile."""
+
+    name: str
+    label_id: str
+    runtime: WorkerRuntimeConfig
+
+
+@dataclass
+class WorkerRuntimeSelection:
+    """Runtime plus the source that selected it for a new issue."""
+
+    runtime: WorkerRuntimeConfig
+    profile: str | None
+    source: str
+
+
+_BUILTIN_WORKER_PROFILES = {
+    # Friendly names for common zero-configuration choices. Generic runtime
+    # names retain the CLI's default model; named presets are fully explicit.
+    "claude": WorkerRuntimeConfig(runtime="claude"),
+    "codex": WorkerRuntimeConfig(runtime="codex"),
+    "opus-5": WorkerRuntimeConfig(runtime="claude", model="claude-opus-5"),
+    "claude-opus-5": WorkerRuntimeConfig(runtime="claude", model="claude-opus-5"),
+    "astra": WorkerRuntimeConfig(
+        runtime="codex", model="gpt-6-astra", reasoning_effort="high"
+    ),
+    "codex-astra": WorkerRuntimeConfig(
+        runtime="codex", model="gpt-6-astra", reasoning_effort="high"
+    ),
+}
+
+
+def _copy_runtime(runtime: WorkerRuntimeConfig) -> WorkerRuntimeConfig:
+    return WorkerRuntimeConfig(
+        runtime.runtime, runtime.model, runtime.reasoning_effort, list(runtime.args)
+    )
+
+
+@dataclass
 class ProjectConfig:
     name: str  # short handle, used in paths and logs
     linear_project: str  # Linear project name or UUID
@@ -119,6 +170,9 @@ class ProjectConfig:
     state_done: str = "Done"
     delete_remote_branch: bool = True
     max_workers: int | None = None  # per-project cap; None = only global cap
+    # Partial overrides of [agent]. A runtime switch starts with that runtime's
+    # defaults, so a Claude model or CLI flag cannot leak into a Codex worker.
+    agent: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -187,6 +241,11 @@ class FleetManagerConfig:
     # escalates to the human (deterministic, no LLM); 'claude' asks the model
     # whether ticket/board context answers it first.
     advisor: str = "conservative"
+    provider: str = "anthropic"
+    model: str | None = None
+    reasoning_effort: str | None = None
+    max_output_tokens: int | None = None
+    max_turns: int = 12
 
 
 # The default roadmap system prompt. The persona is the brief's; the formatting
@@ -312,6 +371,13 @@ class Config:
     max_auto_turns: int = 50
     max_restarts: int = 3
     claude_args: list[str] = field(default_factory=list)
+    agent_runtime: WorkerRuntimeConfig = field(default_factory=WorkerRuntimeConfig)
+    profile_label_group_id: str | None = None
+    worker_profiles: list[WorkerProfileConfig] = field(default_factory=list)
+    codex_home: Path = field(
+        default_factory=lambda: _path("${ISSUEFLEET_CODEX_HOME}")
+    )
+    container_image: str | None = None
     # Workspace-local state copied from the parent checkout into each fresh
     # worktree (copy-if-missing), e.g. .claude/settings.local.json, which is
     # untracked and would otherwise be absent there. Git-excluded in the
@@ -351,6 +417,10 @@ class Config:
     linear_api_key_file: Path = Path("~/.config/issuefleet/linear.key").expanduser()
     github_token_env: list[str] = field(default_factory=lambda: ["GITHUB_TOKEN", "GH_TOKEN"])
     github_token_file: Path = Path("~/.config/issuefleet/github.key").expanduser()
+    openai_api_key_env: str = "OPENAI_API_KEY"
+    openai_api_key_file: Path = field(
+        default_factory=lambda: Path("~/.config/issuefleet/openai.key").expanduser()
+    )
     # GitHub auth mode: "token" (PAT/machine user), "app" (GitHub App — PRs
     # open as <app>[bot]), or "auto" (app when app_id + key file exist).
     github_auth: str = "auto"
@@ -397,6 +467,199 @@ class Config:
                 return p
         raise ConfigError(f"no [[projects]] entry named {name!r}")
 
+    def runtime_for(self, project_name: str | None = None) -> WorkerRuntimeConfig:
+        overrides = self.project(project_name).agent if project_name else {}
+        base = self.agent_runtime
+        if overrides.get("runtime", base.runtime) != base.runtime:
+            base = WorkerRuntimeConfig(runtime=overrides["runtime"])
+        values = {
+            "runtime": base.runtime, "model": base.model,
+            "reasoning_effort": base.reasoning_effort, "args": list(base.args),
+            **overrides,
+        }
+        result = WorkerRuntimeConfig(**values)
+        result.args = list(result.args)
+        _validate_runtime(result, f"project {project_name!r}" if project_name else "[agent]")
+        if result.runtime == "claude" and self.claude_args:
+            _validate_runtime(
+                WorkerRuntimeConfig(result.runtime, result.model, result.reasoning_effort,
+                                    [*self.claude_args, *result.args]),
+                f"project {project_name!r} claude_args",
+            )
+        return result
+
+    def runtime_for_issue(self, project_name: str | None, issue) -> WorkerRuntimeSelection:
+        """Resolve a new issue's runtime from its description or profile label.
+
+        An exact ``IssueFleet: ...`` directive on the first nonblank description
+        line is the low-setup path. Profile labels remain an optional, searchable
+        UI. If both are present they must select the same settings. Without
+        either, the existing project/global default remains authoritative.
+        """
+        default = self.runtime_for(project_name)
+        default_source = "agent-default"
+        if project_name is not None and self.project(project_name).agent:
+            default_source = f"project:{project_name}"
+
+        description_selection = self._description_runtime(issue)
+        label_selection = self._label_runtime(issue)
+        if description_selection is not None:
+            if (
+                label_selection is not None
+                and label_selection.runtime != description_selection.runtime
+            ):
+                raise ConfigError(
+                    f"issue {issue.key}: Linear description directive selects "
+                    f"{_runtime_name(description_selection.runtime)}, but profile label "
+                    f"selects {_runtime_name(label_selection.runtime)}; remove one selection "
+                    "or make them agree"
+                )
+            if label_selection is not None:
+                description_selection.source += f"+{label_selection.source}"
+            return description_selection
+        if label_selection is not None:
+            return label_selection
+        return WorkerRuntimeSelection(default, None, default_source)
+
+    def _description_runtime(self, issue) -> WorkerRuntimeSelection | None:
+        """Parse the first nonblank description line, never arbitrary prose."""
+        line = next(
+            (
+                line.strip()
+                for line in str(getattr(issue, "description", "") or "").splitlines()
+                if line.strip()
+            ),
+            "",
+        )
+        natural = re.fullmatch(
+            r"(?:use\s+)?(?:worker|fleet)(?:\s*[:=]\s*|\s+)(.+)",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if natural is not None:
+            choice = natural.group(1).strip().rstrip(".!")
+            if not choice or not re.fullmatch(r"[A-Za-z0-9_. -]+", choice):
+                raise ConfigError(
+                    f"issue {issue.key}: invalid worker name in {line!r}"
+                )
+            tokens = ["worker=" + re.sub(r"[ _]+", "-", choice).casefold()]
+        else:
+            prefix, separator, body = line.partition(":")
+            if prefix.casefold() != "issuefleet":
+                return None
+            if not separator or not body.strip():
+                raise ConfigError(
+                    f"issue {issue.key}: empty IssueFleet directive; use "
+                    "'IssueFleet: worker=opus-5' or 'Use Worker Opus 5'"
+                )
+            try:
+                tokens = shlex.split(body, comments=False, posix=True)
+            except ValueError as e:
+                raise ConfigError(f"issue {issue.key}: invalid IssueFleet directive: {e}") from e
+
+        options: dict[str, str] = {}
+        aliases = {"fleet": "worker", "reasoning_effort": "effort"}
+        allowed = {"worker", "runtime", "model", "effort"}
+        for token in tokens:
+            key, equals, value = token.partition("=")
+            key = aliases.get(key.casefold(), key.casefold())
+            if not equals or key not in allowed or not value:
+                raise ConfigError(
+                    f"issue {issue.key}: invalid IssueFleet option {token!r}; use "
+                    "worker=<name> or runtime=<claude|codex> model=<id> effort=<level>"
+                )
+            if key in options:
+                raise ConfigError(
+                    f"issue {issue.key}: duplicate IssueFleet option {key!r}"
+                )
+            options[key] = value
+
+        if "worker" in options:
+            if len(options) != 1:
+                raise ConfigError(
+                    f"issue {issue.key}: worker=<name> cannot be combined with runtime, "
+                    "model, or effort"
+                )
+            name = options["worker"]
+            configured = {
+                profile.name.casefold(): profile for profile in self.worker_profiles
+            }.get(name.casefold())
+            if configured is not None:
+                runtime = _copy_runtime(configured.runtime)
+                profile = configured.name
+            else:
+                builtin = _BUILTIN_WORKER_PROFILES.get(name.casefold())
+                if builtin is None:
+                    available = sorted({
+                        *_BUILTIN_WORKER_PROFILES,
+                        *(profile.name for profile in self.worker_profiles),
+                    })
+                    raise ConfigError(
+                        f"issue {issue.key}: unknown worker {name!r}; available choices: "
+                        + ", ".join(available)
+                    )
+                runtime = _copy_runtime(builtin)
+                profile = name.casefold()
+            _validate_runtime(runtime, f"issue {issue.key} IssueFleet directive")
+            return WorkerRuntimeSelection(
+                runtime, profile, f"linear-description:worker={name}"
+            )
+
+        if "runtime" not in options:
+            raise ConfigError(
+                f"issue {issue.key}: IssueFleet directive requires worker=<name> or runtime="
+            )
+        runtime = WorkerRuntimeConfig(
+            runtime=options["runtime"].casefold(),
+            model=options.get("model"),
+            reasoning_effort=options.get("effort", "").casefold() or None,
+        )
+        _validate_runtime(runtime, f"issue {issue.key} IssueFleet directive")
+        return WorkerRuntimeSelection(runtime, None, "linear-description:explicit")
+
+    def _label_runtime(self, issue) -> WorkerRuntimeSelection | None:
+        """Resolve the optional label UI by immutable group and label IDs."""
+        if not self.worker_profiles:
+            return None
+
+        profiles_by_label = {profile.label_id: profile for profile in self.worker_profiles}
+        for label in getattr(issue, "label_details", []):
+            if label.id in profiles_by_label and label.group_id != self.profile_label_group_id:
+                raise ConfigError(
+                    f"issue {issue.key}: configured worker profile label {label.name!r} "
+                    f"({label.id}) belongs to group {label.group_id!r}, expected "
+                    f"{self.profile_label_group_id!r}"
+                )
+
+        labels = [
+            label for label in getattr(issue, "label_details", [])
+            if label.group_id == self.profile_label_group_id
+        ]
+        if not labels:
+            return None
+        if len(labels) > 1:
+            shown = ", ".join(f"{label.name} ({label.id})" for label in labels)
+            raise ConfigError(
+                f"issue {issue.key}: multiple labels from worker profile group "
+                f"{self.profile_label_group_id!r}: {shown}"
+            )
+
+        label = labels[0]
+        profile = profiles_by_label.get(label.id)
+        if profile is None:
+            raise ConfigError(
+                f"issue {issue.key}: Linear worker profile label {label.name!r} "
+                f"({label.id}) has no [[agent.profiles]] mapping"
+            )
+        runtime = _copy_runtime(profile.runtime)
+        return WorkerRuntimeSelection(runtime, profile.name, f"linear-label:{label.name}")
+
+    def configured_worker_runtimes(self) -> list[WorkerRuntimeConfig]:
+        """All defaults and selectable profiles that a new worker can use."""
+        runtimes = [self.runtime_for(p.name) for p in self.projects]
+        runtimes.extend(p.runtime for p in self.worker_profiles)
+        return runtimes
+
     def added_projects_path(self) -> Path:
         """The drop-in file runtime-added projects are persisted to and reloaded
         from. Under state_dir by default (writable in every deployment), never
@@ -429,6 +692,7 @@ _PATH_VARS = {
     # never copied — a snapshot's OAuth token is revoked when the host
     # rotates its own.
     "ISSUEFLEET_CLAUDE_CONFIG": "~/.config/claude-container/config",
+    "ISSUEFLEET_CODEX_HOME": "~/.config/issuefleet/codex",
 }
 
 
@@ -473,6 +737,111 @@ def _parse_worker_env(table: object, source: str) -> dict[str, EnvSource]:
 
 
 _ADVISOR_KINDS = ("conservative", "claude")
+
+
+def _optional_string(value, where: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip() or any(c in value for c in "\n\r\x00"):
+        raise ConfigError(f"{where}: expected a non-empty single-line string")
+    return value
+
+
+def _string_args(value, where: str) -> list[str]:
+    if not isinstance(value, list) or any(
+        not isinstance(v, str) or "\x00" in v for v in value
+    ):
+        raise ConfigError(f"{where}: expected an array of strings")
+    return list(value)
+
+
+def _validate_runtime(runtime: WorkerRuntimeConfig, where: str) -> None:
+    if runtime.runtime not in ("claude", "codex"):
+        raise ConfigError(f"{where}: runtime must be claude or codex")
+    efforts = ("low", "medium", "high", "xhigh", "max")
+    if runtime.reasoning_effort is not None and runtime.reasoning_effort not in efforts:
+        raise ConfigError(f"{where}: reasoning_effort must be one of {efforts}")
+    from issuefleet.agent_runtime.runtimes import validate_runtime_args
+
+    try:
+        validate_runtime_args(runtime.runtime, runtime.args, runtime.model, runtime.reasoning_effort)
+    except ValueError as e:
+        raise ConfigError(f"{where}: {e}") from e
+
+
+def _runtime_name(runtime: WorkerRuntimeConfig) -> str:
+    """Compact, unambiguous runtime name for selection diagnostics."""
+    parts = [runtime.runtime, runtime.model or "runtime-default"]
+    if runtime.reasoning_effort:
+        parts.append(runtime.reasoning_effort)
+    return "/".join(parts)
+
+
+def _runtime_overrides(table, where: str) -> dict:
+    if not isinstance(table, dict):
+        raise ConfigError(f"{where}: expected a table")
+    _reject_secrets(table, where)
+    unknown = set(table) - {"runtime", "model", "reasoning_effort", "args"}
+    if unknown:
+        raise ConfigError(f"{where}: unknown runtime setting(s): {', '.join(sorted(unknown))}")
+    result = {}
+    for key in ("runtime", "model", "reasoning_effort"):
+        if key in table:
+            result[key] = _optional_string(table[key], f"{where}.{key}")
+    if "args" in table:
+        result["args"] = _string_args(table["args"], f"{where}.args")
+    if "runtime" in result and result["runtime"] not in ("claude", "codex"):
+        raise ConfigError(f"{where}: runtime must be claude or codex")
+    return result
+
+
+def _parse_worker_profiles(agent: dict, source: str) -> tuple[str | None, list[WorkerProfileConfig]]:
+    raw_profiles = agent.get("profiles", [])
+    if not isinstance(raw_profiles, list):
+        raise ConfigError(f"{source} [agent].profiles: expected an array of tables")
+    group_id = _optional_string(
+        agent.get("profile_label_group_id"), f"{source} [agent].profile_label_group_id"
+    )
+    if raw_profiles and group_id is None:
+        raise ConfigError(
+            f"{source} [agent]: profile_label_group_id is required when profiles are configured"
+        )
+
+    profiles: list[WorkerProfileConfig] = []
+    names: set[str] = set()
+    label_ids: set[str] = set()
+    for index, raw in enumerate(raw_profiles, 1):
+        where = f"{source} [[agent.profiles]] #{index}"
+        if not isinstance(raw, dict):
+            raise ConfigError(f"{where}: expected a table")
+        _reject_secrets(raw, where)
+        unknown = set(raw) - {
+            "name", "label_id", "runtime", "model", "reasoning_effort", "args"
+        }
+        if unknown:
+            raise ConfigError(
+                f"{where}: unknown setting(s): {', '.join(sorted(unknown))}"
+            )
+        name = _optional_string(raw.get("name"), f"{where}.name")
+        label_id = _optional_string(raw.get("label_id"), f"{where}.label_id")
+        if name is None or label_id is None:
+            missing = "name" if name is None else "label_id"
+            raise ConfigError(f"{where}: {missing} is required")
+        if name.casefold() in names:
+            raise ConfigError(f"{where}: duplicate profile name {name!r}")
+        if label_id in label_ids:
+            raise ConfigError(f"{where}: duplicate profile label_id {label_id!r}")
+        if "runtime" not in raw or "model" not in raw:
+            raise ConfigError(f"{where}: runtime and model are required")
+        runtime = WorkerRuntimeConfig(**_runtime_overrides(
+            {k: raw[k] for k in ("runtime", "model", "reasoning_effort", "args") if k in raw},
+            where,
+        ))
+        _validate_runtime(runtime, where)
+        profiles.append(WorkerProfileConfig(name=name, label_id=label_id, runtime=runtime))
+        names.add(name.casefold())
+        label_ids.add(label_id)
+    return group_id, profiles
 _SECURITY_MODES = ("block", "warn", "off")
 _DEEP_SCAN_KINDS = ("off", "claude")
 
@@ -495,6 +864,9 @@ def _parse_security(table: dict, source: str) -> SecurityConfig:
 
 
 def _parse_fleet_manager(table: dict, source: str) -> FleetManagerConfig:
+    unknown = set(table) - set(FleetManagerConfig.__dataclass_fields__)
+    if unknown:
+        raise ConfigError(f"{source} [fleet_manager]: unknown setting(s): {', '.join(sorted(unknown))}")
     fm = FleetManagerConfig(
         enabled=bool(table.get("enabled", False)),
         base_url=str(table.get("base_url", "")),
@@ -504,7 +876,26 @@ def _parse_fleet_manager(table: dict, source: str) -> FleetManagerConfig:
         report_interval_s=int(table.get("report_interval_s", 3600)),
         assign_goals=bool(table.get("assign_goals", True)),
         advisor=str(table.get("advisor", "conservative")),
+        provider=table.get("provider", "anthropic"),
+        model=_optional_string(table.get("model"), f"{source} [fleet_manager].model"),
+        reasoning_effort=_optional_string(
+            table.get("reasoning_effort"), f"{source} [fleet_manager].reasoning_effort"
+        ),
+        max_output_tokens=table.get("max_output_tokens"),
+        max_turns=table.get("max_turns", 12),
     )
+    if fm.provider not in ("anthropic", "openai"):
+        raise ConfigError(f"{source} [fleet_manager]: provider must be anthropic or openai")
+    efforts = ("low", "medium", "high", "max") if fm.provider == "anthropic" else (
+        "low", "medium", "high", "xhigh", "max"
+    )
+    if fm.reasoning_effort is not None and fm.reasoning_effort not in efforts:
+        raise ConfigError(f"{source} [fleet_manager]: invalid reasoning_effort for {fm.provider}")
+    if fm.provider == "anthropic" and fm.reasoning_effort is not None:
+        raise ConfigError(f"{source} [fleet_manager]: reasoning_effort is supported by openai only")
+    for name, value in (("max_turns", fm.max_turns), ("max_output_tokens", fm.max_output_tokens)):
+        if value is not None and (type(value) is not int or value < 1):
+            raise ConfigError(f"{source} [fleet_manager]: {name} must be a positive integer")
     if "api_key_env" in table:
         fm.api_key_env = str(table["api_key_env"])
     if "api_key_file" in table:
@@ -671,6 +1062,7 @@ def parse_project(p: dict, where: str) -> ProjectConfig:
         state_done=p.get("state_done") or "Done",
         delete_remote_branch=bool(p.get("delete_remote_branch", True)),
         max_workers=max_workers,
+        agent=_runtime_overrides(p.get("agent", {}), f"{where}.agent"),
     )
 
 
@@ -712,6 +1104,15 @@ def project_to_toml(p: ProjectConfig) -> str:
     lines.append(f"delete_remote_branch = {str(p.delete_remote_branch).lower()}")
     if p.max_workers is not None:
         lines.append(f"max_workers = {p.max_workers}")
+    if p.agent:
+        fields = []
+        for key, value in p.agent.items():
+            rendered = (
+                "[" + ", ".join(_toml_str(v) for v in value) + "]"
+                if isinstance(value, list) else _toml_str(value)
+            )
+            fields.append(f"{key} = {rendered}")
+        lines.append("agent = { " + ", ".join(fields) + " }")
     return "\n".join(lines) + "\n"
 
 
@@ -785,8 +1186,14 @@ def _merge_added_projects(cfg: Config) -> None:
                 "config.toml entry", path, p.name
             )
             continue
-        known.add(p.name)
         cfg.projects.append(p)
+        try:
+            cfg.runtime_for(p.name)
+        except ConfigError as e:
+            cfg.projects.pop()
+            log.warning("skipping invalid project in drop-in %s: %s", path, e)
+            continue
+        known.add(p.name)
 
 
 def parse(data: dict, source: str = "<config>") -> Config:
@@ -812,6 +1219,19 @@ def parse(data: dict, source: str = "<config>") -> Config:
             raise ConfigError(f"{source}: [{name}] must be a table")
         _reject_secrets(table, f"{source} [{name}]")
 
+    agent_keys = {
+        "runtime", "model", "reasoning_effort", "args", "max_auto_turns", "max_restarts",
+        "profile_label_group_id", "profiles",
+        "claude_args", "copy_from_repo", "launcher_args", "mount_sibling_git",
+        "claude_container", "container_config_dir", "container_image", "codex_home", "env",
+        # Older deployed configs contain this ignored launcher setting. Keep
+        # accepting it without changing the launcher's platform behavior.
+        "docker_platform",
+    }
+    unknown_agent = set(agent) - agent_keys
+    if unknown_agent:
+        raise ConfigError(f"{source} [agent]: unknown setting(s): {', '.join(sorted(unknown_agent))}")
+
     raw_projects = data.get("projects", [])
     if not raw_projects:
         raise ConfigError(f"{source}: at least one [[projects]] entry is required")
@@ -824,13 +1244,22 @@ def parse(data: dict, source: str = "<config>") -> Config:
     if len(set(names)) != len(names):
         raise ConfigError(f"{source}: duplicate [[projects]] name")
 
+    profile_label_group_id, worker_profiles = _parse_worker_profiles(agent, source)
+
     cfg = Config(
         projects=projects,
         poll_interval_s=int(daemon.get("poll_interval_s", 60)),
         max_workers=int(daemon.get("max_workers", 4)),
         max_auto_turns=int(agent.get("max_auto_turns", 50)),
         max_restarts=int(agent.get("max_restarts", 3)),
-        claude_args=list(agent.get("claude_args", [])),
+        claude_args=_string_args(agent.get("claude_args", []), f"{source} [agent].claude_args"),
+        agent_runtime=WorkerRuntimeConfig(**_runtime_overrides(
+            {k: agent[k] for k in ("runtime", "model", "reasoning_effort", "args") if k in agent},
+            f"{source} [agent]",
+        )),
+        profile_label_group_id=profile_label_group_id,
+        worker_profiles=worker_profiles,
+        container_image=_optional_string(agent.get("container_image"), f"{source} [agent].container_image"),
         copy_from_repo=list(
             agent.get("copy_from_repo", [".claude", ".claude-container-overlay"])
         ),
@@ -846,6 +1275,13 @@ def parse(data: dict, source: str = "<config>") -> Config:
         cfg.added_projects_file = _path(daemon["added_projects_file"])
     if "container_config_dir" in agent:
         cfg.container_config_dir = _path(agent["container_config_dir"])
+    if "codex_home" in agent:
+        cfg.codex_home = _path(_optional_string(agent["codex_home"], f"{source} [agent].codex_home"))
+    if not cfg.codex_home.is_absolute():
+        raise ConfigError(f"{source} [agent]: codex_home must be an absolute path")
+    cfg.runtime_for()
+    for project in projects:
+        cfg.runtime_for(project.name)
     cfg.worker_env = _parse_worker_env(agent.get("env", {}), source)
     if "linear_api_key_env" in creds:
         cfg.linear_api_key_env = creds["linear_api_key_env"]
@@ -856,6 +1292,10 @@ def parse(data: dict, source: str = "<config>") -> Config:
         cfg.github_token_env = [v] if isinstance(v, str) else list(v)
     if "github_token_file" in creds:
         cfg.github_token_file = _path(creds["github_token_file"])
+    if "openai_api_key_env" in creds:
+        cfg.openai_api_key_env = _optional_string(creds["openai_api_key_env"], "openai_api_key_env")
+    if "openai_api_key_file" in creds:
+        cfg.openai_api_key_file = _path(_optional_string(creds["openai_api_key_file"], "openai_api_key_file"))
     if "github_auth" in creds:
         if creds["github_auth"] not in ("auto", "token", "app"):
             raise ConfigError(f"{source}: github_auth must be auto, token, or app")

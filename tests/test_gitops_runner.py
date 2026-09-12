@@ -2,6 +2,8 @@
 and real tmux — the two host tools this container does have."""
 
 import shutil
+import json
+import base64
 import subprocess
 import sys
 import tempfile
@@ -15,6 +17,7 @@ from issuefleet import gitops
 from issuefleet.gitops import GitError, Gitops
 from issuefleet.model import WorkerRecord
 from issuefleet.runner import TmuxRunner
+from issuefleet.agent_runtime.turns import TurnState
 
 
 def run(args, cwd=None):
@@ -421,7 +424,7 @@ class GitopsTest(unittest.TestCase):
         common = subprocess.run(
             ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
             cwd=sib, capture_output=True, text=True).stdout.strip()
-        self.assertEqual(Path(common), (self.repo / ".git"))
+        self.assertEqual(Path(common).resolve(), (self.repo / ".git").resolve())
         # Commit + push-to-explicit-URL works from it, like the primary worktree.
         (sib / "patch.txt").write_text("upstream change")
         run(["git", "add", "."], cwd=sib)
@@ -578,10 +581,264 @@ class SiblingMountTest(unittest.TestCase):
         _sh.rmtree(self.root / "embedded" / ".git")  # sibling not cloned yet
         self.assertNotIn("--mount", self.runner.command(self._rec(), self._cfg()))
 
+    def test_codex_mounts_dedicated_home_and_encodes_exact_environment(self):
+        cfg, rec = self._cfg(), self._rec()
+        cfg.codex_home = self.root / "codex home"
+        rec.runtime = "codex"
+        cmd = self.runner.command(rec, cfg)
+        self.assertIn(str(cfg.codex_home.resolve()), cmd)
+        payload = json.loads(base64.b64decode(cmd[-1]))
+        self.assertEqual(payload, {
+            "argv": ["/workspace/.agent/bin/turnloop", "run"],
+            "env": {"CODEX_HOME": str(cfg.codex_home.resolve())},
+        })
+
+    def test_worker_state_takes_precedence_over_record_and_current_config(self):
+        from issuefleet.config import WorkerRuntimeConfig
+
+        cfg, rec = self._cfg(), self._rec()
+        cfg.agent_runtime = WorkerRuntimeConfig(runtime="codex")
+        # A legacy record remains Claude despite switching the fleet default.
+        self.assertEqual(self.runner.command(rec, cfg)[-2:],
+                         ["/workspace/.agent/bin/turnloop", "run"])
+        state = TurnState(session_uuid="s", runtime="codex")
+        agent_dir = Path(rec.worktree) / ".agent"
+        agent_dir.mkdir(parents=True)
+        state.save(agent_dir)
+        cmd = self.runner.command(rec, cfg)
+        self.assertIn(str(cfg.codex_home), cmd)
+
+    def test_image_override_reaches_launcher_not_container_argv(self):
+        cfg, rec = self._cfg(), self._rec()
+        cfg.container_image = "issuefleet-worker:codex"
+        cmd = self.runner.command(rec, cfg)
+        self.assertEqual(cmd[:3], ["env", "CLAUDE_IMAGE=issuefleet-worker:codex",
+                                   cfg.claude_container])
+
+    def test_persisted_codex_home_survives_configuration_edits(self):
+        cfg, rec = self._cfg(), self._rec()
+        rec.runtime = "codex"
+        rec.runtime_home = str(self.root / "original-home")
+        cfg.codex_home = self.root / "changed-home"
+        cmd = self.runner.command(rec, cfg)
+        payload = json.loads(base64.b64decode(cmd[-1]))
+        expected = str(Path(rec.runtime_home).resolve())
+        self.assertEqual(payload["env"], {"CODEX_HOME": expected})
+        self.assertIn(expected, cmd)
+        self.assertNotIn(str(cfg.codex_home), cmd)
+
+    def test_inner_argv_survives_the_real_launchers_word_splitting(self):
+        from issuefleet.runner import container_exec
+
+        expected = ["spaces in one arg", "$(touch nope)", "*?[abc]", '"quoted"', "line\nbreak"]
+        inner = [sys.executable, "-c", "import json,os,sys;print(json.dumps([sys.argv[1:],os.environ['FLEET_MARK']]))",
+                 *expected]
+        encoded = container_exec(inner, {"FLEET_MARK": "value with spaces"})
+        # This reproduces the installed launcher's unquoted $COMMAND expansion.
+        proc = subprocess.run(["sh", "-c", 'COMMAND="$1"; $COMMAND', "launcher", " ".join(encoded)],
+                              cwd=self.root, capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(proc.stdout), [expected, "value with spaces"])
+        self.assertFalse((self.root / "nope").exists())
+
+
+class ContainerStopTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name).resolve()
+        self.rec = WorkerRecord(
+            issue_id="i", issue_key="FUG-1", issue_title="t", issue_url="u", project="p",
+            repo=str(root / "repo"), branch="agent/test", worktree=str(root / "worker"),
+            base_ref="main", session_uuid="s", tmux_session="issuefleet-stop-test",
+        )
+        self.runner = TmuxRunner(root / "logs")
+
+    def test_restart_removes_orphan_before_launching_replacement(self):
+        from unittest import mock
+        from issuefleet import runner as mod
+
+        for running in (False, True):
+            with self.subTest(running=running):
+                events = []
+                def docker(args, **kwargs):
+                    events.append(("docker", args[0]))
+                    return subprocess.CompletedProcess(args, 0, "", "")
+                def tmux(args, **kwargs):
+                    events.append(("tmux", args[0]))
+                    return subprocess.CompletedProcess(args, 0, "", "")
+                orphan = {"old-worker": running}
+                with mock.patch.object(mod, "_worker_containers", side_effect=[orphan, orphan, {}, {}]), \
+                     mock.patch.object(mod, "_docker", side_effect=docker), \
+                     mock.patch.object(mod, "_tmux", side_effect=tmux), \
+                     mock.patch.object(mod.time, "sleep"), \
+                     mock.patch.object(self.runner, "command", return_value=["true"]), \
+                     mock.patch.object(self.runner, "alive", side_effect=[False, False, False, True]):
+                    self.runner.start(self.rec, Config(projects=[]))
+                expected = [("docker", "stop")] if running else []
+                self.assertEqual(events, expected + [("docker", "rm"), ("tmux", "kill-session"),
+                                                     ("tmux", "new-session")])
+
+    def test_restart_refuses_to_launch_when_orphan_survives_stop(self):
+        from unittest import mock
+        from issuefleet import runner as mod
+
+        with mock.patch.object(mod, "_worker_containers", return_value={"old-worker": True}), \
+             mock.patch.object(mod, "_docker", return_value=subprocess.CompletedProcess([], 0)), \
+             mock.patch.object(mod, "_tmux") as tmux, \
+             mock.patch.object(self.runner, "alive", return_value=False):
+            with self.assertRaisesRegex(mod.RunnerError, "still running or present"):
+                self.runner.start(self.rec, Config(projects=[]))
+        tmux.assert_not_called()
+
+    def test_restart_refuses_to_launch_when_container_state_is_unknown(self):
+        from unittest import mock
+        from issuefleet import runner as mod
+
+        with mock.patch.object(mod, "_worker_containers", side_effect=mod.RunnerError("Docker unavailable")), \
+             mock.patch.object(mod, "_tmux") as tmux, \
+             mock.patch.object(self.runner, "alive", return_value=False):
+            with self.assertRaisesRegex(mod.RunnerError, "Docker unavailable"):
+                self.runner.start(self.rec, Config(projects=[]))
+        tmux.assert_not_called()
+
+    def test_live_tmux_is_adopted_without_stopping_its_container(self):
+        from unittest import mock
+        from issuefleet import runner as mod
+
+        with mock.patch.object(mod, "_worker_containers") as containers, \
+             mock.patch.object(mod, "_tmux") as tmux, \
+             mock.patch.object(self.runner, "alive", return_value=True):
+            self.runner.start(self.rec, Config(projects=[]))
+        containers.assert_not_called()
+        tmux.assert_not_called()
+
+    def test_stops_docker_before_tmux_and_checks_for_late_writes(self):
+        from unittest import mock
+        from issuefleet import runner as mod
+
+        events = []
+        snapshots = iter([{"exact-id": True}, {}, {}])
+        def containers(rec):
+            events.append("inspect")
+            return next(snapshots)
+        def docker(args, **kwargs):
+            events.append(("docker", args))
+            return subprocess.CompletedProcess(args, 0, "", "")
+        def tmux(args, **kwargs):
+            events.append(("tmux", args))
+            return subprocess.CompletedProcess(args, 0, "", "")
+        with mock.patch.object(mod, "_worker_containers", side_effect=containers), \
+             mock.patch.object(mod, "_docker", side_effect=docker), \
+             mock.patch.object(mod, "_tmux", side_effect=tmux), \
+             mock.patch.object(self.runner, "alive", side_effect=[True, False]):
+            self.runner.stop(self.rec)
+        self.assertEqual(events, ["inspect", ("docker", ["stop", "--time", "10", "exact-id"]),
+                                  ("docker", ["rm", "--force", "exact-id"]),
+                                  "inspect", ("tmux", ["kill-session", "-t", "=issuefleet-stop-test"]),
+                                  "inspect"])
+
+    def test_created_container_is_removed_before_it_can_start(self):
+        from unittest import mock
+        from issuefleet import runner as mod
+
+        with mock.patch.object(mod, "_worker_containers", side_effect=[{"created-id": False}, {}, {}]), \
+             mock.patch.object(mod, "_docker", return_value=subprocess.CompletedProcess([], 0)) as docker, \
+             mock.patch.object(mod, "_tmux"), \
+             mock.patch.object(self.runner, "alive", side_effect=[True, False]):
+            self.runner.stop(self.rec)
+        docker.assert_called_once_with(["rm", "--force", "created-id"], check=False)
+
+    def test_starting_launcher_without_container_is_left_intact(self):
+        from unittest import mock
+        from issuefleet import runner as mod
+
+        with mock.patch.object(mod, "_worker_containers", return_value={}), \
+             mock.patch.object(mod, "_tmux") as tmux, \
+             mock.patch.object(self.runner, "alive", return_value=True):
+            with self.assertRaisesRegex(mod.RunnerError, "startup completes"):
+                self.runner.stop(self.rec)
+        tmux.assert_not_called()
+
+    def test_unconfirmed_docker_stop_does_not_kill_launcher(self):
+        from unittest import mock
+        from issuefleet import runner as mod
+
+        with mock.patch.object(mod, "_worker_containers", return_value={"exact-id": True}), \
+             mock.patch.object(mod, "_docker", return_value=subprocess.CompletedProcess([], 0)), \
+             mock.patch.object(mod, "_tmux") as tmux, \
+             mock.patch.object(self.runner, "alive", return_value=True):
+            with self.assertRaisesRegex(mod.RunnerError, "still running"):
+                self.runner.stop(self.rec)
+        tmux.assert_not_called()
+
+    def test_docker_unavailable_fails_closed(self):
+        from unittest import mock
+        from issuefleet import runner as mod
+
+        with mock.patch.object(mod, "_worker_containers", side_effect=mod.RunnerError("Docker unavailable")), \
+             mock.patch.object(mod, "_tmux") as tmux:
+            with self.assertRaisesRegex(mod.RunnerError, "Docker unavailable"):
+                self.runner.stop(self.rec)
+        tmux.assert_not_called()
+
+    def test_discovery_requires_exact_mount_and_launcher_name(self):
+        import hashlib
+        from unittest import mock
+        from issuefleet import runner as mod
+
+        path = self.rec.worktree
+        prefix = f"cc-worker-{hashlib.sha256(path.encode()).hexdigest()[:12]}-"
+        records = {
+            "own": {"Id": "own", "Name": f"/{prefix}1234", "Running": True,
+                    "Mounts": [{"Type": "bind", "Source": path, "Destination": "/workspace"}]},
+            "other": {"Id": "other", "Name": "/unrelated", "Running": True,
+                      "Mounts": [{"Type": "bind", "Source": path + "-other", "Destination": "/workspace"}]},
+        }
+        def docker(args, **kwargs):
+            self.assertEqual(args[0], "inspect")
+            return subprocess.CompletedProcess(args, 0, json.dumps(records[args[-1]]), "")
+        with mock.patch.object(mod, "_workspace_container_ids", return_value=set(records)), \
+             mock.patch.object(mod, "_docker", side_effect=docker):
+            self.assertEqual(mod._worker_containers(self.rec), {"own": True})
+            records["own"]["Name"] = "/operator-session"
+            with self.assertRaisesRegex(mod.RunnerError, "unrecognized container"):
+                mod._worker_containers(self.rec)
+
+    def test_disappearing_auto_removed_container_is_confirmed_absent(self):
+        from unittest import mock
+        from issuefleet import runner as mod
+
+        with mock.patch.object(mod, "_workspace_container_ids", side_effect=[{"gone"}, set()]), \
+             mock.patch.object(mod, "_docker", return_value=subprocess.CompletedProcess([], 1, "", "gone")):
+            self.assertEqual(mod._worker_containers(self.rec), {})
+
 
 @unittest.skipIf(shutil.which("tmux") is None, "tmux not available")
 class TmuxRunnerTest(unittest.TestCase):
     def setUp(self):
+        from unittest import mock
+
+        # These tests use a host sleep process in place of Docker. Container
+        # identity/termination is tested separately; never query a user's daemon.
+        self.container_removed = False
+
+        def containers(rec):
+            if not self.container_removed and self.runner.alive(rec):
+                return {"stub-container": False}
+            return {}
+
+        def docker(args, **kwargs):
+            self.assertEqual(args, ["rm", "--force", "stub-container"])
+            self.container_removed = True
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        container_probe = mock.patch("issuefleet.runner._worker_containers",
+                                     side_effect=containers)
+        container_probe.start()
+        self.addCleanup(container_probe.stop)
+        docker_stub = mock.patch("issuefleet.runner._docker", side_effect=docker)
+        docker_stub.start()
+        self.addCleanup(docker_stub.stop)
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         # A stub "claude-container" that just sleeps, so start/alive/stop are

@@ -8,6 +8,142 @@ its PR, merge; the worker is torn down and the next issue in the queue gets
 its slot. Works for any (Linear project → GitHub/GitLab repo) pair, several at
 once (a fleet can mix both forges), configured declaratively.
 
+## Choose the manager model and worker runtimes
+
+The fleet manager and coding workers are configured independently. The manager
+supports Anthropic or OpenAI's Responses API; workers run Claude Code or Codex
+inside their existing isolated containers. Existing configurations keep Claude.
+
+There are three distinct pieces:
+
+| Piece | Plain-English role | Model choice |
+| --- | --- | --- |
+| Daemon | Deterministic dispatcher that watches Linear and starts/stops work | No model |
+| Fleet manager | Optional Signal assistant overseeing the whole fleet | One fleet-wide provider/model |
+| Worker | One coding agent assigned to one Linear issue | Runtime/model selected per project or ticket |
+
+The worker **runtime** is the executable IssueFleet launches (`claude` or
+`codex`). Its **model** is the model that executable calls. One manager can use
+Astra while individual workers use Opus 5, Astra, or runtime defaults.
+
+For an Astra manager with Claude workers by default and Codex on one project:
+
+```toml
+[fleet_manager]
+enabled = true
+provider = "openai"
+model = "gpt-6-astra"
+reasoning_effort = "high"
+# Keep your existing base_url, board_project, and board_team settings here.
+
+[credentials]
+openai_api_key_env = "OPENAI_API_KEY"
+openai_api_key_file = "~/.config/issuefleet/openai.key"
+
+[agent]
+runtime = "claude"
+container_image = "issuefleet-worker:codex"
+
+[[projects]]
+name = "backend"
+linear_project = "Backend"
+repo = "~/repos/backend"
+claim = { strategy = "label", value = "agent" }
+
+[projects.agent]
+runtime = "codex"
+model = "gpt-6-astra"
+reasoning_effort = "high"
+```
+
+The manager key comes from the named environment variable, then the file; keep
+the file mode `600`. A Codex ChatGPT login is a separate credential and does not
+authenticate the manager API. An explicitly selected OpenAI manager requires its
+key at startup. `provider = "anthropic"` retains the existing Anthropic key lookup;
+omit `reasoning_effort` for that provider. Manager `max_turns` defaults to 12;
+`max_output_tokens` defaults to 32768 for OpenAI and 4096 for Anthropic.
+
+Worker `runtime`, `model`, `reasoning_effort`, and `args` are global defaults in
+`[agent]`, with overrides in `[projects.agent]`. Switching runtime resets the
+inherited model, effort, and arguments. A worker snapshots its selection and
+Codex home at creation, retaining them across restarts and release/adopt; changes
+apply to new workers. Legacy `claude_args` applies only to Claude workers.
+
+To choose a worker per issue with no label setup, put one directive on the
+first nonblank line of the Linear description:
+
+```text
+IssueFleet: worker=opus-5
+```
+
+The shortest form is equivalent and case-insensitive:
+
+```text
+worker opus 5
+```
+
+`worker astra`, `Worker: Codex Astra`, and `use worker opus 5` work the same
+way. `fleet` is accepted in place of `worker`.
+
+The built-in choices are `opus-5` (Claude Code with `claude-opus-5`), `astra`
+(Codex with `gpt-6-astra` at high effort), `claude`, and `codex`. The last two
+leave the model and effort to that runtime's defaults. For another model, use
+an explicit selection:
+
+```text
+IssueFleet: runtime=codex model=<model-id> effort=high
+```
+
+The selection must occupy the entire first nonblank line so examples or casual
+prose later in a ticket cannot change execution. Unknown or malformed choices
+fail before a worktree or container is created.
+
+For a visible, filterable picker, optionally create an exclusive label group
+such as **Worker profile**, add one label per allowed choice, and map their
+stable IDs:
+
+```toml
+[agent]
+runtime = "claude"                     # fallback when the issue has no selector
+profile_label_group_id = "<group UUID>"
+container_image = "issuefleet-worker:codex"
+
+[[agent.profiles]]
+name = "codex-astra"
+label_id = "<Codex Astra label UUID>"
+runtime = "codex"
+model = "gpt-6-astra"
+reasoning_effort = "high"
+
+[[agent.profiles]]
+name = "claude-opus"
+label_id = "<Claude Opus label UUID>"
+runtime = "claude"
+model = "claude-opus-5"
+```
+
+Run `issuefleet linear-labels` to print the group and label UUIDs. Select the
+profile before the issue is claimed. If a description directive and label are
+both present, they must resolve to identical settings. With neither, the project
+override or global default applies. A comment such as "Codex Astra" is ordinary
+task context and does not change execution. A worker persists the choice it
+started with, so later description, label, or config edits cannot silently
+switch an active conversation. Wind down and re-claim the issue to start under
+a different selection.
+
+The fleet manager remains fleet-wide configuration because one manager handles
+all issues. Configure it once under `[fleet_manager]`; a ticket cannot race
+other tickets by changing that shared process. `issuefleet status` and the
+manager's `list_workers` tool show its resolved provider/model. Status, the
+dashboard, claim updates, and `list_workers` show each worker's runtime, model,
+effort, profile, and selection source.
+
+Build the image containing both CLIs and authenticate the dedicated worker home
+using [the Codex runtime setup](docs/CODEX_RUNTIME.md), then restart the daemon.
+The Docker deployment mounts `${ISSUEFLEET_CODEX_HOME}` at the same absolute path
+in the daemon and workers. The manager's `advisor`, roadmap model, and security
+scanner retain their own independent settings.
+
 The forge is picked per project behind a narrow `Forge` port
 (`src/issuefleet/ports.py`): GitHub is the default, and GitLab slots in as a
 parallel implementation (`gitlab.py`) — merge requests stand in for pull
@@ -380,10 +516,12 @@ Setup:
 2. Create the top-level board as a Linear project and set `board_project` /
    `board_team`. To have recorded goals *worked* by the fleet, also list that
    project under `[[projects]]` with `claim.strategy = "agent"`.
-3. Set `[fleet_manager] enabled = true`. Provide an `ANTHROPIC_API_KEY` (or
-   `~/.config/issuefleet/anthropic.key`) to get the agentic manager above — the
-   same key also enables `advisor = "claude"` for worker-question triage. Both
-   fall back to their conservative, non-LLM behaviour without it.
+3. Set `[fleet_manager] enabled = true` and choose its `provider` and `model`.
+   For OpenAI, provide `OPENAI_API_KEY` or `~/.config/issuefleet/openai.key`;
+   the manager requires this key at startup. The default Anthropic provider
+   uses `ANTHROPIC_API_KEY` or `~/.config/issuefleet/anthropic.key`, also used
+   independently by `advisor = "claude"` for worker-question triage. Without
+   an Anthropic key, those components retain their conservative, non-LLM mode.
 4. `issuefleet doctor` verifies the key, the client, and the advisor; once the
    daemon is up, `issuefleet fleet` shows the Signal cursor and any pending
    escalations.

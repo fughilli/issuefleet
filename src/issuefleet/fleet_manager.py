@@ -33,7 +33,7 @@ from pathlib import Path
 
 from issuefleet import MARKER_PREFIX, marker
 from issuefleet.advisor import BlockedQuestion
-from issuefleet.agent import AgentError, Tool, run_agent
+from issuefleet.agent import AgentError, DEFAULT_MODEL, DEFAULT_OPENAI_MODEL, Tool, run_agent
 from issuefleet.mailbox import Mailbox
 from issuefleet.model import PHASE_ACTIVE
 from issuefleet.sigbot import SignalError
@@ -95,7 +95,7 @@ class FleetManager:
         self.signal = signal
         self.advisor = advisor
         self.registry = registry
-        # An Anthropic key turns the inbound path agentic (see _handle_inbound).
+        # A provider key turns the inbound path agentic (see _handle_inbound).
         # Absent, the deterministic dispatch below is the whole behaviour.
         self.agent_key = agent_key
         self._clock = clock
@@ -220,7 +220,7 @@ class FleetManager:
     def _handle_inbound(self, m, text: str) -> None:
         """Route one inbound Signal message.
 
-        The manager is an agent: with an Anthropic key it hands the message to a
+        The manager is an agent: with its provider key it hands the message to a
         tool loop that can inspect the fleet and act, then replies in plain
         English. _handle_scripted below is the fallback for a daemon with no key
         — a dispatch table that can only file goals and relay replies, which is
@@ -235,7 +235,17 @@ class FleetManager:
                 self.signal.react(m.id, _DONE)
                 return
             except AgentError as e:
-                log.warning("fleet manager: agent failed (%s); using scripted dispatch", e)
+                # A failed model request is not permission to interpret the
+                # input as a new goal or a reply to some other pending worker.
+                # A tool may also already have changed the board.
+                log.warning("fleet manager: agent failed; request not replayed (%s)", e)
+                self.signal.send(
+                    "The manager encountered an error. "
+                    + ("Some actions may have completed; check the board before retrying. "
+                       if e.tools_executed else "No actions were attempted. ")
+                    + "I have not replayed your request."
+                )
+                return
         self._handle_scripted(m, text)
         # Only on the success path: a raised handler leaves 👀 standing, which
         # reads correctly as "seen, but stuck".
@@ -279,6 +289,11 @@ class FleetManager:
                 f"Message from {m.author or 'the operator'} in the Signal group:\n\n{text}"
             ),
             tools=self._agent_tools(m),
+            provider=self.fm.provider,
+            model=self.fm.model,
+            reasoning_effort=self.fm.reasoning_effort,
+            max_tokens=self.fm.max_output_tokens,
+            max_turns=self.fm.max_turns,
         )
         if reply:
             self.signal.send(reply)
@@ -317,15 +332,25 @@ class FleetManager:
 
         def list_workers(_):
             workers = self.registry.all()
+            manager_model = self.fm.model or (
+                DEFAULT_OPENAI_MODEL if self.fm.provider == "openai" else DEFAULT_MODEL
+            )
+            lines = [
+                f"manager provider={self.fm.provider} model={manager_model} "
+                f"reasoning_effort={self.fm.reasoning_effort or 'provider-default'}"
+            ]
             if not workers:
-                return "No workers are registered."
-            lines = []
+                lines.append("No workers are registered.")
+                return "\n".join(lines)
             for w in workers:
                 pending = [
                     p for p in self.state["pending"] if p["issue_key"].lower() == w.issue_key.lower()
                 ]
                 lines.append(
                     f"{w.issue_key} [{w.project}] phase={w.phase} "
+                    f"runtime={w.runtime} model={w.model or 'runtime-default'} "
+                    f"reasoning_effort={w.reasoning_effort or 'runtime-default'} "
+                    f"profile={w.runtime_profile or 'default'} source={w.runtime_source} "
                     f"restarts={w.restarts} branch={w.branch} "
                     f"PR={('#' + str(w.pr_number)) if w.pr_number else 'none'} "
                     f"awaiting_human={'yes' if pending else 'no'} — {w.issue_title}"
@@ -474,8 +499,9 @@ class FleetManager:
             "required": ["issue_key"],
         }
         return [
-            Tool("list_workers", "Every registered worker: issue, project, phase, turn, "
-                 "branch, PR, and whether it is waiting on a human answer.",
+            Tool("list_workers", "The manager provider/model and every registered worker: "
+                 "issue, project, runtime/model/profile, phase, branch, PR, and whether it "
+                 "is waiting on a human answer.",
                  {"type": "object", "properties": {}}, list_workers),
             Tool("list_open_issues",
                  "Open issues in a project. Omit 'project' for the top-level goals "

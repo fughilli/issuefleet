@@ -13,7 +13,7 @@ import time
 from issuefleet import MARKER_PREFIX, oauth
 from issuefleet.config import ProjectConfig
 from issuefleet.httpx import ApiError, urllib_transport
-from issuefleet.model import Comment, Issue
+from issuefleet.model import Comment, Issue, IssueLabel
 
 log = logging.getLogger("issuefleet.linear")
 
@@ -32,7 +32,7 @@ _ISSUE_FIELDS = """
     priority
     createdAt
     state { name type }
-    labels { nodes { name } }
+    labels { nodes { id name parent { id name } } }
     assignee { id }
     team { id }
     project { id }
@@ -44,6 +44,7 @@ class LinearError(Exception):
 
 
 def _to_issue(node: dict) -> Issue:
+    labels = node.get("labels", {}).get("nodes", [])
     return Issue(
         id=node["id"],
         key=node["identifier"],
@@ -53,7 +54,16 @@ def _to_issue(node: dict) -> Issue:
         priority=int(node.get("priority") or 0),
         state_name=node["state"]["name"],
         state_type=node["state"]["type"],
-        labels=[l["name"] for l in node.get("labels", {}).get("nodes", [])],
+        labels=[label["name"] for label in labels],
+        label_details=[
+            IssueLabel(
+                id=label.get("id", ""),
+                name=label["name"],
+                group_id=(label.get("parent") or {}).get("id"),
+                group_name=(label.get("parent") or {}).get("name"),
+            )
+            for label in labels
+        ],
         assignee_id=(node.get("assignee") or {}).get("id"),
         delegate_id=(node.get("delegate") or {}).get("id"),
         created_at=node.get("createdAt", ""),
@@ -473,6 +483,25 @@ class LinearTracker:
             lid = by_name.get(name.lower())
             (ids.append(lid) if lid else unknown.append(name))
         return ids, unknown
+
+    def workspace_labels(self) -> list[dict]:
+        """Return every workspace label with the IDs needed by worker profiles."""
+        nodes: list[dict] = []
+        after = None
+        while True:
+            data = self.client.graphql(
+                """query($after: String) {
+                     issueLabels(first: 250, after: $after) {
+                       nodes { id name isGroup parent { id name } }
+                       pageInfo { hasNextPage endCursor }
+                     }
+                   }""",
+                {"after": after},
+            )["issueLabels"]
+            nodes.extend(data["nodes"])
+            if not data["pageInfo"]["hasNextPage"]:
+                return nodes
+            after = data["pageInfo"]["endCursor"]
 
     def find_issue_by_marker(self, needle: str) -> Issue | None:
         """Look for an existing issue whose description carries this marker,
