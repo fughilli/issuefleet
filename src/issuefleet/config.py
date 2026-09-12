@@ -531,7 +531,11 @@ class Config:
             ),
             "",
         )
-        natural = re.fullmatch(r"use\s+worker\s+(.+)", line, flags=re.IGNORECASE)
+        natural = re.fullmatch(
+            r"(?:use\s+)?(?:worker|fleet)(?:\s*[:=]\s*|\s+)(.+)",
+            line,
+            flags=re.IGNORECASE,
+        )
         if natural is not None:
             choice = natural.group(1).strip().rstrip(".!")
             if not choice or not re.fullmatch(r"[A-Za-z0-9_. -]+", choice):

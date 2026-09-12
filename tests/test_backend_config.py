@@ -103,8 +103,10 @@ class BackendConfigTest(unittest.TestCase):
         cases = (
             ("IssueFleet: worker=opus-5\n\nFix it.", "claude", "claude-opus-5", None),
             ("Use Worker Opus 5\n\nFix it.", "claude", "claude-opus-5", None),
+            ("worker opus 5\n\nFix it.", "claude", "claude-opus-5", None),
             ("\nIssueFleet: fleet=astra\n\nFix it.", "codex", "gpt-6-astra", "high"),
             ("use worker Codex Astra.\n\nFix it.", "codex", "gpt-6-astra", "high"),
+            ("WORKER: ASTRA!\n\nFix it.", "codex", "gpt-6-astra", "high"),
             ("IssueFleet: worker=codex", "codex", None, None),
         )
         for description, runtime, model, effort in cases:

@@ -114,11 +114,14 @@ IssueFleet: worker=astra
 Implement the requested change.
 ```
 
-You can use a case-insensitive plain-English first line instead:
+You can use a shorter case-insensitive first line instead:
 
 ```text
-Use Worker Opus 5
+worker opus 5
 ```
+
+Common forms such as `worker astra`, `Worker: Codex Astra`, `use worker opus
+5`, and `fleet opus 5` are equivalent.
 
 Built-in choices require no Linear label or profile configuration:
 
