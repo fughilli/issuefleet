@@ -1,4 +1,4 @@
-"""Local end-to-end manager/provider and Linear worker-profile matrix.
+"""Local end-to-end manager/provider and Linear worker-selection matrix.
 
 Real config, manager HTTP, tool dispatch, git worktrees/remotes, staging,
 turnloop/agentctl subprocesses, mailboxes, registry and lifecycle. The external
@@ -26,7 +26,6 @@ from issuefleet.agent_runtime.turns import TurnState
 from issuefleet.fleet_manager import FleetManager
 from issuefleet.gitops import Gitops
 from issuefleet.mailbox import Mailbox
-from issuefleet.model import IssueLabel
 from issuefleet.reconcile import Reconciler
 from issuefleet.registry import Registry
 
@@ -162,7 +161,7 @@ def model_server(provider):
 
 
 class BackendEndToEndTest(unittest.TestCase):
-    def test_manager_provider_and_linear_worker_profile_matrix(self):
+    def test_manager_provider_and_linear_worker_selection_matrix(self):
         for provider in ("anthropic", "openai"):
             with self.subTest(manager=provider), tempfile.TemporaryDirectory() as temp:
                 self.run_lifecycle(Path(temp), provider)
@@ -194,12 +193,6 @@ class BackendEndToEndTest(unittest.TestCase):
             "agent": {
                 "runtime": "claude", "model": "claude-test",
                 "args": ["--allowedTools", "Bash"],
-                "profile_label_group_id": "group-worker-profile",
-                "profiles": [{
-                    "name": "codex-astra", "label_id": "label-codex-astra",
-                    "runtime": "codex", "model": "gpt-6-astra",
-                    "reasoning_effort": "high",
-                }],
             },
             "projects": projects,
             "fleet_manager": {"enabled": True, "provider": provider,
@@ -212,16 +205,16 @@ class BackendEndToEndTest(unittest.TestCase):
         signal.user_says("baseline", id="baseline")
         manager.tick()
         for n, runtime in enumerate(("claude", "codex"), 1):
-            labels = [] if runtime == "claude" else [IssueLabel(
-                "label-codex-astra", "Codex Astra", "group-worker-profile", "Worker profile"
-            )]
-            tracker.add_issue(make_issue(n, project_id=runtime, label_details=labels))
+            description = "Please fix it." if runtime == "claude" else (
+                "IssueFleet: worker=astra\n\nPlease fix it."
+            )
+            tracker.add_issue(make_issue(n, project_id=runtime, description=description))
         reconciler = Reconciler(cfg, registry, tracker, forges, Gitops(), runner)
         reconciler.tick()
         self.assertEqual(len(registry.all()), 2)
         records = [registry.get(f"issue-{n}") for n in (1, 2)]
         self.assertEqual([rec.runtime for rec in records], ["claude", "codex"])
-        self.assertEqual([rec.runtime_profile for rec in records], [None, "codex-astra"])
+        self.assertEqual([rec.runtime_profile for rec in records], [None, "astra"])
 
         def step(rec, expected=0):
             env = {**os.environ, "PATH": str(binary_dir) + os.pathsep + os.environ.get("PATH", ""),
@@ -290,9 +283,9 @@ class BackendEndToEndTest(unittest.TestCase):
         archive = registry.archive_dir_for(codex)
         self.assertEqual(TurnState.load(archive).runtime_session_id, sessions[codex.issue_id][1])
         self.assertTrue((archive / "logs/turn-0002.jsonl").is_file())
-        # Existing workers keep their runtime even if the selected profile changes.
-        cfg.worker_profiles[0].runtime = config.WorkerRuntimeConfig(
-            "claude", "different-model"
+        # Existing workers keep their runtime even if the ticket directive changes.
+        tracker.issues[codex.issue_id].description = (
+            "IssueFleet: worker=opus-5\n\nPlease fix it."
         )
         reconciler.enqueue_adopt(codex.issue_key)
         reconciler.tick()

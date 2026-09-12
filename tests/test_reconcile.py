@@ -114,6 +114,17 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("Codex Future", errors[0])
 
+    def test_invalid_description_directive_fails_before_claim_side_effects(self):
+        self.tracker.add_issue(make_issue(description="IssueFleet: worker=future\n\nFix it."))
+        self.rec.tick()
+        self.rec.tick()
+        self.assertIsNone(self.worker())
+        self.assertEqual(self.git.worktrees, [])
+        self.assertEqual(self.git.fetched, [])
+        errors = [body for _, body in self.tracker.posted if "could not select a worker" in body]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("unknown worker 'future'", errors[0])
+
     def test_claim_prefetches_origin_with_forge_token(self):
         w = self.claim_one()
         # Exactly one fetch, on the project repo, carrying the forge's auth so

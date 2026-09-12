@@ -14,6 +14,18 @@ The fleet manager and coding workers are configured independently. The manager
 supports Anthropic or OpenAI's Responses API; workers run Claude Code or Codex
 inside their existing isolated containers. Existing configurations keep Claude.
 
+There are three distinct pieces:
+
+| Piece | Plain-English role | Model choice |
+| --- | --- | --- |
+| Daemon | Deterministic dispatcher that watches Linear and starts/stops work | No model |
+| Fleet manager | Optional Signal assistant overseeing the whole fleet | One fleet-wide provider/model |
+| Worker | One coding agent assigned to one Linear issue | Runtime/model selected per project or ticket |
+
+The worker **runtime** is the executable IssueFleet launches (`claude` or
+`codex`). Its **model** is the model that executable calls. One manager can use
+Astra while individual workers use Opus 5, Astra, or runtime defaults.
+
 For an Astra manager with Claude workers by default and Codex on one project:
 
 ```toml
@@ -57,12 +69,33 @@ inherited model, effort, and arguments. A worker snapshots its selection and
 Codex home at creation, retaining them across restarts and release/adopt; changes
 apply to new workers. Legacy `claude_args` applies only to Claude workers.
 
-To choose per issue in Linear, create an exclusive label group such as **Worker
-profile**, add one label per allowed choice, and map their stable IDs:
+To choose a worker per issue with no label setup, put one directive on the
+first nonblank line of the Linear description:
+
+```text
+IssueFleet: worker=opus-5
+```
+
+The built-in choices are `opus-5` (Claude Code with `claude-opus-5`), `astra`
+(Codex with `gpt-6-astra` at high effort), `claude`, and `codex`. The last two
+leave the model and effort to that runtime's defaults. For another model, use
+an explicit selection:
+
+```text
+IssueFleet: runtime=codex model=<model-id> effort=high
+```
+
+`fleet=` is accepted as an alias for `worker=`. The exact directive must come
+first so examples or casual prose later in a ticket cannot change execution.
+Unknown or malformed choices fail before a worktree or container is created.
+
+For a visible, filterable picker, optionally create an exclusive label group
+such as **Worker profile**, add one label per allowed choice, and map their
+stable IDs:
 
 ```toml
 [agent]
-runtime = "claude"                     # fallback when the issue has no profile label
+runtime = "claude"                     # fallback when the issue has no selector
 profile_label_group_id = "<group UUID>"
 container_image = "issuefleet-worker:codex"
 
@@ -81,18 +114,20 @@ model = "claude-opus-5"
 ```
 
 Run `issuefleet linear-labels` to print the group and label UUIDs. Select the
-profile by changing the issue's label before it is claimed; a comment such as
-"Codex Astra" is ordinary task context and does not change execution. No profile
-label preserves the project override or global default. A worker persists the
-choice it started with, so changing a label cannot silently switch an active
-conversation. Wind down and re-claim the issue to start a new worker under a
-different profile. An unmapped or ambiguous label in the configured group fails
-before a worktree or container is created and is reported on the Linear issue.
+profile before the issue is claimed. If a description directive and label are
+both present, they must resolve to identical settings. With neither, the project
+override or global default applies. A comment such as "Codex Astra" is ordinary
+task context and does not change execution. A worker persists the choice it
+started with, so later description, label, or config edits cannot silently
+switch an active conversation. Wind down and re-claim the issue to start under
+a different selection.
 
 The fleet manager remains fleet-wide configuration because one manager handles
-all issues. `issuefleet status` and the manager's `list_workers` tool show its
-resolved provider/model. Status, the dashboard, claim updates, and `list_workers`
-show each worker's runtime, model, effort, profile, and selection source.
+all issues. Configure it once under `[fleet_manager]`; a ticket cannot race
+other tickets by changing that shared process. `issuefleet status` and the
+manager's `list_workers` tool show its resolved provider/model. Status, the
+dashboard, claim updates, and `list_workers` show each worker's runtime, model,
+effort, profile, and selection source.
 
 Build the image containing both CLIs and authenticate the dedicated worker home
 using [the Codex runtime setup](docs/CODEX_RUNTIME.md), then restart the daemon.

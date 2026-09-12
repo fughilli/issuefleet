@@ -98,6 +98,109 @@ class BackendConfigTest(unittest.TestCase):
             config.WorkerRuntimeConfig("codex", "gpt-6-astra", "high", []),
         )
 
+    def test_description_selects_builtin_worker_without_label_configuration(self):
+        cfg = config.parse(BASE)
+        cases = (
+            ("IssueFleet: worker=opus-5\n\nFix it.", "claude", "claude-opus-5", None),
+            ("\nIssueFleet: fleet=astra\n\nFix it.", "codex", "gpt-6-astra", "high"),
+            ("IssueFleet: worker=codex", "codex", None, None),
+        )
+        for description, runtime, model, effort in cases:
+            with self.subTest(description=description):
+                selected = cfg.runtime_for_issue(
+                    "app",
+                    Issue("i", "TEST-1", "Title", description, "", 0, "Todo", "unstarted"),
+                )
+                self.assertEqual(
+                    (selected.runtime.runtime, selected.runtime.model,
+                     selected.runtime.reasoning_effort),
+                    (runtime, model, effort),
+                )
+                self.assertTrue(selected.source.startswith("linear-description:"))
+
+    def test_description_accepts_explicit_runtime_model_and_effort(self):
+        selected = config.parse(BASE).runtime_for_issue(
+            "app",
+            Issue(
+                "i", "TEST-1", "Title",
+                "IssueFleet: runtime=codex model=gpt-custom effort=xhigh\n\nFix it.",
+                "", 0, "Todo", "unstarted",
+            ),
+        )
+        self.assertEqual(
+            selected.runtime,
+            config.WorkerRuntimeConfig("codex", "gpt-custom", "xhigh", []),
+        )
+        self.assertIsNone(selected.profile)
+        self.assertEqual(selected.source, "linear-description:explicit")
+
+    def test_description_can_select_configured_profile_by_name(self):
+        selected = config.parse(self.profile_data()).runtime_for_issue(
+            "app",
+            Issue(
+                "i", "TEST-1", "Title", "IssueFleet: worker=Codex-Astra",
+                "", 0, "Todo", "unstarted",
+            ),
+        )
+        self.assertEqual(selected.profile, "codex-astra")
+        self.assertEqual(
+            selected.runtime,
+            config.WorkerRuntimeConfig("codex", "gpt-6-astra", "high", []),
+        )
+
+    def test_only_first_nonblank_description_line_can_select_a_worker(self):
+        selected = config.parse(BASE).runtime_for_issue(
+            "app",
+            Issue(
+                "i", "TEST-1", "Title",
+                "Fix the parser.\n\nIssueFleet: worker=astra",
+                "", 0, "Todo", "unstarted",
+            ),
+        )
+        self.assertEqual(selected.runtime, config.WorkerRuntimeConfig())
+        self.assertEqual(selected.source, "agent-default")
+
+    def test_conflicting_description_and_label_fail_closed(self):
+        cfg = config.parse(self.profile_data())
+        issue = Issue(
+            "i", "TEST-1", "Title", "IssueFleet: worker=opus-5", "", 0,
+            "Todo", "unstarted", label_details=[IssueLabel(
+                "label-codex-astra", "Codex Astra", "group-worker-profile"
+            )],
+        )
+        with self.assertRaisesRegex(config.ConfigError, "description directive.*profile label"):
+            cfg.runtime_for_issue("app", issue)
+
+    def test_matching_description_and_label_preserve_both_sources(self):
+        cfg = config.parse(self.profile_data())
+        issue = Issue(
+            "i", "TEST-1", "Title", "IssueFleet: worker=astra", "", 0,
+            "Todo", "unstarted", label_details=[IssueLabel(
+                "label-codex-astra", "Codex Astra", "group-worker-profile"
+            )],
+        )
+        selected = cfg.runtime_for_issue("app", issue)
+        self.assertEqual(
+            selected.source,
+            "linear-description:worker=astra+linear-label:Codex Astra",
+        )
+
+    def test_invalid_description_directives_fail_closed(self):
+        cfg = config.parse(BASE)
+        for directive in (
+            "IssueFleet:",
+            "IssueFleet: worker=future",
+            "IssueFleet: model=gpt-custom",
+            "IssueFleet: worker=astra effort=low",
+            "IssueFleet: runtime=codex effort=turbo",
+            "IssueFleet: orchestrator=astra",
+        ):
+            issue = Issue(
+                "i", "TEST-1", "Title", directive, "", 0, "Todo", "unstarted"
+            )
+            with self.subTest(directive=directive), self.assertRaises(config.ConfigError):
+                cfg.runtime_for_issue("app", issue)
+
     def test_linear_profile_toml_shape_loads(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"

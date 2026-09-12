@@ -757,7 +757,8 @@ class Reconciler:
                 self._emit_activity_quietly(
                     evt.session_id,
                     {"type": "error", "body": f"IssueFleet could not select a worker: {e}. "
-                     "Fix the Linear profile label or fleet configuration, then delegate again."},
+                     "Fix the description directive, Linear profile label, or fleet "
+                     "configuration, then delegate again."},
                 )
                 self.pending_session_claims.pop(issue_id)
             except Exception:
@@ -2115,7 +2116,8 @@ class Reconciler:
                         issue.id,
                         f"worker-profile-error-{issue.id}",
                         f"⚠️ IssueFleet could not select a worker: {e}. "
-                        "Fix the Linear worker profile label or fleet configuration; "
+                        "Fix the IssueFleet description directive, Linear worker profile "
+                        "label, or fleet configuration; "
                         "the issue will be retried automatically.",
                     )
                 except Exception:
@@ -2127,7 +2129,7 @@ class Reconciler:
         self, issue: Issue, project: ProjectConfig, session=None,
         branch: str | None = None, origin: str | None = None,
     ) -> None:
-        # Validate the issue-level profile before fetch, worktree creation, or
+        # Validate the issue-level directive/profile before fetch, worktree creation, or
         # any other claim side effect. The exact selection is passed through to
         # provisioning so this claim cannot race a config or label refresh.
         selection = self.cfg.runtime_for_issue(project.name, issue)

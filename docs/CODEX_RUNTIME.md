@@ -104,12 +104,40 @@ effort and arguments for an existing conversation survive release/adopt.
 Runtime arguments also apply to interactive takeover, so use options supported
 by both interfaces. IssueFleet owns session selection and machine-output flags.
 
-## Select a worker profile in Linear
+## Select a worker in a Linear description
 
-Use a Linear label group for per-issue selection. Linear permits one label from
-a group on an issue, and IssueFleet also rejects multiple group members before
-claiming. Configure by immutable IDs so renaming a label does not change what it
-runs:
+Put the selection on the first nonblank line, before the task text:
+
+```text
+IssueFleet: worker=astra
+
+Implement the requested change.
+```
+
+Built-in choices require no Linear label or profile configuration:
+
+- `opus-5`: Claude Code with `claude-opus-5`
+- `astra`: Codex with `gpt-6-astra` and high reasoning effort
+- `claude`: Claude Code with its runtime-default model
+- `codex`: Codex with its runtime-default model
+
+`fleet=` is an alias for `worker=`. Use an explicit tuple for another model:
+
+```text
+IssueFleet: runtime=codex model=<model-id> effort=xhigh
+```
+
+Only the first nonblank line is parsed. Ordinary task prose and comments never
+change execution. An invalid directive fails before IssueFleet creates a
+worktree or container. The selected tuple is snapshotted for the worker, so an
+edit affects only a later claim.
+
+## Optional worker-profile labels
+
+Use a Linear label group when a visible, filterable picker is more useful than
+the description directive. Linear permits one label from a group on an issue,
+and IssueFleet also rejects multiple group members before claiming. Configure
+by immutable IDs so renaming a label does not change what it runs:
 
 ```sh
 issuefleet linear-labels
@@ -137,16 +165,19 @@ reasoning_effort = "medium"
 ```
 
 Add **Codex Astra** or **Codex Fast** to a Linear issue before applying the
-claim label, assignment, or delegation that starts it. With no worker profile
-label, the project/global default applies. Profile mappings require an explicit
-runtime and model. An unmapped label in the configured group is treated as a
-configuration error instead of silently running the fallback.
+claim label, assignment, or delegation that starts it. With no description
+directive or worker-profile label, the project/global default applies. When
+both selectors are present they must resolve to the same settings. Profile
+mappings require an explicit runtime and model. An unmapped label in the
+configured group is treated as a configuration error instead of silently
+running the fallback.
 
 The selected tuple and its source are persisted in both the worker state and
-registry. Label and config edits affect only future workers. `issuefleet status`,
-the dashboard, the Linear claim message, and the fleet manager expose the exact
-selection. The manager provider/model stays under `[fleet_manager]`; it is one
-fleet-wide orchestration loop and is not selected per issue.
+registry. Description, label, and config edits affect only future workers.
+`issuefleet status`, the dashboard, the Linear claim message, and the fleet
+manager expose the exact selection. The manager provider/model stays under
+`[fleet_manager]`; it is one fleet-wide orchestration loop and is not selected
+per issue.
 
 `issuefleet takeover KEY` runs `codex resume <recorded-thread-id>`. If a Codex
 worker never recorded a thread ID, takeover fails clearly instead of selecting

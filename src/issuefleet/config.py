@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shlex
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -123,6 +124,28 @@ class WorkerRuntimeSelection:
     runtime: WorkerRuntimeConfig
     profile: str | None
     source: str
+
+
+_BUILTIN_WORKER_PROFILES = {
+    # Friendly names for common zero-configuration choices. Generic runtime
+    # names retain the CLI's default model; named presets are fully explicit.
+    "claude": WorkerRuntimeConfig(runtime="claude"),
+    "codex": WorkerRuntimeConfig(runtime="codex"),
+    "opus-5": WorkerRuntimeConfig(runtime="claude", model="claude-opus-5"),
+    "claude-opus-5": WorkerRuntimeConfig(runtime="claude", model="claude-opus-5"),
+    "astra": WorkerRuntimeConfig(
+        runtime="codex", model="gpt-6-astra", reasoning_effort="high"
+    ),
+    "codex-astra": WorkerRuntimeConfig(
+        runtime="codex", model="gpt-6-astra", reasoning_effort="high"
+    ),
+}
+
+
+def _copy_runtime(runtime: WorkerRuntimeConfig) -> WorkerRuntimeConfig:
+    return WorkerRuntimeConfig(
+        runtime.runtime, runtime.model, runtime.reasoning_effort, list(runtime.args)
+    )
 
 
 @dataclass
@@ -466,19 +489,125 @@ class Config:
         return result
 
     def runtime_for_issue(self, project_name: str | None, issue) -> WorkerRuntimeSelection:
-        """Resolve a new issue's runtime from its Linear profile label.
+        """Resolve a new issue's runtime from its description or profile label.
 
-        Profiles are opt-in. Without them, or without a label from the configured
-        group, the existing project/global default remains authoritative. Linear
-        group membership and profile matching use immutable IDs; display names
-        are only used in operator-facing diagnostics.
+        An exact ``IssueFleet: ...`` directive on the first nonblank description
+        line is the low-setup path. Profile labels remain an optional, searchable
+        UI. If both are present they must select the same settings. Without
+        either, the existing project/global default remains authoritative.
         """
         default = self.runtime_for(project_name)
         default_source = "agent-default"
         if project_name is not None and self.project(project_name).agent:
             default_source = f"project:{project_name}"
+
+        description_selection = self._description_runtime(issue)
+        label_selection = self._label_runtime(issue)
+        if description_selection is not None:
+            if (
+                label_selection is not None
+                and label_selection.runtime != description_selection.runtime
+            ):
+                raise ConfigError(
+                    f"issue {issue.key}: Linear description directive selects "
+                    f"{_runtime_name(description_selection.runtime)}, but profile label "
+                    f"selects {_runtime_name(label_selection.runtime)}; remove one selection "
+                    "or make them agree"
+                )
+            if label_selection is not None:
+                description_selection.source += f"+{label_selection.source}"
+            return description_selection
+        if label_selection is not None:
+            return label_selection
+        return WorkerRuntimeSelection(default, None, default_source)
+
+    def _description_runtime(self, issue) -> WorkerRuntimeSelection | None:
+        """Parse the first nonblank description line, never arbitrary prose."""
+        line = next(
+            (
+                line.strip()
+                for line in str(getattr(issue, "description", "") or "").splitlines()
+                if line.strip()
+            ),
+            "",
+        )
+        prefix, separator, body = line.partition(":")
+        if prefix.casefold() != "issuefleet":
+            return None
+        if not separator or not body.strip():
+            raise ConfigError(
+                f"issue {issue.key}: empty IssueFleet directive; use "
+                "'IssueFleet: worker=opus-5'"
+            )
+        try:
+            tokens = shlex.split(body, comments=False, posix=True)
+        except ValueError as e:
+            raise ConfigError(f"issue {issue.key}: invalid IssueFleet directive: {e}") from e
+
+        options: dict[str, str] = {}
+        aliases = {"fleet": "worker", "reasoning_effort": "effort"}
+        allowed = {"worker", "runtime", "model", "effort"}
+        for token in tokens:
+            key, equals, value = token.partition("=")
+            key = aliases.get(key.casefold(), key.casefold())
+            if not equals or key not in allowed or not value:
+                raise ConfigError(
+                    f"issue {issue.key}: invalid IssueFleet option {token!r}; use "
+                    "worker=<name> or runtime=<claude|codex> model=<id> effort=<level>"
+                )
+            if key in options:
+                raise ConfigError(
+                    f"issue {issue.key}: duplicate IssueFleet option {key!r}"
+                )
+            options[key] = value
+
+        if "worker" in options:
+            if len(options) != 1:
+                raise ConfigError(
+                    f"issue {issue.key}: worker=<name> cannot be combined with runtime, "
+                    "model, or effort"
+                )
+            name = options["worker"]
+            configured = {
+                profile.name.casefold(): profile for profile in self.worker_profiles
+            }.get(name.casefold())
+            if configured is not None:
+                runtime = _copy_runtime(configured.runtime)
+                profile = configured.name
+            else:
+                builtin = _BUILTIN_WORKER_PROFILES.get(name.casefold())
+                if builtin is None:
+                    available = sorted({
+                        *_BUILTIN_WORKER_PROFILES,
+                        *(profile.name for profile in self.worker_profiles),
+                    })
+                    raise ConfigError(
+                        f"issue {issue.key}: unknown worker {name!r}; available choices: "
+                        + ", ".join(available)
+                    )
+                runtime = _copy_runtime(builtin)
+                profile = name.casefold()
+            _validate_runtime(runtime, f"issue {issue.key} IssueFleet directive")
+            return WorkerRuntimeSelection(
+                runtime, profile, f"linear-description:worker={name}"
+            )
+
+        if "runtime" not in options:
+            raise ConfigError(
+                f"issue {issue.key}: IssueFleet directive requires worker=<name> or runtime="
+            )
+        runtime = WorkerRuntimeConfig(
+            runtime=options["runtime"].casefold(),
+            model=options.get("model"),
+            reasoning_effort=options.get("effort", "").casefold() or None,
+        )
+        _validate_runtime(runtime, f"issue {issue.key} IssueFleet directive")
+        return WorkerRuntimeSelection(runtime, None, "linear-description:explicit")
+
+    def _label_runtime(self, issue) -> WorkerRuntimeSelection | None:
+        """Resolve the optional label UI by immutable group and label IDs."""
         if not self.worker_profiles:
-            return WorkerRuntimeSelection(default, None, default_source)
+            return None
 
         profiles_by_label = {profile.label_id: profile for profile in self.worker_profiles}
         for label in getattr(issue, "label_details", []):
@@ -494,7 +623,7 @@ class Config:
             if label.group_id == self.profile_label_group_id
         ]
         if not labels:
-            return WorkerRuntimeSelection(default, None, default_source)
+            return None
         if len(labels) > 1:
             shown = ", ".join(f"{label.name} ({label.id})" for label in labels)
             raise ConfigError(
@@ -509,12 +638,7 @@ class Config:
                 f"issue {issue.key}: Linear worker profile label {label.name!r} "
                 f"({label.id}) has no [[agent.profiles]] mapping"
             )
-        runtime = WorkerRuntimeConfig(
-            profile.runtime.runtime,
-            profile.runtime.model,
-            profile.runtime.reasoning_effort,
-            list(profile.runtime.args),
-        )
+        runtime = _copy_runtime(profile.runtime)
         return WorkerRuntimeSelection(runtime, profile.name, f"linear-label:{label.name}")
 
     def configured_worker_runtimes(self) -> list[WorkerRuntimeConfig]:
@@ -630,6 +754,14 @@ def _validate_runtime(runtime: WorkerRuntimeConfig, where: str) -> None:
         validate_runtime_args(runtime.runtime, runtime.args, runtime.model, runtime.reasoning_effort)
     except ValueError as e:
         raise ConfigError(f"{where}: {e}") from e
+
+
+def _runtime_name(runtime: WorkerRuntimeConfig) -> str:
+    """Compact, unambiguous runtime name for selection diagnostics."""
+    parts = [runtime.runtime, runtime.model or "runtime-default"]
+    if runtime.reasoning_effort:
+        parts.append(runtime.reasoning_effort)
+    return "/".join(parts)
 
 
 def _runtime_overrides(table, where: str) -> dict:
