@@ -114,6 +114,12 @@ IssueFleet: worker=astra
 Implement the requested change.
 ```
 
+You can use a case-insensitive plain-English first line instead:
+
+```text
+Use Worker Opus 5
+```
+
 Built-in choices require no Linear label or profile configuration:
 
 - `opus-5`: Claude Code with `claude-opus-5`
@@ -127,10 +133,10 @@ Built-in choices require no Linear label or profile configuration:
 IssueFleet: runtime=codex model=<model-id> effort=xhigh
 ```
 
-Only the first nonblank line is parsed. Ordinary task prose and comments never
-change execution. An invalid directive fails before IssueFleet creates a
-worktree or container. The selected tuple is snapshotted for the worker, so an
-edit affects only a later claim.
+Only an exact command occupying the first nonblank line is parsed. Ordinary
+task prose and comments never change execution. An invalid directive fails
+before IssueFleet creates a worktree or container. The selected tuple is
+snapshotted for the worker, so an edit affects only a later claim.
 
 ## Optional worker-profile labels
 

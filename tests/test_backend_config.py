@@ -102,7 +102,9 @@ class BackendConfigTest(unittest.TestCase):
         cfg = config.parse(BASE)
         cases = (
             ("IssueFleet: worker=opus-5\n\nFix it.", "claude", "claude-opus-5", None),
+            ("Use Worker Opus 5\n\nFix it.", "claude", "claude-opus-5", None),
             ("\nIssueFleet: fleet=astra\n\nFix it.", "codex", "gpt-6-astra", "high"),
+            ("use worker Codex Astra.\n\nFix it.", "codex", "gpt-6-astra", "high"),
             ("IssueFleet: worker=codex", "codex", None, None),
         )
         for description, runtime, model, effort in cases:
@@ -194,6 +196,7 @@ class BackendConfigTest(unittest.TestCase):
             "IssueFleet: worker=astra effort=low",
             "IssueFleet: runtime=codex effort=turbo",
             "IssueFleet: orchestrator=astra",
+            "Use Worker Future",
         ):
             issue = Issue(
                 "i", "TEST-1", "Title", directive, "", 0, "Todo", "unstarted"

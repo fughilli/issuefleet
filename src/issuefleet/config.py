@@ -531,18 +531,27 @@ class Config:
             ),
             "",
         )
-        prefix, separator, body = line.partition(":")
-        if prefix.casefold() != "issuefleet":
-            return None
-        if not separator or not body.strip():
-            raise ConfigError(
-                f"issue {issue.key}: empty IssueFleet directive; use "
-                "'IssueFleet: worker=opus-5'"
-            )
-        try:
-            tokens = shlex.split(body, comments=False, posix=True)
-        except ValueError as e:
-            raise ConfigError(f"issue {issue.key}: invalid IssueFleet directive: {e}") from e
+        natural = re.fullmatch(r"use\s+worker\s+(.+)", line, flags=re.IGNORECASE)
+        if natural is not None:
+            choice = natural.group(1).strip().rstrip(".!")
+            if not choice or not re.fullmatch(r"[A-Za-z0-9_. -]+", choice):
+                raise ConfigError(
+                    f"issue {issue.key}: invalid worker name in {line!r}"
+                )
+            tokens = ["worker=" + re.sub(r"[ _]+", "-", choice).casefold()]
+        else:
+            prefix, separator, body = line.partition(":")
+            if prefix.casefold() != "issuefleet":
+                return None
+            if not separator or not body.strip():
+                raise ConfigError(
+                    f"issue {issue.key}: empty IssueFleet directive; use "
+                    "'IssueFleet: worker=opus-5' or 'Use Worker Opus 5'"
+                )
+            try:
+                tokens = shlex.split(body, comments=False, posix=True)
+            except ValueError as e:
+                raise ConfigError(f"issue {issue.key}: invalid IssueFleet directive: {e}") from e
 
         options: dict[str, str] = {}
         aliases = {"fleet": "worker", "reasoning_effort": "effort"}

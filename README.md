@@ -76,6 +76,12 @@ first nonblank line of the Linear description:
 IssueFleet: worker=opus-5
 ```
 
+The plain-English form is equivalent and case-insensitive:
+
+```text
+Use Worker Opus 5
+```
+
 The built-in choices are `opus-5` (Claude Code with `claude-opus-5`), `astra`
 (Codex with `gpt-6-astra` at high effort), `claude`, and `codex`. The last two
 leave the model and effort to that runtime's defaults. For another model, use
@@ -85,9 +91,10 @@ an explicit selection:
 IssueFleet: runtime=codex model=<model-id> effort=high
 ```
 
-`fleet=` is accepted as an alias for `worker=`. The exact directive must come
-first so examples or casual prose later in a ticket cannot change execution.
-Unknown or malformed choices fail before a worktree or container is created.
+`fleet=` is accepted as an alias for `worker=`. Either form must occupy the
+entire first nonblank line so examples or casual prose later in a ticket cannot
+change execution. Unknown or malformed choices fail before a worktree or
+container is created.
 
 For a visible, filterable picker, optionally create an exclusive label group
 such as **Worker profile**, add one label per allowed choice, and map their

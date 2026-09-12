@@ -206,7 +206,7 @@ class BackendEndToEndTest(unittest.TestCase):
         manager.tick()
         for n, runtime in enumerate(("claude", "codex"), 1):
             description = "Please fix it." if runtime == "claude" else (
-                "IssueFleet: worker=astra\n\nPlease fix it."
+                "Use Worker Codex Astra\n\nPlease fix it."
             )
             tracker.add_issue(make_issue(n, project_id=runtime, description=description))
         reconciler = Reconciler(cfg, registry, tracker, forges, Gitops(), runner)
@@ -214,7 +214,7 @@ class BackendEndToEndTest(unittest.TestCase):
         self.assertEqual(len(registry.all()), 2)
         records = [registry.get(f"issue-{n}") for n in (1, 2)]
         self.assertEqual([rec.runtime for rec in records], ["claude", "codex"])
-        self.assertEqual([rec.runtime_profile for rec in records], [None, "astra"])
+        self.assertEqual([rec.runtime_profile for rec in records], [None, "codex-astra"])
 
         def step(rec, expected=0):
             env = {**os.environ, "PATH": str(binary_dir) + os.pathsep + os.environ.get("PATH", ""),
@@ -285,7 +285,7 @@ class BackendEndToEndTest(unittest.TestCase):
         self.assertTrue((archive / "logs/turn-0002.jsonl").is_file())
         # Existing workers keep their runtime even if the ticket directive changes.
         tracker.issues[codex.issue_id].description = (
-            "IssueFleet: worker=opus-5\n\nPlease fix it."
+            "Use Worker Opus 5\n\nPlease fix it."
         )
         reconciler.enqueue_adopt(codex.issue_key)
         reconciler.tick()
