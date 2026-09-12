@@ -143,6 +143,36 @@ class RegexScannerTest(unittest.TestCase):
         self.assertFalse(v.ok)
         self.assertEqual(v.findings[0].line, 6)
 
+    def test_header_like_added_content_is_scanned_without_changing_path(self):
+        secret = "AKIA" + "ABCDEFGHIJKLMNOP"
+        v = self.s.scan(_diff("reply", "first line", f"++ {secret}.key", secret))
+        self.assertFalse(v.ok)
+        self.assertEqual(
+            [(f.rule, f.path, f.line) for f in v.findings],
+            [("AWS access key id", "reply", 2), ("AWS access key id", "reply", 3)],
+        )
+        self.assertNotIn(secret, v.render())
+
+    def test_header_like_added_content_is_not_a_sensitive_file(self):
+        v = self.s.scan(_diff("reply", "++ b/.env"))
+        self.assertTrue(v.ok)
+        self.assertEqual(v.findings, [])
+
+    def test_file_headers_after_completed_hunks_are_still_recognized(self):
+        # Plain unified diffs do not need a `diff --git` separator. Context,
+        # removals, and additions each consume their side's declared count.
+        diff = (
+            "--- a/first.txt\n+++ b/first.txt\n@@ -3,2 +3,2 @@\n"
+            " context\n--- removed text\n+++ b/.env\n"
+            "--- /dev/null\n+++ b/config/.env\n@@ -0,0 +1 @@\n"
+            "+SAFE=placeholder\n"
+        )
+        v = self.s.scan(diff)
+        self.assertEqual(
+            [(f.rule, f.path) for f in v.findings],
+            [("sensitive file added", "config/.env")],
+        )
+
     # -- size cap ----------------------------------------------------------
 
     def test_oversize_diff_is_truncated_and_flagged(self):

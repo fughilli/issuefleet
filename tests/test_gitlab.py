@@ -1,7 +1,9 @@
 """GitLab forge + forge-selection tests via an injected fake transport —
 request construction and response mapping, fully offline."""
 
+import json
 import unittest
+from unittest import mock
 
 from issuefleet.config import ProjectConfig, ClaimRule
 from issuefleet.forge import build_forge, forge_kind, infer_kind
@@ -18,6 +20,23 @@ class RecordingTransport:
     def __call__(self, method, url, headers, payload):
         self.calls.append({"method": method, "url": url, "headers": headers, "payload": payload})
         return self.responses.pop(0)
+
+
+class HttpResponse:
+    """Exercise the real transport's response-header handling offline."""
+
+    def __init__(self, data, headers):
+        self.data = data
+        self.headers = headers
+
+    def read(self):
+        return json.dumps(self.data).encode()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
 
 
 class ParseRemoteTest(unittest.TestCase):
@@ -166,6 +185,110 @@ class GitlabForgeTest(unittest.TestCase):
         pr = GitlabForge("tok", "g/p", transport=RecordingTransport(
             [self._mr_json(merge_status="checking")])).get_pr(5)
         self.assertIsNone(pr.mergeable)
+
+    def test_reply_posts_into_the_notes_discussion(self):
+        from issuefleet.model import PrFeedback
+
+        t = RecordingTransport([[{"id": "abc", "notes": [{"id": 1}]},
+                                 {"id": "def", "notes": [{"id": 42}, {"id": 43}]}], {}])
+        fb = PrFeedback(id="dn-43", kind="review_comment", reviewer="bob", body="x")
+        GitlabForge("tok", "g/p", transport=t).reply_to_feedback(5, fb, "fixed")
+        self.assertIn("/merge_requests/5/discussions?per_page=100&page=1", t.calls[0]["url"])
+        self.assertEqual(t.calls[1]["method"], "POST")
+        self.assertIn("/merge_requests/5/discussions/def/notes", t.calls[1]["url"])
+        self.assertEqual(t.calls[1]["payload"], {"body": "fixed"})
+
+    def test_reply_returns_the_new_note_id(self):
+        from issuefleet.model import PrFeedback
+
+        t = RecordingTransport([[{"id": "d1", "notes": [{"id": 42}]}], {"id": 77, "type": "DiffNote"}])
+        fb = PrFeedback(id="dn-42", kind="review_comment", reviewer="bob", body="x")
+        self.assertEqual(GitlabForge("tok", "g/p", transport=t).reply_to_feedback(5, fb, "x"), "dn-77")
+
+    def test_reply_with_a_malformed_id_raises_api_error(self):
+        from issuefleet.httpx import ApiError
+        from issuefleet.model import PrFeedback
+
+        t = RecordingTransport([])
+        fb = PrFeedback(id="nt-oops", kind="comment", reviewer="bob", body="x")
+        with self.assertRaises(ApiError):
+            GitlabForge("tok", "g/p", transport=t).reply_to_feedback(5, fb, "x")
+        self.assertEqual(t.calls, [])
+
+    def test_reply_raises_when_no_discussion_holds_the_note(self):
+        from issuefleet.httpx import ApiError
+        from issuefleet.model import PrFeedback
+
+        t = RecordingTransport([[{"id": "abc", "notes": [{"id": 1}]}]])
+        fb = PrFeedback(id="nt-9", kind="comment", reviewer="bob", body="x")
+        with self.assertRaises(ApiError):
+            GitlabForge("tok", "g/p", transport=t).reply_to_feedback(5, fb, "x")
+
+    def test_pr_feedback_reads_every_page_of_notes(self):
+        def n(i, body="b"):
+            return {"id": i, "body": body, "author": {"username": "a"}, "system": False, "type": None}
+
+        t = RecordingTransport([[n(i) for i in range(100)], [n(100, "newest")]])
+        fb = GitlabForge("tok", "g/p", transport=t).pr_feedback(5)
+        self.assertEqual(len(fb), 101)
+        self.assertEqual(fb[-1].body, "newest")
+        self.assertIn("order_by=created_at&per_page=100&page=2", t.calls[1]["url"])
+
+    def test_feedback_follows_headers_through_short_and_empty_pages(self):
+        # GitLab can filter notes after slicing pages. Neither a short nor an
+        # empty page is terminal when its headers advertise another page.
+        def note(i):
+            return {"id": i, "body": f"feedback {i}", "author": {"username": "a"}}
+
+        responses = [
+            HttpResponse([note(1)], {"X-Next-Page": "2"}),
+            HttpResponse([], {"X-Next-Page": "3"}),
+            HttpResponse([note(3)], {"X-Next-Page": ""}),
+        ]
+        with mock.patch("urllib.request.urlopen", side_effect=responses) as opened:
+            feedback = GitlabForge("tok", "g/p").pr_feedback(5)
+        self.assertEqual([f.id for f in feedback], ["nt-1", "nt-3"])
+        self.assertEqual(
+            [call.args[0].full_url.rsplit("&page=", 1)[1] for call in opened.call_args_list],
+            ["1", "2", "3"],
+        )
+
+    def test_reply_finds_discussion_after_filtered_short_page(self):
+        from issuefleet.model import PrFeedback
+
+        responses = [
+            HttpResponse([{"id": "first", "notes": [{"id": 1}]}], {"X-Next-Page": "2"}),
+            HttpResponse([{"id": "target", "notes": [{"id": 42}]}], {"X-Next-Page": ""}),
+            HttpResponse({}, {}),
+        ]
+        feedback = PrFeedback(id="nt-42", kind="comment", reviewer="bob", body="question")
+        with mock.patch("urllib.request.urlopen", side_effect=responses) as opened:
+            GitlabForge("tok", "g/p").reply_to_feedback(5, feedback, "answer")
+        request = opened.call_args_list[-1].args[0]
+        self.assertEqual(request.get_method(), "POST")
+        self.assertTrue(request.full_url.endswith("/merge_requests/5/discussions/target/notes"))
+        self.assertEqual(json.loads(request.data), {"body": "answer"})
+
+    def test_terminal_pagination_header_stops_even_on_full_page(self):
+        notes = [{"id": i, "body": "note"} for i in range(100)]
+        with mock.patch("urllib.request.urlopen", side_effect=[HttpResponse(
+            notes, {"X-Next-Page": ""}
+        )]) as opened:
+            feedback = GitlabForge("tok", "g/p").pr_feedback(5)
+        self.assertEqual(len(feedback), 100)
+        self.assertEqual(opened.call_count, 1)
+
+    def test_invalid_next_page_cannot_redirect_or_repeat_credentials(self):
+        from issuefleet.httpx import ApiError
+
+        for next_page in ("https://other.example/collect", "1", "0", "-1"):
+            with self.subTest(next_page=next_page):
+                with mock.patch("urllib.request.urlopen", return_value=HttpResponse(
+                    [], {"X-Next-Page": next_page}
+                )) as opened:
+                    with self.assertRaisesRegex(ApiError, "invalid GitLab next-page header"):
+                        GitlabForge("tok", "g/p").pr_feedback(5)
+                self.assertEqual(opened.call_count, 1)
 
     def test_close_mr_uses_state_event(self):
         t = RecordingTransport([{}])

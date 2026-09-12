@@ -175,6 +175,8 @@ def format_inbound(msgs: list[Message]) -> str:
             head = f"PR {p.get('kind', 'comment')} from {p.get('reviewer', 'unknown')}"
             if p.get("path"):
                 head += f" on `{p['path']}`"
+            if p.get("id"):
+                head += f" [id `{p['id']}`]"
         elif m.kind == "pr_closed":
             head = "Your PR was closed without merging"
         elif m.kind == "ci_status":
@@ -209,6 +211,12 @@ def format_inbound(msgs: list[Message]) -> str:
                 f"the Read tool to view it:\n{listed}"
             )
         blocks.append(f"### {head}\n{body}")
+    if any(m.kind == "pr_feedback" for m in msgs):
+        blocks.append(
+            "Answer PR/MR feedback where it was left with "
+            "`agentctl reply --to <id> \"<text>\"`; keep using `agentctl status` for "
+            "progress on the issue."
+        )
     blocks.append(
         "Address these, then continue. Use `agentctl status` to report, "
         "`agentctl ask` if blocked, `agentctl ready` to (re-)submit — or, if "

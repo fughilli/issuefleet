@@ -221,6 +221,8 @@ class FakeForge:
     def __init__(self):
         self.prs: dict[int, PullRequest] = {}
         self.feedback: dict[int, list[PrFeedback]] = {}
+        self.replies: list[tuple[int, str, str]] = []
+        self.fail_next_reply = 0
         self.opened: list[dict] = []
         self.updated: list[dict] = []
         self.closed: list[int] = []
@@ -303,6 +305,14 @@ class FakeForge:
             return False
         self.acked.append((number, feedback_id))
         return True
+
+    def reply_to_feedback(self, number: int, feedback: PrFeedback, body: str) -> str | None:
+        if self.fail_next_reply:
+            self.fail_next_reply -= 1
+            raise RuntimeError("simulated forge outage")
+        self.replies.append((number, feedback.id, body))
+        self.add_feedback(number, body, kind=feedback.kind, reviewer="issuefleet", path=feedback.path)
+        return self.feedback[number][-1].id
 
     def set_ci(self, number: int, state: str, *, settled=True, failing=None, total=None):
         """Test helper: attach a CI verdict to a PR's head SHA. `state` is one

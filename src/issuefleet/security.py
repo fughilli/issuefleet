@@ -161,6 +161,35 @@ _SENSITIVE_FILE = re.compile(
 _SENSITIVE_FILE_EXEMPT = re.compile(r"\.pub$|/known_hosts$", re.IGNORECASE)
 
 
+def _diff_lines(diff: str):
+    """Yield each line with whether it belongs to a declared diff hunk.
+
+    An added line of text starting ``++ `` also starts ``+++ `` in the
+    diff. Hunk lengths distinguish that content from a new file header,
+    including plain unified diffs without ``diff --git`` separators.
+    """
+    old_left = new_left = 0
+    for raw in diff.splitlines():
+        if raw.startswith("diff --git"):
+            old_left = new_left = 0
+        hunk = re.match(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", raw)
+        if hunk:
+            old_left = int(hunk.group(1) or 1)
+            new_left = int(hunk.group(2) or 1)
+            yield raw, False
+            continue
+        in_hunk = old_left > 0 or new_left > 0
+        yield raw, in_hunk
+        if in_hunk:
+            if raw.startswith("+"):
+                new_left -= 1
+            elif raw.startswith("-"):
+                old_left -= 1
+            elif raw.startswith(" "):
+                old_left -= 1
+                new_left -= 1
+
+
 def _iter_added(diff: str):
     """Yield (path, new_line_no, text) for every added line in a unified diff.
     Also yields a synthetic ('<file>', 0, '') marker line-count is irrelevant
@@ -168,8 +197,8 @@ def _iter_added(diff: str):
     from ``+++ b/<path>`` headers and the new-side line number from @@ hunks."""
     path = ""
     new_no = 0
-    for raw in diff.splitlines():
-        if raw.startswith("+++ "):
+    for raw, in_hunk in _diff_lines(diff):
+        if raw.startswith("+++ ") and not in_hunk:
             p = raw[4:].strip()
             # "+++ b/foo" -> "foo"; "/dev/null" for deletions.
             path = p[2:] if p.startswith(("a/", "b/")) else p
@@ -191,8 +220,8 @@ def _iter_added(diff: str):
 def _added_files(diff: str) -> list[str]:
     """Paths introduced (or modified) on the new side of the diff."""
     files = []
-    for raw in diff.splitlines():
-        if raw.startswith("+++ "):
+    for raw, in_hunk in _diff_lines(diff):
+        if raw.startswith("+++ ") and not in_hunk:
             p = raw[4:].strip()
             p = p[2:] if p.startswith(("a/", "b/")) else p
             if p and p != "/dev/null":

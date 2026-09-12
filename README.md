@@ -43,7 +43,9 @@ worktree: it writes `status` / `question` / `ready` / `file_issue` JSON
 messages to an outbox; the orchestrator polls those and performs the
 credentialed act (post a Linear comment, push the branch, open the PR, or
 **file a new Linear issue**). Inbound Linear comments and PR review feedback
-are written to the worker's inbox and injected into its next turn. Agents
+are written to the worker's inbox and injected into its next turn. The worker answers feedback where it was
+left: `agentctl reply` posts into the same PR/MR thread, or as a PR comment
+mentioning the reviewer where GitHub has no thread. Agents
 commit freely — a linked worktree's objects land in the shared `.git` on the
 host — but nothing leaves the machine until the orchestrator pushes it.
 

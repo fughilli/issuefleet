@@ -322,6 +322,46 @@ class GithubForgeTest(unittest.TestCase):
             raise ApiError(404, "reactions", "gone")
         self.assertFalse(GithubForge("tok", "o/r", transport=boom).ack_feedback(5, "ic-1"))
 
+    def test_reply_to_inline_comment_threads_it(self):
+        from issuefleet.model import PrFeedback
+
+        t = RecordingTransport([{}])
+        fb = PrFeedback(id="rc-99", kind="review_comment", reviewer="bob", body="x")
+        GithubForge("tok", "o/r", transport=t).reply_to_feedback(5, fb, "thanks")
+        self.assertEqual(t.calls[0]["method"], "POST")
+        self.assertEqual(t.calls[0]["url"], "https://api.github.com/repos/o/r/pulls/5/comments/99/replies")
+        self.assertEqual(t.calls[0]["payload"], {"body": "thanks"})
+
+    def test_reply_to_pr_comment_or_review_mentions_the_reviewer(self):
+        from issuefleet.model import PrFeedback
+
+        for fid in ("ic-7", "rv-8"):
+            t = RecordingTransport([{}])
+            fb = PrFeedback(id=fid, kind="comment", reviewer="alice", body="x")
+            GithubForge("tok", "o/r", transport=t).reply_to_feedback(5, fb, "done")
+            self.assertEqual(t.calls[0]["url"], "https://api.github.com/repos/o/r/issues/5/comments")
+            self.assertEqual(t.calls[0]["payload"], {"body": "@alice done"})
+
+    def test_reply_returns_the_new_comment_id(self):
+        from issuefleet.model import PrFeedback
+
+        inline = PrFeedback(id="rc-99", kind="review_comment", reviewer="bob", body="x")
+        forge = GithubForge("tok", "o/r", transport=RecordingTransport([{"id": 555}]))
+        self.assertEqual(forge.reply_to_feedback(5, inline, "x"), "rc-555")
+        top = PrFeedback(id="ic-7", kind="comment", reviewer="alice", body="x")
+        forge = GithubForge("tok", "o/r", transport=RecordingTransport([{"id": 777}]))
+        self.assertEqual(forge.reply_to_feedback(5, top, "x"), "ic-777")
+
+    def test_pr_feedback_reads_every_page(self):
+        def c(i, body="b"):
+            return {"id": i, "user": {"login": "a"}, "body": body, "html_url": ""}
+
+        t = RecordingTransport([[c(i) for i in range(100)], [c(100, "newest")], [], []])
+        fb = GithubForge("tok", "o/r", transport=t).pr_feedback(5)
+        self.assertEqual(len(fb), 101)
+        self.assertEqual(fb[-1].body, "newest")
+        self.assertIn("per_page=100&page=2", t.calls[1]["url"])
+
     def test_ci_status_folds_checks_and_statuses_to_success(self):
         t = RecordingTransport(
             [
