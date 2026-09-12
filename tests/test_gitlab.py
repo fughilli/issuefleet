@@ -1,7 +1,9 @@
 """GitLab forge + forge-selection tests via an injected fake transport —
 request construction and response mapping, fully offline."""
 
+import json
 import unittest
+from unittest import mock
 
 from issuefleet.config import ProjectConfig, ClaimRule
 from issuefleet.forge import build_forge, forge_kind, infer_kind
@@ -18,6 +20,23 @@ class RecordingTransport:
     def __call__(self, method, url, headers, payload):
         self.calls.append({"method": method, "url": url, "headers": headers, "payload": payload})
         return self.responses.pop(0)
+
+
+class HttpResponse:
+    """Exercise the real transport's response-header handling offline."""
+
+    def __init__(self, data, headers):
+        self.data = data
+        self.headers = headers
+
+    def read(self):
+        return json.dumps(self.data).encode()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
 
 
 class ParseRemoteTest(unittest.TestCase):
@@ -214,6 +233,62 @@ class GitlabForgeTest(unittest.TestCase):
         self.assertEqual(len(fb), 101)
         self.assertEqual(fb[-1].body, "newest")
         self.assertIn("order_by=created_at&per_page=100&page=2", t.calls[1]["url"])
+
+    def test_feedback_follows_headers_through_short_and_empty_pages(self):
+        # GitLab can filter notes after slicing pages. Neither a short nor an
+        # empty page is terminal when its headers advertise another page.
+        def note(i):
+            return {"id": i, "body": f"feedback {i}", "author": {"username": "a"}}
+
+        responses = [
+            HttpResponse([note(1)], {"X-Next-Page": "2"}),
+            HttpResponse([], {"X-Next-Page": "3"}),
+            HttpResponse([note(3)], {"X-Next-Page": ""}),
+        ]
+        with mock.patch("urllib.request.urlopen", side_effect=responses) as opened:
+            feedback = GitlabForge("tok", "g/p").pr_feedback(5)
+        self.assertEqual([f.id for f in feedback], ["nt-1", "nt-3"])
+        self.assertEqual(
+            [call.args[0].full_url.rsplit("&page=", 1)[1] for call in opened.call_args_list],
+            ["1", "2", "3"],
+        )
+
+    def test_reply_finds_discussion_after_filtered_short_page(self):
+        from issuefleet.model import PrFeedback
+
+        responses = [
+            HttpResponse([{"id": "first", "notes": [{"id": 1}]}], {"X-Next-Page": "2"}),
+            HttpResponse([{"id": "target", "notes": [{"id": 42}]}], {"X-Next-Page": ""}),
+            HttpResponse({}, {}),
+        ]
+        feedback = PrFeedback(id="nt-42", kind="comment", reviewer="bob", body="question")
+        with mock.patch("urllib.request.urlopen", side_effect=responses) as opened:
+            GitlabForge("tok", "g/p").reply_to_feedback(5, feedback, "answer")
+        request = opened.call_args_list[-1].args[0]
+        self.assertEqual(request.get_method(), "POST")
+        self.assertTrue(request.full_url.endswith("/merge_requests/5/discussions/target/notes"))
+        self.assertEqual(json.loads(request.data), {"body": "answer"})
+
+    def test_terminal_pagination_header_stops_even_on_full_page(self):
+        notes = [{"id": i, "body": "note"} for i in range(100)]
+        with mock.patch("urllib.request.urlopen", side_effect=[HttpResponse(
+            notes, {"X-Next-Page": ""}
+        )]) as opened:
+            feedback = GitlabForge("tok", "g/p").pr_feedback(5)
+        self.assertEqual(len(feedback), 100)
+        self.assertEqual(opened.call_count, 1)
+
+    def test_invalid_next_page_cannot_redirect_or_repeat_credentials(self):
+        from issuefleet.httpx import ApiError
+
+        for next_page in ("https://other.example/collect", "1", "0", "-1"):
+            with self.subTest(next_page=next_page):
+                with mock.patch("urllib.request.urlopen", return_value=HttpResponse(
+                    [], {"X-Next-Page": next_page}
+                )) as opened:
+                    with self.assertRaisesRegex(ApiError, "invalid GitLab next-page header"):
+                        GitlabForge("tok", "g/p").pr_feedback(5)
+                self.assertEqual(opened.call_count, 1)
 
     def test_close_mr_uses_state_event(self):
         t = RecordingTransport([{}])

@@ -119,7 +119,15 @@ def main(argv: list[str] | None = None) -> int:
         state.save(agent_dir)
         print("question queued; the loop will idle after this turn until a human replies")
     elif args.cmd == "reply":
-        mb.put_outbox("pr_reply", {"to": args.to, "text": _text_arg(args)})
+        text = _text_arg(args)
+        if not text:
+            raise SystemExit("agentctl: reply text must not be empty")
+        mb.put_outbox("pr_reply", {"to": args.to, "text": text})
+        # Feedback can arrive after this turn began and be read with `inbox`.
+        # Once its answer is durably queued, do not inject it again next turn.
+        for msg in mb.pending_inbox():
+            if msg.kind == "pr_feedback" and msg.payload.get("id") == args.to:
+                mb.consume_inbox(msg)
         print(f"reply to {args.to} queued for relay")
     elif args.cmd == "ready":
         body = args.body if args.body is not None else Path(args.body_file).read_text()

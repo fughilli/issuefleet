@@ -418,6 +418,62 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(len(fb), 1)
         self.assertIn(f"f1-{n}", self.worker().seen_feedback_ids)
 
+    def test_large_feedback_history_stays_deduped_after_ci_and_restart(self):
+        self.claim_one()
+        self.mailbox().put_outbox("ready", {"title": "T", "body": "B"})
+        self.rec.tick()
+        n = self.worker().pr_number
+        for i in range(1001):
+            self.forge.add_feedback(n, f"Review comment {i}")
+        self.rec.tick()
+        self.forge.set_ci(n, "success")
+        self.rec.tick()
+        self.registry = Registry(self.cfg.state_dir)
+        self.rec = Reconciler(
+            self.cfg, self.registry, self.tracker, {"splanc": self.forge}, self.git, self.runner
+        )
+        self.rec.tick()
+        self.rec.tick()
+        feedback = [m for m in self.mailbox().pending_inbox() if m.kind == "pr_feedback"]
+        self.assertEqual(len(feedback), 1001)
+        self.assertEqual(len(self.forge.acked), 1001)
+        self.forge.add_feedback(n, "A genuinely new comment")
+        self.rec.tick()
+        self.rec.tick()
+        feedback = [m for m in self.mailbox().pending_inbox() if m.kind == "pr_feedback"]
+        self.assertEqual(len(feedback), 1002)
+        self.assertEqual(len(self.forge.acked), 1002)
+        self.assertEqual(sum(m.kind == "ci_status" for m in self.mailbox().pending_inbox()), 1)
+
+    def test_human_marker_mentions_are_delivered(self):
+        from issuefleet import marker
+
+        n, _ = self._pr_with_feedback()
+        comments = [
+            "Please document issuefleet:msg: in the format description.",
+            f"What does `{marker('012345abcdef')}` mean?",
+            f"The copied marker was {marker('012345abcdef')} but this is human feedback.",
+        ]
+        for text in comments:
+            self.forge.add_feedback(n, text)
+        self.rec.tick()
+        feedback = [m.payload["text"] for m in self.mailbox().pending_inbox() if m.kind == "pr_feedback"]
+        for text in comments:
+            self.assertIn(text, feedback)
+
+    def test_own_reply_stays_quiet_in_plan_and_after_restart(self):
+        n, fid = self._pr_with_feedback()
+        self.mailbox().put_outbox("pr_reply", {"to": fid, "text": "Confirmed."})
+        self.rec.tick()
+        self.assertFalse(any("PR feedback" in line for line in self.rec._plan_worker(self.worker())))
+        self.registry = Registry(self.cfg.state_dir)
+        self.rec = Reconciler(
+            self.cfg, self.registry, self.tracker, {"splanc": self.forge}, self.git, self.runner
+        )
+        self.rec.tick()
+        self.assertEqual(len(self.forge.acked), 1)
+        self.assertEqual(sum(m.kind == "pr_feedback" for m in self.mailbox().pending_inbox()), 1)
+
     def _fake_images(self):
         """Patch the attachment fetch so image ingest runs fully offline: any
         URL 'downloads' to a tiny PNG. Returns the list of URLs fetched."""
@@ -614,6 +670,23 @@ class ReconcileTest(unittest.TestCase):
         notes = self._notes()
         self.assertTrue(any("credential" in t for t in notes))
         self.assertFalse(any(secret in t for t in notes))
+
+    def test_pr_reply_diff_header_shaped_credentials_are_blocked_and_redacted(self):
+        from issuefleet.security import RegexSecretScanner
+
+        _, fid = self._pr_with_feedback()
+        self.rec.gate = RegexSecretScanner()
+        secret = "AKIA" + "ABCDEFGHIJKLMNOP"
+        for text in (f"++ {secret}", f"First line\n++ {secret}",
+                     f"++ harmless header-like text\n++ {secret}",
+                     f"++ {secret}\nordinary {secret}"):
+            with self.subTest(text_prefix=text[:8]):
+                self.mailbox().put_outbox("pr_reply", {"to": fid, "text": text})
+                self.rec.tick()
+                self.assertEqual(self.forge.replies, [])
+                self.assertEqual(self.mailbox().pending_outbox(), [])
+                self.assertIn("credential", self._notes()[-1])
+                self.assertNotIn(secret, self._notes()[-1])
 
     def test_merge_tears_down_completely(self):
         self.claim_one()

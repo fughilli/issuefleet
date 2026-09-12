@@ -18,7 +18,7 @@ import base64
 import logging
 import urllib.parse
 
-from issuefleet.httpx import ApiError, urllib_transport
+from issuefleet.httpx import ApiError, JsonResponse, urllib_transport_with_headers
 from issuefleet.model import CiCheck, CiStatus, PrFeedback, PullRequest
 
 log = logging.getLogger("issuefleet.gitlab")
@@ -69,7 +69,7 @@ def _to_pr(d: dict) -> PullRequest:
 
 
 class GitlabForge:
-    def __init__(self, token, slug: str, host: str = "gitlab.com", transport=urllib_transport):
+    def __init__(self, token, slug: str, host: str = "gitlab.com", transport=urllib_transport_with_headers):
         """token: a PAT string (personal, group, or project access token), or a
         zero-arg callable returning a current token. slug: the project path
         ``group/name`` (possibly nested). host: the instance hostname."""
@@ -95,7 +95,10 @@ class GitlabForge:
         return (f"https://{self.host}/{self.slug}.git", f"basic {basic}")
 
     def _call(self, method: str, path: str, payload: dict | None = None) -> dict | list:
-        return self.transport(
+        return self._response(method, path, payload).data
+
+    def _response(self, method: str, path: str, payload: dict | None = None) -> JsonResponse:
+        response = self.transport(
             method,
             f"{self.api_root}{path}",
             {
@@ -108,18 +111,35 @@ class GitlabForge:
             },
             payload,
         )
+        # Existing injected transports return just the decoded JSON.
+        return response if isinstance(response, JsonResponse) else JsonResponse(response, {})
 
     def _mr(self, path: str = "") -> str:
         return f"/projects/{self.project_id}/merge_requests{path}"
 
     def _paged(self, path: str) -> list:
-        """Every item of a list endpoint. The transport exposes no headers, so
-        pages are requested until one comes back short."""
+        """Follow GitLab's next-page metadata, including filtered short pages.
+
+        Some list endpoints filter entries after pagination; even an empty
+        body can have a following page. Body length is only a fallback for
+        transports or servers that do not expose pagination headers.
+        """
         size, page, out = 100, 1, []
         sep = "&" if "?" in path else "?"
         while True:
-            batch = self._call("GET", f"{path}{sep}per_page={size}&page={page}")
+            response = self._response("GET", f"{path}{sep}per_page={size}&page={page}")
+            batch = response.data
             out.extend(batch)
+            if "x-next-page" in response.headers:
+                next_page = response.headers["x-next-page"].strip()
+                if not next_page:
+                    return out
+                # Follow only forward numeric pages on the original endpoint;
+                # never send credentials to a URL supplied in a Link header.
+                if not next_page.isascii() or not next_page.isdecimal() or int(next_page) <= page:
+                    raise ApiError(502, f"{self.api_root}{path}", "invalid GitLab next-page header")
+                page = int(next_page)
+                continue
             if len(batch) < size:
                 return out
             page += 1

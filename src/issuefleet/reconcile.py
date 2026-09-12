@@ -41,7 +41,6 @@ from issuefleet.registry import Registry
 
 log = logging.getLogger("issuefleet")
 
-_SEEN_IDS_CAP = 1000
 # Our own posted replies carry this marker. Matched only at the start of a line:
 # a human quoting our reply (GitHub "Quote reply" keeps HTML comments, prefixed
 # with "> ") must still reach the worker.
@@ -870,7 +869,7 @@ class Reconciler:
             lines.append(f"{rec.issue_key}: would ingest {len(inbound)} new Linear comment(s)")
         if rec.pr_number is not None:
             forge = self.forges[project.name]
-            new_fb = [f for f in forge.pr_feedback(rec.pr_number) if f.id not in rec.seen_feedback_ids]
+            new_fb = self._new_pr_feedback(rec, forge)
             if new_fb:
                 lines.append(f"{rec.issue_key}: would forward {len(new_fb)} PR feedback item(s)")
             pr = forge.get_pr(rec.pr_number)
@@ -1157,7 +1156,6 @@ class Reconciler:
         )
         if posted_id:
             rec.seen_feedback_ids.append(posted_id)
-            rec.seen_feedback_ids = rec.seen_feedback_ids[-_SEEN_IDS_CAP:]
             rec.touch()
             self.registry.save()
         mailbox.archive_outbox(msg, receipt={"relayed": "forge", "to": to})
@@ -1173,7 +1171,8 @@ class Reconciler:
     def _reply_security_ok(self, rec: WorkerRecord, mailbox: Mailbox, msg, text: str) -> bool:
         """Fails closed in block mode, like `ready`: a reply is public text."""
         mode = self.cfg.security.mode
-        diff = "+++ b/reply\n@@ -0,0 +1 @@\n" + "".join(f"+{line}\n" for line in text.splitlines())
+        lines = text.splitlines()
+        diff = f"+++ b/reply\n@@ -0,0 +1,{len(lines)} @@\n" + "".join(f"+{line}\n" for line in lines)
         try:
             verdict = self.gate.scan(diff)
         except Exception:
@@ -1772,16 +1771,24 @@ class Reconciler:
             log.warning("worker %s: branch %s %s vs origin", rec.issue_key, rec.branch, status)
         self._sync_note(mailbox, rec.branch, status)
 
+    def _new_pr_feedback(self, rec: WorkerRecord, forge):
+        # The forge now returns its complete history. Keep all delivered IDs
+        # for the worker's lifetime: evicting one makes old feedback new again.
+        seen = set(rec.seen_feedback_ids)
+        new_feedback = []
+        for fb in forge.pr_feedback(rec.pr_number):
+            if fb.id in seen or _OWN_REPLY_MARKER.search(fb.body):
+                continue
+            seen.add(fb.id)
+            new_feedback.append(fb)
+        return new_feedback
+
     def _check_pr(self, rec: WorkerRecord, project: ProjectConfig, mailbox: Mailbox) -> None:
         if rec.pr_number is None:
             return
         forge = self.forges[project.name]
 
-        new_feedback = []
-        for fb in forge.pr_feedback(rec.pr_number):
-            if fb.id in rec.seen_feedback_ids or _OWN_REPLY_MARKER.search(fb.body):
-                continue
-            new_feedback.append(fb)
+        new_feedback = self._new_pr_feedback(rec, forge)
         for fb in new_feedback:
             payload = {
                 "id": fb.id,
@@ -1801,7 +1808,6 @@ class Reconciler:
             except Exception:
                 log.exception("forge feedback ack failed (%s #%d)", fb.id, rec.pr_number)
         if new_feedback:
-            rec.seen_feedback_ids = rec.seen_feedback_ids[-_SEEN_IDS_CAP:]
             rec.touch()
             self.registry.save()
 
@@ -1942,7 +1948,6 @@ class Reconciler:
             },
         )
         rec.seen_feedback_ids.append(sentinel)
-        rec.seen_feedback_ids = rec.seen_feedback_ids[-_SEEN_IDS_CAP:]
         rec.touch()
         self.registry.save()
 

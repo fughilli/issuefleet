@@ -287,6 +287,68 @@ class AgentctlTest(unittest.TestCase):
         [m] = self.mb.pending_outbox()
         self.assertEqual((m.kind, m.payload), ("pr_reply", {"to": "rc-9", "text": "good catch"}))
 
+    def test_replies_to_peeked_late_feedback_do_not_wake_another_turn(self):
+        import contextlib
+        import io
+
+        state = turns.TurnState.load(self.agent_dir)
+        turns.commit(turns.decide(self.agent_dir, self.mb, state), self.agent_dir, self.mb, state)
+        # These arrive after the running turn's initial inbox consumption.
+        for fid in ("ic-1", "rc-2", "rv-3"):
+            self.mb.put_inbox("pr_feedback", {"id": fid, "text": f"question {fid}"})
+        peek = io.StringIO()
+        with contextlib.redirect_stdout(peek):
+            agentctl.main(["inbox"])
+        self.assertIn("question rc-2", peek.getvalue())
+        self.assertEqual(len(self.mb.pending_inbox()), 3)  # inbox remains a peek
+        for fid in ("ic-1", "rc-2", "rv-3"):
+            agentctl.main(["reply", "--to", fid, "Answered during this turn."])
+        agentctl.main(["idle"])
+        next_turn = turns.decide(self.agent_dir, self.mb, turns.TurnState.load(self.agent_dir))
+        self.assertEqual(next_turn.exit_code, turns.EXIT_READY)
+        self.assertEqual(self.mb.pending_inbox(), [])
+        self.assertEqual([m.payload["to"] for m in self.mb.pending_outbox()], ["ic-1", "rc-2", "rv-3"])
+
+    def test_reply_consumes_only_matching_feedback(self):
+        for _ in range(2):
+            self.mb.put_inbox("pr_feedback", {"id": "rc-9", "text": "answered question"})
+        retained = [
+            self.mb.put_inbox("pr_feedback", {"id": "rc-10", "text": "another question"}),
+            self.mb.put_inbox("reply", {"id": "rc-9", "text": "Linear reply"}),
+            self.mb.put_inbox("info", {"id": "rc-9", "text": "information"}),
+        ]
+        agentctl.main(["reply", "--to", "rc-9", "The answer."])
+        self.assertEqual([m.id for m in self.mb.pending_inbox()], [m.id for m in retained])
+
+    def test_reply_to_already_consumed_feedback_still_queues(self):
+        self.mb.put_inbox("pr_feedback", {"id": "rc-9", "text": "question"})
+        state = turns.TurnState.load(self.agent_dir)
+        turns.commit(turns.decide(self.agent_dir, self.mb, state), self.agent_dir, self.mb, state)
+        agentctl.main(["reply", "--to", "rc-9", "The answer."])
+        self.assertEqual(self.mb.pending_inbox(), [])
+        self.assertEqual([m.payload["to"] for m in self.mb.pending_outbox()], ["rc-9"])
+
+    def test_reply_without_text_does_not_consume_feedback(self):
+        target = self.mb.put_inbox("pr_feedback", {"id": "rc-9", "text": "question"})
+        empty_file = self.workspace / "empty-reply.txt"
+        empty_file.write_text(" \n")
+        for text_args in ([], ["   "], ["--file", str(empty_file)]):
+            with self.subTest(text_args=text_args):
+                with self.assertRaises(SystemExit):
+                    agentctl.main(["reply", "--to", "rc-9", *text_args])
+                self.assertEqual([m.id for m in self.mb.pending_inbox()], [target.id])
+                self.assertEqual(self.mb.pending_outbox(), [])
+
+    def test_failed_reply_enqueue_does_not_consume_feedback(self):
+        from unittest import mock
+
+        target = self.mb.put_inbox("pr_feedback", {"id": "rc-9", "text": "question"})
+        with mock.patch.object(Mailbox, "put_outbox", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                agentctl.main(["reply", "--to", "rc-9", "The answer."])
+        self.assertEqual([m.id for m in self.mb.pending_inbox()], [target.id])
+        self.assertEqual(self.mb.pending_outbox(), [])
+
     def test_pr_feedback_render_shows_the_id_and_how_to_reply(self):
         self.mb.put_inbox("pr_feedback", {"id": "rc-9", "kind": "review_comment",
                                           "reviewer": "bob", "path": "a.py", "text": "why?"})
