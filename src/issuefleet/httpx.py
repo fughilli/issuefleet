@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 
 from issuefleet import __version__
 
@@ -26,15 +27,32 @@ class ApiError(Exception):
         super().__init__(f"HTTP {status} from {url}: {detail[:300]}")
 
 
-def urllib_transport(method: str, url: str, headers: dict, payload: dict | None) -> dict:
+@dataclass
+class JsonResponse:
+    """Decoded JSON and response headers keyed by lowercase field name."""
+
+    data: dict | list
+    headers: dict[str, str]
+
+
+def urllib_transport(method: str, url: str, headers: dict, payload: dict | None) -> dict | list:
+    """JSON-only transport contract retained for existing clients and fakes."""
+    return urllib_transport_with_headers(method, url, headers, payload).data
+
+
+def urllib_transport_with_headers(
+    method: str, url: str, headers: dict, payload: dict | None
+) -> JsonResponse:
+    """JSON plus response headers, for clients that need pagination metadata."""
     data = json.dumps(payload).encode() if payload is not None else None
     headers = {"User-Agent": USER_AGENT, **headers}
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
             body = resp.read().decode()
+            response_headers = {k.lower(): v for k, v in resp.headers.items()}
     except urllib.error.HTTPError as e:
         raise ApiError(e.code, url, e.read().decode(errors="replace"))
     except urllib.error.URLError as e:
         raise ApiError(0, url, str(e.reason))
-    return json.loads(body) if body.strip() else {}
+    return JsonResponse(json.loads(body) if body.strip() else {}, response_headers)

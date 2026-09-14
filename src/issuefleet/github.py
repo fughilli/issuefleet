@@ -19,6 +19,9 @@ log = logging.getLogger("issuefleet.github")
 
 API_ROOT = "https://api.github.com"
 
+_PAGE_SIZE = 100
+_MAX_PAGES = 100
+
 # Check-run conclusions that count as a failure worth surfacing. neutral,
 # skipped, and stale are benign; cancelled is usually a human/superseded stop,
 # not a code failure, so it's left out to avoid false alarms.
@@ -84,6 +87,21 @@ class GithubForge:
             payload,
         )
 
+    def _paged(self, path: str) -> list:
+        """Every item of a list endpoint, requesting pages until one comes back
+        short. This forge's transport returns decoded JSON alone, so GitHub's
+        Link header is not available to follow."""
+        sep = "&" if "?" in path else "?"
+        out: list = []
+        for page in range(1, _MAX_PAGES + 1):
+            batch = self._call("GET", f"{path}{sep}per_page={_PAGE_SIZE}&page={page}")
+            if not isinstance(batch, list):
+                raise ApiError(502, f"{API_ROOT}{path}", f"expected a list, got {type(batch).__name__}")
+            out.extend(batch)
+            if len(batch) < _PAGE_SIZE:
+                return out
+        raise ApiError(502, f"{API_ROOT}{path}", f"more than {_MAX_PAGES} pages of results")
+
     # -- Forge port --------------------------------------------------------
 
     def find_pr(self, head_branch: str) -> PullRequest | None:
@@ -115,7 +133,7 @@ class GithubForge:
         stable prefixed ids so the caller's dedupe never collides across the
         three endpoints."""
         out: list[PrFeedback] = []
-        for c in self._call("GET", f"/repos/{self.slug}/issues/{number}/comments"):
+        for c in self._paged(f"/repos/{self.slug}/issues/{number}/comments"):
             out.append(
                 PrFeedback(
                     id=f"ic-{c['id']}",
@@ -125,7 +143,7 @@ class GithubForge:
                     url=c.get("html_url"),
                 )
             )
-        for r in self._call("GET", f"/repos/{self.slug}/pulls/{number}/reviews"):
+        for r in self._paged(f"/repos/{self.slug}/pulls/{number}/reviews"):
             if not (r.get("body") or "").strip():
                 continue  # approval clicks with no text aren't actionable
             out.append(
@@ -137,7 +155,7 @@ class GithubForge:
                     url=r.get("html_url"),
                 )
             )
-        for c in self._call("GET", f"/repos/{self.slug}/pulls/{number}/comments"):
+        for c in self._paged(f"/repos/{self.slug}/pulls/{number}/comments"):
             out.append(
                 PrFeedback(
                     id=f"rc-{c['id']}",
@@ -167,6 +185,25 @@ class GithubForge:
         except ApiError as e:
             log.debug("github: 👀 reaction on %s failed: %s", feedback_id, e)
             return False
+
+    def reply_to_feedback(self, number: int, feedback: PrFeedback, body: str) -> str | None:
+        """Inline review comments (``rc-``) take a threaded reply. Issue comments
+        and review bodies have no threads, so the reply is a PR comment that
+        mentions the reviewer. Returns the new comment's feedback id."""
+        prefix, _, raw = feedback.id.partition("-")
+        if prefix == "rc":
+            posted = self._call(
+                "POST", f"/repos/{self.slug}/pulls/{number}/comments/{raw}/replies", {"body": body}
+            )
+        else:
+            posted = self._call(
+                "POST",
+                f"/repos/{self.slug}/issues/{number}/comments",
+                {"body": f"@{feedback.reviewer} {body}"},
+            )
+            prefix = "ic"
+        new_id = (posted or {}).get("id")
+        return f"{prefix}-{new_id}" if new_id else None
 
     def ci_status(self, ref: str) -> CiStatus:
         """Fold the check-runs API and the combined commit-status API for

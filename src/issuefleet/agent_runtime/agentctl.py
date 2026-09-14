@@ -35,6 +35,14 @@ def _text_arg(args) -> str:
     raise SystemExit("agentctl: provide text or --file")
 
 
+def _consume_answered_feedback(mb, feedback_id: str) -> None:
+    """Drop the feedback a queued reply answers: read mid-turn with `inbox`, it
+    would otherwise be injected again on the next turn."""
+    for msg in mb.pending_inbox():
+        if msg.kind == "pr_feedback" and msg.payload.get("id") == feedback_id:
+            mb.consume_inbox(msg)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="agentctl", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -46,6 +54,15 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("ask", help="ask a blocking question, then idle until a human replies")
     p.add_argument("text", nargs="*")
     p.add_argument("--file")
+
+    p = sub.add_parser(
+        "reply", help="reply on the PR/MR thread a piece of review feedback came from (relayed)"
+    )
+    p.add_argument(
+        "--to", required=True, metavar="ID", help="the feedback id shown with the message"
+    )
+    p.add_argument("text", nargs="*")
+    p.add_argument("--file", help="read the text from a file")
 
     p = sub.add_parser("ready", help="declare the issue satisfied; hand over PR title and body")
     p.add_argument("--title", required=True)
@@ -111,6 +128,13 @@ def main(argv: list[str] | None = None) -> int:
         state.phase = turns.PHASE_WAITING
         state.save(agent_dir)
         print("question queued; the loop will idle after this turn until a human replies")
+    elif args.cmd == "reply":
+        text = _text_arg(args)
+        if not text:
+            raise SystemExit("agentctl: reply text must not be empty")
+        mb.put_outbox("pr_reply", {"to": args.to, "text": text})
+        _consume_answered_feedback(mb, args.to)
+        print(f"reply to {args.to} queued for relay")
     elif args.cmd == "ready":
         body = args.body if args.body is not None else Path(args.body_file).read_text()
         mb.put_outbox("ready", {"title": args.title, "body": body, "new_pr": args.new_pr})

@@ -4,6 +4,7 @@ Claude deep-scan merge."""
 
 import unittest
 
+from issuefleet import security
 from issuefleet.security import (
     MAX_DIFF_BYTES,
     ClaudeSecurityGate,
@@ -17,14 +18,8 @@ from issuefleet.security import (
 
 def _diff(path: str, *added_lines: str) -> str:
     """A minimal unified diff (one hunk of added lines) for `path`."""
-    body = "".join(f"+{ln}\n" for ln in added_lines)
-    return (
-        f"diff --git a/{path} b/{path}\n"
-        f"--- a/{path}\n"
-        f"+++ b/{path}\n"
-        f"@@ -0,0 +1,{len(added_lines)} @@\n"
-        f"{body}"
-    )
+    return (f"diff --git a/{path} b/{path}\n--- a/{path}\n"
+            + security.as_diff(path, "\n".join(added_lines)))
 
 
 class RegexScannerTest(unittest.TestCase):
@@ -142,6 +137,71 @@ class RegexScannerTest(unittest.TestCase):
         v = self.s.scan(diff)
         self.assertFalse(v.ok)
         self.assertEqual(v.findings[0].line, 6)
+
+    def test_header_like_added_content_is_scanned_without_changing_path(self):
+        secret = "AKIA" + "ABCDEFGHIJKLMNOP"
+        v = self.s.scan(_diff("reply", "first line", f"++ {secret}.key", secret))
+        self.assertFalse(v.ok)
+        self.assertEqual(
+            [(f.rule, f.path, f.line) for f in v.findings],
+            [("AWS access key id", "reply", 2), ("AWS access key id", "reply", 3)],
+        )
+        self.assertNotIn(secret, v.render())
+
+    def test_header_like_added_content_is_not_a_sensitive_file(self):
+        v = self.s.scan(_diff("reply", "++ b/.env"))
+        self.assertTrue(v.ok)
+        self.assertEqual(v.findings, [])
+
+    def test_file_headers_after_completed_hunks_are_still_recognized(self):
+        diff = (
+            "--- a/first.txt\n+++ b/first.txt\n@@ -3,2 +3,2 @@\n"
+            " context\n--- removed text\n+++ b/.env\n"
+            "--- /dev/null\n+++ b/config/.env\n@@ -0,0 +1 @@\n"
+            "+SAFE=placeholder\n"
+        )
+        v = self.s.scan(diff)
+        self.assertEqual(
+            [(f.rule, f.path) for f in v.findings],
+            [("sensitive file added", "config/.env")],
+        )
+
+    def test_a_line_that_cannot_be_hunk_content_ends_the_hunk(self):
+        """A hunk whose declared lines never arrive must not swallow the next
+        file's header: a blank line where a ' ' context line was expected."""
+        diff = (
+            "--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n"
+            " keep\n\n+tail\n"
+            "--- /dev/null\n+++ b/deploy/.env\n@@ -0,0 +1 @@\n+opaque\n"
+        )
+        v = self.s.scan(diff)
+        self.assertEqual(
+            [(f.rule, f.path) for f in v.findings],
+            [("sensitive file added", "deploy/.env")],
+        )
+
+    def test_a_secret_after_a_form_feed_on_one_git_line_is_still_scanned(self):
+        """git ends a line only at "\n". Anything `splitlines` also breaks on
+        would strand the rest of a real added line outside every hunk."""
+        secret = "AKIA" + "ABCDEFGHIJKLMNOP"
+        for sep in ("\f", "\v", "\r", "\x85", "\u2028", "\x1c"):
+            with self.subTest(sep=repr(sep)):
+                v = self.s.scan(_diff("conf.py", f'note{sep}KEY = "{secret}"'))
+                self.assertFalse(v.ok)
+                self.assertEqual([f.rule for f in v.findings], ["AWS access key id"])
+
+    def test_a_no_newline_marker_does_not_end_the_hunk(self):
+        """The marker consumes no line, so the added line after it is still hunk
+        content and not a new-file header."""
+        diff = ("diff --git a/doc.md b/doc.md\n--- a/doc.md\n+++ b/doc.md\n@@ -1,1 +1,2 @@\n"
+                "-old text\n\\ No newline at end of file\n+++ b/.env\n+second line\n")
+        self.assertEqual([(f.rule, f.path) for f in self.s.scan(diff).findings], [])
+
+    def test_a_hunk_header_without_lengths_declares_one_line(self):
+        """git omits the count for a single-line hunk."""
+        diff = ("diff --git a/doc.md b/doc.md\n--- a/doc.md\n+++ b/doc.md\n@@ -1 +1 @@\n"
+                "-old\n+++ b/.env\n")
+        self.assertEqual([(f.rule, f.path) for f in self.s.scan(diff).findings], [])
 
     # -- size cap ----------------------------------------------------------
 

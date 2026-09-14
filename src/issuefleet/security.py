@@ -161,6 +161,47 @@ _SENSITIVE_FILE = re.compile(
 _SENSITIVE_FILE_EXEMPT = re.compile(r"\.pub$|/known_hosts$", re.IGNORECASE)
 
 
+_HUNK_HEADER = re.compile(r"@@ -\d+(?:,\d+)? \+\d+(?:,(\d+))? @@")
+
+# New-side lines each leading character consumes; "\\" is the no-newline marker.
+_HUNK_CONTENT = {"+": 1, "-": 0, " ": 1, "\\": 0}
+
+
+def _diff_lines(diff: str):
+    """Yield each line with whether it is content inside a declared hunk.
+
+    An added line of text starting ``++ `` also starts ``+++ `` in the diff, so
+    only the hunk's declared new-side length tells it apart from a new-file
+    header — a removed or context line's text renders behind ``-`` or a space,
+    so it can never be mistaken for one. A line that cannot be hunk content ends
+    the hunk, which keeps a miscounted or non-diff line from swallowing the
+    headers that follow.
+
+    Split on ``\n`` alone: git ends a line nowhere else, while ``splitlines``
+    also breaks on ``\f``, ``\v``, a lone ``\r`` and ``\u2028``, which would
+    strand the rest of a real added line outside any hunk."""
+    left = 0
+    for raw in diff.split("\n"):
+        if header := _HUNK_HEADER.match(raw):
+            left = int(header[1] or 1)
+        elif left > 0:
+            consumed = _HUNK_CONTENT.get(raw[:1])
+            if consumed is not None:
+                left -= consumed
+                yield raw, True
+                continue
+            left = 0
+        yield raw, False
+
+
+def as_diff(path: str, text: str) -> str:
+    """Plain text as a one-file diff of added lines, so any SecurityGate can scan
+    it. The hunk header is required: with no declared length a body line reading
+    ``++ x`` parses as a ``+++ `` file header and is never scanned."""
+    lines = text.split("\n")
+    return f"+++ b/{path}\n@@ -0,0 +1,{len(lines)} @@\n" + "".join(f"+{ln}\n" for ln in lines)
+
+
 def _iter_added(diff: str):
     """Yield (path, new_line_no, text) for every added line in a unified diff.
     Also yields a synthetic ('<file>', 0, '') marker line-count is irrelevant
@@ -168,8 +209,8 @@ def _iter_added(diff: str):
     from ``+++ b/<path>`` headers and the new-side line number from @@ hunks."""
     path = ""
     new_no = 0
-    for raw in diff.splitlines():
-        if raw.startswith("+++ "):
+    for raw, in_hunk in _diff_lines(diff):
+        if raw.startswith("+++ ") and not in_hunk:
             p = raw[4:].strip()
             # "+++ b/foo" -> "foo"; "/dev/null" for deletions.
             path = p[2:] if p.startswith(("a/", "b/")) else p
@@ -191,8 +232,8 @@ def _iter_added(diff: str):
 def _added_files(diff: str) -> list[str]:
     """Paths introduced (or modified) on the new side of the diff."""
     files = []
-    for raw in diff.splitlines():
-        if raw.startswith("+++ "):
+    for raw, in_hunk in _diff_lines(diff):
+        if raw.startswith("+++ ") and not in_hunk:
             p = raw[4:].strip()
             p = p[2:] if p.startswith(("a/", "b/")) else p
             if p and p != "/dev/null":

@@ -18,7 +18,7 @@ import base64
 import logging
 import urllib.parse
 
-from issuefleet.httpx import ApiError, urllib_transport
+from issuefleet.httpx import ApiError, JsonResponse, urllib_transport_with_headers
 from issuefleet.model import CiCheck, CiStatus, PrFeedback, PullRequest
 
 log = logging.getLogger("issuefleet.gitlab")
@@ -31,6 +31,9 @@ _PENDING_STATES = frozenset(
 # benign; canceled/manual are human/superseded stops, not code failures, so
 # they're left out to avoid false alarms (mirrors the GitHub forge's choices).
 _FAILING_STATES = frozenset({"failed"})
+
+_PAGE_SIZE = 100
+_MAX_PAGES = 100
 
 
 def _to_pr(d: dict) -> PullRequest:
@@ -74,7 +77,10 @@ def _to_pr(d: dict) -> PullRequest:
 
 
 class GitlabForge:
-    def __init__(self, token, slug: str, host: str = "gitlab.com", transport=urllib_transport):
+    def __init__(
+        self, token, slug: str, host: str = "gitlab.com",
+        transport=urllib_transport_with_headers,
+    ):
         """token: a PAT string (personal, group, or project access token), or a
         zero-arg callable returning a current token. slug: the project path
         ``group/name`` (possibly nested). host: the instance hostname."""
@@ -100,6 +106,10 @@ class GitlabForge:
         return (f"https://{self.host}/{self.slug}.git", f"basic {basic}")
 
     def _call(self, method: str, path: str, payload: dict | None = None) -> dict | list:
+        return self._response(method, path, payload).data
+
+    def _response(self, method: str, path: str, payload: dict | None = None) -> JsonResponse:
+        """The call's body and response headers."""
         return self.transport(
             method,
             f"{self.api_root}{path}",
@@ -116,6 +126,33 @@ class GitlabForge:
 
     def _mr(self, path: str = "") -> str:
         return f"/projects/{self.project_id}/merge_requests{path}"
+
+    def _paged(self, path: str) -> list:
+        """Every item of a list endpoint, following GitLab's next-page number.
+
+        Some endpoints filter entries after paginating, so a short — even an
+        empty — page can still have a successor; body length is only the
+        fallback where a transport or server hides the header. Only the next
+        page of the same endpoint is followed: a header naming anything else is
+        an error rather than a URL to fetch.
+        """
+        sep = "&" if "?" in path else "?"
+        url, out, page = f"{self.api_root}{path}", [], 1
+        for _ in range(_MAX_PAGES):
+            response = self._response("GET", f"{path}{sep}per_page={_PAGE_SIZE}&page={page}")
+            if not isinstance(response.data, list):
+                raise ApiError(502, url, f"expected a list, got {type(response.data).__name__}")
+            out.extend(response.data)
+            nxt = response.headers.get("x-next-page")
+            if nxt is None:
+                if len(response.data) < _PAGE_SIZE:
+                    return out
+            elif not nxt.strip():
+                return out
+            elif nxt.strip() != str(page + 1):
+                raise ApiError(502, url, "invalid GitLab next-page header")
+            page += 1
+        raise ApiError(502, url, f"more than {_MAX_PAGES} pages of results")
 
     # -- Forge port --------------------------------------------------------
 
@@ -156,7 +193,7 @@ class GitlabForge:
         with a path), the rest are plain comments. System notes (label changes,
         pipeline events, …) are dropped — they aren't feedback to act on."""
         out: list[PrFeedback] = []
-        for n in self._call("GET", self._mr(f"/{number}/notes?sort=asc&order_by=created_at")):
+        for n in self._paged(self._mr(f"/{number}/notes?sort=asc&order_by=created_at")):
             if n.get("system"):
                 continue
             author = (n.get("author") or {}).get("username", "?")
@@ -195,6 +232,31 @@ class GitlabForge:
         except ApiError as e:
             log.debug("gitlab: 👀 award_emoji on %s failed: %s", feedback_id, e)
             return False
+
+    def reply_to_feedback(self, number: int, feedback: PrFeedback, body: str) -> str | None:
+        """Every note belongs to a discussion, and posting into it threads the
+        reply. The notes endpoint doesn't expose the discussion id, so the
+        discussion is found by note id. Returns the new note's feedback id.
+
+        A malformed id raises ApiError like any other forge failure: an unexpected
+        exception type would escape the relay's retry accounting and leave the
+        message pending forever."""
+        prefix, _, raw = feedback.id.partition("-")
+        path = self._mr(f"/{number}/discussions")
+        try:
+            note_id = int(raw)
+        except ValueError:
+            raise ApiError(
+                400, f"{self.api_root}{path}", f"malformed feedback id {feedback.id!r}"
+            ) from None
+        for d in self._paged(path):
+            if any(n.get("id") == note_id for n in d.get("notes") or []):
+                posted = self._call(
+                    "POST", self._mr(f"/{number}/discussions/{d['id']}/notes"), {"body": body}
+                )
+                new_id = (posted or {}).get("id")
+                return f"{prefix}-{new_id}" if new_id else None
+        raise ApiError(404, f"{self.api_root}{path}", f"no discussion holds note {note_id}")
 
     def ci_status(self, ref: str) -> CiStatus:
         """Fold the commit-statuses endpoint for ``ref`` into one verdict. It

@@ -22,6 +22,7 @@ from issuefleet import attachments as attachments_mod
 from issuefleet import marker, MARKER_PREFIX
 from issuefleet import config as config_mod
 from issuefleet import gitops
+from issuefleet import security
 from issuefleet import worker as worker_mod
 from issuefleet.config import Config, ProjectConfig
 from issuefleet.github import parse_repo_slug
@@ -32,6 +33,7 @@ from issuefleet.model import (
     PHASE_CRASHED,
     PHASE_RELEASED,
     Issue,
+    PrFeedback,
     WorkerRecord,
     new_upstream_link,
     now_iso,
@@ -40,7 +42,9 @@ from issuefleet.registry import Registry
 
 log = logging.getLogger("issuefleet")
 
-_SEEN_IDS_CAP = 1000
+# Forge answers that mean the write will never be accepted: a locked or archived
+# conversation, a deleted comment, a token without write scope.
+_PERMANENT_FORGE_STATUSES = frozenset({401, 403, 404, 410})
 
 # A poll-claimed worker (missed session webhook) probes Linear for its agent
 # session this many ticks before giving up — enough to cover session-creation
@@ -865,7 +869,7 @@ class Reconciler:
             lines.append(f"{rec.issue_key}: would ingest {len(inbound)} new Linear comment(s)")
         if rec.pr_number is not None:
             forge = self.forges[project.name]
-            new_fb = [f for f in forge.pr_feedback(rec.pr_number) if f.id not in rec.seen_feedback_ids]
+            new_fb = self._new_pr_feedback(rec, forge)
             if new_fb:
                 lines.append(f"{rec.issue_key}: would forward {len(new_fb)} PR feedback item(s)")
             pr = forge.get_pr(rec.pr_number)
@@ -1107,6 +1111,8 @@ class Reconciler:
                     self._handle_upstream_checkout(rec, project, mailbox, msg)
                 elif msg.kind == "upstream_pr":
                     self._handle_upstream_pr(rec, project, mailbox, msg)
+                elif msg.kind == "pr_reply":
+                    self._handle_pr_reply(rec, project, mailbox, msg)
                 elif msg.kind == "ready":
                     self._handle_ready(rec, project, mailbox, msg)
                 else:
@@ -1116,7 +1122,97 @@ class Reconciler:
                 # Leave this and everything after it pending, preserving
                 # order; next tick retries (dedupe via marker).
                 log.exception("worker %s: relay of %s failed; will retry", rec.issue_key, msg.kind)
-                return
+                # A pr_reply is relayed to the PR thread rather than the Linear
+                # stream, so a failure must not hold the ordered relays behind it.
+                if msg.kind != "pr_reply":
+                    return
+
+    def _handle_pr_reply(
+        self, rec: WorkerRecord, project: ProjectConfig, mailbox: Mailbox, msg
+    ) -> None:
+        """Post a worker's reply where the feedback was left. The posted comment's
+        id is recorded as seen, which is what keeps the reply from being read back
+        as new feedback; the marker the body ends with identifies it if we crash
+        between posting and recording. The text is scanned like a `ready` diff
+        before it is published."""
+        to = msg.payload.get("to", "")
+        text = (msg.payload.get("text") or "").strip()
+        if rec.pr_number is None:
+            return self._reject_reply(mailbox, msg, "you have no open PR, so there is nothing to reply on")
+        if not text:
+            return self._reject_reply(mailbox, msg, "the reply was empty")
+        forge = self.forges[project.name]
+        body = f"🤖 {text}\n\n{marker(msg.id)}"
+        feedback = forge.pr_feedback(rec.pr_number)
+        already = next((fb for fb in feedback if fb.body.rstrip().endswith(marker(msg.id))), None)
+        if already is not None:
+            self._remember_reply(rec, already.id)
+            mailbox.archive_outbox(msg, receipt={"deduped": True})
+            return
+        target = next((fb for fb in feedback if fb.id == to), None)
+        if target is None:
+            return self._reject_reply(
+                mailbox, msg,
+                f"PR #{rec.pr_number} has no feedback with that id; use the id shown with the message",
+            )
+        if not self._reply_security_ok(rec, mailbox, msg, text):
+            return
+        try:
+            posted = forge.reply_to_feedback(rec.pr_number, target, body)
+        except ApiError as e:
+            if e.status not in _PERMANENT_FORGE_STATUSES:
+                raise
+            log.warning("worker %s: forge refused a reply (%s)", rec.issue_key, e)
+            return self._reject_reply(mailbox, msg, f"the forge refused it ({e.status})")
+        self._remember_reply(rec, posted)
+        mailbox.archive_outbox(msg, receipt={"relayed": "forge", "to": to})
+
+    def _remember_reply(self, rec: WorkerRecord, feedback_id: str | None) -> None:
+        """Record a reply we posted, so a later read never sees it as new."""
+        if feedback_id and feedback_id not in rec.seen_feedback_ids:
+            rec.seen_feedback_ids.append(feedback_id)
+            rec.touch()
+            self.registry.save()
+
+    def _reject_reply(self, mailbox: Mailbox, msg, reason: str) -> None:
+        mailbox.ensure().put_inbox(
+            "reply",
+            {"author": "issuefleet",
+             "text": f"Your reply to `{msg.payload.get('to', '?')}` was not posted: {reason}."},
+        )
+        mailbox.archive_outbox(msg, receipt={"rejected": reason})
+
+    def _reply_security_ok(self, rec: WorkerRecord, mailbox: Mailbox, msg, text: str) -> bool:
+        """Fails closed in block mode, like `ready`: a reply is public text."""
+        mode = self.cfg.security.mode
+        try:
+            verdict = self.gate.scan(security.as_diff("reply", text))
+        except Exception:
+            log.exception("worker %s: security scan of a reply failed to run", rec.issue_key)
+            if mode == "warn":
+                return True
+            self._reject_reply(mailbox, msg, "the security gate could not scan it; send it again")
+            return False
+        if verdict.ok and not verdict.truncated:
+            return True
+        if mode == "warn":
+            log.warning("worker %s: security gate flagged a reply (warn mode)", rec.issue_key)
+            return True
+        if verdict.ok:
+            log.warning("worker %s: reply too long to scan (%d bytes)", rec.issue_key, len(text))
+            self._reject_reply(
+                mailbox, msg, "it is too long for the security gate to scan; send a shorter one"
+            )
+            return False
+        log.warning("worker %s: security gate BLOCKED a reply (%d finding(s))",
+                    rec.issue_key, len(verdict.findings))
+        found = "\n".join(f.describe() for f in verdict.findings)
+        self._reject_reply(
+            mailbox, msg,
+            "it appears to contain a credential. Findings (values redacted):\n"
+            f"{found}\nRewrite it without the secret and send it again",
+        )
+        return False
 
     def _handle_file_issue(self, rec: WorkerRecord, mailbox: Mailbox, msg) -> None:
         """Relay a worker's request to author a new Linear issue. Dedupe is by
@@ -1693,18 +1789,31 @@ class Reconciler:
             log.warning("worker %s: branch %s %s vs origin", rec.issue_key, rec.branch, status)
         self._sync_note(mailbox, rec.branch, status)
 
+    def _new_pr_feedback(self, rec: WorkerRecord, forge) -> list[PrFeedback]:
+        """Feedback this worker has not been shown, our own replies excluded.
+
+        The forge returns the PR's whole history, so every delivered id is kept
+        for the worker's lifetime: evicting one makes old feedback new again. Our
+        own replies are in that history; the relay runs first in the same tick and
+        records each one's id, so they are never new."""
+        seen = set(rec.seen_feedback_ids)
+        new_feedback = []
+        for fb in forge.pr_feedback(rec.pr_number):
+            if fb.id in seen:
+                continue
+            seen.add(fb.id)
+            new_feedback.append(fb)
+        return new_feedback
+
     def _check_pr(self, rec: WorkerRecord, project: ProjectConfig, mailbox: Mailbox) -> None:
         if rec.pr_number is None:
             return
         forge = self.forges[project.name]
 
-        new_feedback = []
-        for fb in forge.pr_feedback(rec.pr_number):
-            if fb.id in rec.seen_feedback_ids:
-                continue
-            new_feedback.append(fb)
+        new_feedback = self._new_pr_feedback(rec, forge)
         for fb in new_feedback:
             payload = {
+                "id": fb.id,
                 "reviewer": fb.reviewer,
                 "kind": fb.kind,
                 "path": fb.path,
@@ -1721,7 +1830,6 @@ class Reconciler:
             except Exception:
                 log.exception("forge feedback ack failed (%s #%d)", fb.id, rec.pr_number)
         if new_feedback:
-            rec.seen_feedback_ids = rec.seen_feedback_ids[-_SEEN_IDS_CAP:]
             rec.touch()
             self.registry.save()
 
@@ -1862,7 +1970,6 @@ class Reconciler:
             },
         )
         rec.seen_feedback_ids.append(sentinel)
-        rec.seen_feedback_ids = rec.seen_feedback_ids[-_SEEN_IDS_CAP:]
         rec.touch()
         self.registry.save()
 

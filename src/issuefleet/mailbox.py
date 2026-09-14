@@ -41,7 +41,7 @@ _NAME_RE = re.compile(r"^(\d{6})-([a-z_]+)-([0-9a-f]+)\.json$")
 # asks the orchestrator to set up a nested clone of a sibling fleet project,
 # then to push it and open a PR (the worker has no forge credential of its own).
 OUTBOX_KINDS = (
-    "status", "question", "ready", "file_issue", "ack",
+    "status", "question", "ready", "file_issue", "ack", "pr_reply",
     "upstream_checkout", "upstream_pr",
 )
 INBOX_KINDS = (
