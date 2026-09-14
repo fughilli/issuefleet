@@ -29,6 +29,35 @@ from issuefleet.agent_runtime.{module} import main
 sys.exit(main())
 """
 
+OVERLAY_NAME = ".claude-container-overlay"
+
+_PYTHON_OVERLAY = """\
+# issuefleet: turnloop needs python3 inside the agent container
+RUN if command -v apk >/dev/null 2>&1; then \\
+      apk add --no-cache python3; \\
+    elif command -v apt-get >/dev/null 2>&1; then \\
+      apt-get update \\
+      && apt-get install -y --no-install-recommends python3 \\
+      && rm -rf /var/lib/apt/lists/*; \\
+    else \\
+      echo "issuefleet: no apk/apt-get to install python3" >&2; exit 1; \\
+    fi
+"""
+
+
+def ensure_container_overlay(worktree: Path) -> bool:
+    """Write a default OVERLAY_NAME Dockerfile fragment when the worktree
+    has none: stock images lack the python3 turnloop's shebang needs, and
+    the launcher builds a file by this exact name into a content-hash-tagged
+    image. Repo-provided overlays (file, or directory in the older layout)
+    are never clobbered. Returns True when this call created the file, so
+    the caller can git-exclude exactly what issuefleet wrote."""
+    overlay = Path(worktree) / OVERLAY_NAME
+    if overlay.exists():
+        return False
+    overlay.write_text(_PYTHON_OVERLAY)
+    return True
+
 
 def stage_runtime(bin_dir: Path) -> None:
     """Copy the issuefleet package (py sources only) into <agent>/bin and
