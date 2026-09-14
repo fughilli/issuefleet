@@ -55,3 +55,22 @@ jobs:
             ghcr.io/${{ github.repository }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  worker-image:
+    # Validate both runtimes on the supported worker architectures. This
+    # image is opt-in and is built locally by operators; CI does not publish it.
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/bake-action@v6
+        with:
+          source: .
+          files: deploy/worker/docker-bake.hcl
+          targets: worker
+          set: |
+            *.platform=linux/amd64,linux/arm64
+            worker.cache-from=type=gha,scope=worker
+            worker.cache-to=type=gha,scope=worker,mode=max

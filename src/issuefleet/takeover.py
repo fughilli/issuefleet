@@ -34,6 +34,7 @@ adopt — so the tool reminds the operator to commit before they exit.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -52,7 +53,7 @@ from issuefleet.model import (
     WorkerRecord,
 )
 from issuefleet.registry import Registry
-from issuefleet.runner import TmuxRunner
+from issuefleet.runner import RunnerError, TmuxRunner, worker_state
 
 log = logging.getLogger("issuefleet.takeover")
 
@@ -127,20 +128,34 @@ def dashboard_url(cfg: Config) -> str:
 def interactive_command(
     rec: WorkerRecord, cfg: Config, session_uuid: str, resume: bool
 ) -> list[str]:
-    """The host command for the operator's interactive session: the same
-    launcher, config dir, and sibling git mounts a worker gets, but running a
-    plain interactive ``claude`` (resuming the worker's session) instead of the
-    headless turnloop."""
-    cmd = [cfg.claude_container, "-w", rec.worktree]
-    if cfg.container_config_dir is not None:
-        cmd += ["-c", str(cfg.container_config_dir)]
-    cmd += list(cfg.launcher_args)
-    cmd += TmuxRunner._sibling_mount_args(rec, cfg)
-    inner = ["claude"]
-    if resume and session_uuid:
-        # Same session id + same config dir => the worker's conversation resumes.
-        inner += ["--resume", session_uuid]
-    return cmd + inner
+    """Resume the worker's own runtime and conversation, never a global default."""
+    state = worker_state(rec)
+    inner = [state.runtime]
+    if state.runtime == "codex":
+        # Codex allocates the thread ID. A generated Claude UUID, --last, or a
+        # fresh session would silently hand the operator the wrong conversation.
+        if not state.runtime_session_id:
+            raise TakeoverError(
+                f"{rec.issue_key}: Codex has no recorded thread ID; an exact takeover "
+                "is unavailable until the worker starts a Codex session"
+            )
+        inner += ["resume", state.runtime_session_id]
+    elif state.runtime == "claude":
+        if resume and session_uuid:
+            inner += ["--resume", session_uuid]
+    else:
+        raise TakeoverError(f"unsupported worker runtime {state.runtime!r}")
+    if state.model:
+        inner += ["--model", state.model]
+    if state.reasoning_effort:
+        if state.runtime == "codex":
+            inner += ["-c", f"model_reasoning_effort={json.dumps(state.reasoning_effort)}"]
+        else:
+            inner += ["--effort", state.reasoning_effort]
+    # Headless flags (--json, --output-format, etc.) are owned by the runtime
+    # adapter. Its configured extra arguments must work for both interfaces.
+    inner += list(state.runtime_args)
+    return TmuxRunner.launcher_command(rec, cfg, inner)
 
 
 def _find(registry: Registry, key: str) -> WorkerRecord | None:
@@ -176,6 +191,7 @@ def run(
     git: Gitops | None = None,
     control: DaemonControl | None = None,
     launch=None,
+    stop=None,
     sleep=time.sleep,
     timeout_s: float = POLL_TIMEOUT_S,
     interval_s: float = POLL_INTERVAL_S,
@@ -185,6 +201,7 @@ def run(
     injectable so the whole flow is testable with no daemon, container, or git."""
     git = git or Gitops()
     launch = launch or _run_foreground
+    stop = stop or TmuxRunner(cfg.state_dir / "logs").stop
     registry = Registry(cfg.state_dir)
     rec = _find(registry, key)
     if rec is None:
@@ -231,7 +248,7 @@ def run(
         cmd = interactive_command(rec, cfg, rec.session_uuid, resume)
         print(
             "\nDropping into an interactive session"
-            + (" (resuming the worker's Claude conversation)" if resume else "")
+            + (f" (resuming the worker's {rec.runtime} conversation)" if resume else "")
             + f".\n  branch:  {rec.branch}\n  worktree: {worktree}\n"
             "COMMIT anything you want to keep before you exit — only committed work "
             "returns to the fleet; the worktree is rebuilt on adopt.\n"
@@ -241,6 +258,13 @@ def run(
         # 3. Hand the branch back — always, even on Ctrl-C, so it never strands
         #    in 'released'. The daemon rebuilds the worktree on adopt, so remove
         #    ours first (a leftover worktree would block adopt's re-add).
+        try:
+            stop(rec)
+        except RunnerError as exc:
+            raise TakeoverError(
+                f"{key}: could not confirm the interactive container stopped; "
+                f"leaving {worktree} and the released worker intact: {exc}"
+            ) from exc
         print(f"\nAdopting {rec.branch} back into the fleet…")
         try:
             git.remove_worktree(Path(rec.repo), worktree, rec.branch)

@@ -120,6 +120,20 @@ class AgentLoopTest(unittest.TestCase):
         with self.assertRaisesRegex(AgentError, "failed"):
             self.run_with(t)
 
+    def test_failure_after_a_tool_marks_request_as_unsafe_to_replay(self):
+        calls = []
+        t = FakeTransport(tool_turn(("tu_1", "echo", {})), ApiError(500, "u", "boom"))
+        with self.assertRaises(AgentError) as caught:
+            self.run_with(t, [echo_tool(calls)])
+        self.assertTrue(caught.exception.tools_executed)
+        self.assertEqual(calls, [{}])
+
+    def test_default_provider_and_budget_are_backward_compatible(self):
+        t = FakeTransport(text_turn("hi"))
+        self.run_with(t)
+        self.assertEqual(t.bodies[0]["model"], "claude-opus-5")
+        self.assertEqual(t.bodies[0]["max_tokens"], 4096)
+
     def test_turn_cap_returns_last_text_instead_of_spinning(self):
         loops = [
             {"content": [{"type": "text", "text": "working"},

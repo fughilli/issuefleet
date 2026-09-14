@@ -1,8 +1,8 @@
 """`issuefleet doctor` — tell the operator precisely what is missing.
 
-Safe and side-effect-free: every check is a read (filesystem stats, tool
-lookups, API queries). Dependencies are injectable so the checks are
-testable offline; when not injected, real clients are built from config.
+Checks read filesystem metadata, tool versions and APIs. Explicit worker
+images are probed in disposable containers without network or host mounts.
+Dependencies are injectable for offline coverage.
 """
 
 from __future__ import annotations
@@ -10,7 +10,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +27,7 @@ from issuefleet.gitops import Gitops
 from issuefleet.linear import LinearClient, LinearTracker, client_from_config
 from issuefleet.reconcile import Reconciler
 from issuefleet.registry import Registry
+from issuefleet.runner import worker_runtime, worker_codex_home
 
 OK, WARN, FAIL = "ok", "warn", "fail"
 _ICON = {OK: "✓", WARN: "⚠", FAIL: "✗"}
@@ -49,6 +52,13 @@ def _writable_ancestor(path: Path) -> bool:
     return os.access(p, os.W_OK)
 
 
+def _worker_runtimes(cfg: Config) -> set[str]:
+    """Check configured workers and still-persisted workers after a config edit."""
+    runtimes = {runtime.runtime for runtime in cfg.configured_worker_runtimes()}
+    runtimes.update(worker_runtime(rec) for rec in Registry(cfg.state_dir).all())
+    return runtimes
+
+
 def _check_tools(cfg: Config) -> list[Check]:
     out = []
     v = sys.version_info
@@ -58,13 +68,16 @@ def _check_tools(cfg: Config) -> list[Check]:
     )
     for tool, why, severity in (
         ("tmux", "workers run in detached tmux sessions", FAIL),
-        ("docker", "claude-container needs it", FAIL),
+        ("docker", "worker containers need it", FAIL),
         (cfg.claude_container, "the agent runner", FAIL),
         ("git", "worktrees and pushes", FAIL),
-        ("claude", "only needed inside containers; harmless if absent on the host", WARN),
     ):
         path = shutil.which(tool)
         out.append(Check(OK if path else severity, tool, path or f"not on PATH — {why}"))
+    for runtime in sorted(_worker_runtimes(cfg)):
+        path = shutil.which(runtime)
+        out.append(Check(OK if path else WARN, f"{runtime} (host)",
+                         path or "only required inside the worker image"))
     return out
 
 
@@ -75,14 +88,12 @@ def _check_launcher_flags(cfg: Config) -> list[Check]:
     cross-project sibling mounting is active (FUG-115): the runner emits a
     same-path `--mount <sibling-repo>/.git` per sibling, so a launcher that
     doesn't know the flag would break every worker in a multi-project fleet."""
-    needs_mount = cfg.mount_sibling_git and len(cfg.projects) > 1
+    needs_mount = (cfg.mount_sibling_git and len(cfg.projects) > 1) or "codex" in _worker_runtimes(cfg)
     if not cfg.launcher_args and not needs_mount:
         return []
     launcher = shutil.which(cfg.claude_container)
     if launcher is None:
         return []  # the tools check already failed this
-    import subprocess
-
     try:
         proc = subprocess.run(
             [cfg.claude_container, "--help"], capture_output=True, text=True, timeout=15
@@ -92,6 +103,8 @@ def _check_launcher_flags(cfg: Config) -> list[Check]:
         return [Check(WARN, "launcher flags", f"could not run {cfg.claude_container} --help: {e}")]
     out = []
     for flag in cfg.launcher_args:
+        if not flag.startswith("-"):
+            continue  # an option's argument, not another flag
         name = flag.split("=")[0]
         if name in help_text:
             out.append(Check(OK, f"launcher flag {name}"))
@@ -106,16 +119,15 @@ def _check_launcher_flags(cfg: Config) -> list[Check]:
             )
     if needs_mount:
         if "--mount" in help_text:
-            out.append(Check(OK, "launcher flag --mount (sibling mounts)"))
+            out.append(Check(OK, "launcher flag --mount (runtime/sibling mounts)"))
         else:
             out.append(
                 Check(
                     FAIL,
                     "launcher flag --mount",
-                    f"[agent] mount_sibling_git is on and this is a multi-project fleet, so "
-                    f"workers launch with --mount <sibling>/.git — but {cfg.claude_container} "
-                    "--help has no --mount. Upgrade the launcher, or set mount_sibling_git = "
-                    "false to disable cross-project checkouts",
+                    f"Codex authentication or sibling repositories require same-path "
+                    f"mounts, but {cfg.claude_container} --help has no --mount. "
+                    "Upgrade the launcher before starting these workers",
                 )
             )
     return out
@@ -146,14 +158,14 @@ def _check_worker_runtime(cfg: Config) -> list[Check]:
     daemon itself runs containerized (observed live on the first stack)."""
     out = []
     if hasattr(os, "geteuid"):
-        if os.geteuid() == 0:
+        if os.geteuid() == 0 and "claude" in _worker_runtimes(cfg):
             out.append(Check(FAIL, "running as root",
                              "workers inherit this uid via the launcher, and claude "
                              "refuses bypassPermissions as root — every turn fails "
                              "instantly. Run the compose stack via the bazel targets "
                              "(env.sh exports your uid) or set `user:` yourself"))
         else:
-            out.append(Check(OK, f"running as uid {os.geteuid()}", "workers inherit a non-root uid"))
+            out.append(Check(OK, f"running as uid {os.geteuid()}", "workers inherit this uid"))
     sock = Path("/var/run/docker.sock")
     if sock.exists():
         if os.access(sock, os.W_OK):
@@ -166,6 +178,8 @@ def _check_worker_runtime(cfg: Config) -> list[Check]:
 
 
 def _check_container_settings(cfg: Config) -> list[Check]:
+    if "claude" not in _worker_runtimes(cfg):
+        return []
     config_dir = cfg.container_config_dir or Path("~/.config/claude-container/config").expanduser()
     settings = config_dir / "settings.json"
     label = f"container settings {settings}"
@@ -181,6 +195,86 @@ def _check_container_settings(cfg: Config) -> list[Check]:
     return [Check(FAIL, label,
                   f"permissions.defaultMode={mode!r} — headless turns will hang on the first "
                   "permission prompt; expected 'bypassPermissions'")]
+
+
+def _check_codex_home(cfg: Config) -> list[Check]:
+    if "codex" not in _worker_runtimes(cfg):
+        return []
+    homes = set()
+    if any(runtime.runtime == "codex" for runtime in cfg.configured_worker_runtimes()):
+        homes.add(Path(cfg.codex_home).resolve())
+    homes.update(worker_codex_home(rec, cfg) for rec in Registry(cfg.state_dir).all()
+                 if worker_runtime(rec) == "codex")
+    return [check for home in sorted(homes) for check in _check_one_codex_home(home)]
+
+
+def _check_one_codex_home(home: Path) -> list[Check]:
+    auth = home / "auth.json"
+    out = []
+    if not home.is_dir() or not os.access(home, os.W_OK):
+        out.append(Check(FAIL, "Codex worker home", f"{home} must exist and be writable; "
+                         "see docs/CODEX_RUNTIME.md for dedicated worker authentication"))
+    else:
+        out.append(Check(OK, "Codex worker home", str(home)))
+    if not auth.is_file() or not os.access(auth, os.R_OK):
+        out.append(Check(FAIL, "Codex worker authentication",
+                         f"{auth} missing or unreadable; log in with CODEX_HOME pointing "
+                         "at the worker home and cli_auth_credentials_store=\"file\""))
+    else:
+        out.append(Check(OK, "Codex worker authentication", "auth.json present; "
+                         "account/model access must be verified with a live turn"))
+        if not creds.file_permissions_ok(auth):
+            out.append(Check(WARN, "Codex auth permissions", f"chmod 600 {auth}"))
+    return out
+
+
+def _check_container_runtimes(cfg: Config) -> list[Check]:
+    """Probe each runtime in an explicitly configured base image.
+
+    Never launch a project overlay, startup hook or service for a diagnostic.
+    The disposable probe has no network, workspace, credentials or writable
+    root filesystem, and cannot pull an image implicitly.
+    """
+    runtimes = _worker_runtimes(cfg)
+    if not cfg.container_image:
+        return [Check(WARN, f"{runtime} container runtime",
+                      "unverified: set [agent] container_image to probe the base image; "
+                      "see docs/CODEX_RUNTIME.md") for runtime in sorted(runtimes)]
+    if not shutil.which("docker"):
+        return []  # tools check already reports the cause
+    out = []
+    for runtime in sorted(runtimes):
+        label = f"{runtime} container runtime"
+        probe_name = f"issuefleet-doctor-{uuid.uuid4().hex}"
+        try:
+            proc = subprocess.run(
+                ["docker", "run", "--rm", "--name", probe_name,
+                 "--pull=never", "--network=none", "--read-only",
+                 "--cap-drop=ALL", "--security-opt=no-new-privileges", "--entrypoint", runtime,
+                 cfg.container_image, "--version"],
+                capture_output=True, text=True, timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            # Killing the Docker client alone can leave its container running.
+            try:
+                subprocess.run(["docker", "rm", "--force", probe_name],
+                               capture_output=True, timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            out.append(Check(FAIL, label, f"{cfg.container_image} runtime probe timed out"))
+            continue
+        except OSError:
+            out.append(Check(FAIL, label, f"could not probe {cfg.container_image}; "
+                             "verify Docker is reachable and the image is installed"))
+            continue
+        if proc.returncode:
+            out.append(Check(FAIL, label, f"{runtime} --version failed in "
+                             f"{cfg.container_image}; build an image containing this runtime "
+                             "(see docs/CODEX_RUNTIME.md)"))
+        else:
+            out.append(Check(OK, label, f"{cfg.container_image}: {proc.stdout.strip()} "
+                             "(base image; project overlays are not executed)"))
+    return out
 
 
 def _check_dirs(cfg: Config) -> list[Check]:
@@ -241,7 +335,7 @@ def _check_fleet_manager(cfg: Config) -> list[Check]:
         out.append(Check(OK, "sigbot key", f"resolves ({src})"))
     except creds.CredentialError as e:
         out.append(Check(FAIL, "sigbot key", str(e)))
-    # The sigbot integration and the Anthropic advisor call are live-only; the
+    # The sigbot integration and advisor call are live-only; the
     # daemon speaks to them at runtime. Flag what's needed, don't dial out here.
     try:
         import sigbot_client  # noqa: F401
@@ -250,12 +344,30 @@ def _check_fleet_manager(cfg: Config) -> list[Check]:
         out.append(Check(FAIL, "sigbot-client", "not importable — run via `bazel run "
                          "//:issuefleet` (the lock provides it), or `pip install "
                          "sigbot-client` into this interpreter"))
-    if fm.advisor == "claude":
+    if fm.provider == "openai":
+        if creds.resolve_openai_key(cfg):
+            out.append(Check(OK, "manager key", "OpenAI API key resolves"))
+        else:
+            out.append(Check(FAIL, "manager key", f"provider=openai requires "
+                             f"${cfg.openai_api_key_env} or {cfg.openai_api_key_file}; "
+                             "Codex ChatGPT login is separate from API authentication"))
+    elif creds.resolve_anthropic_key(cfg):
+        out.append(Check(OK, "manager key", "Anthropic API key resolves"))
+    else:
+        out.append(Check(WARN, "manager key", "no Anthropic key; using the legacy "
+                         "scripted manager instead of model orchestration"))
+    if fm.advisor in ("claude", "anthropic"):
         if creds.resolve_anthropic_key(cfg):
             out.append(Check(OK, "advisor key", "Anthropic key resolves"))
         else:
             out.append(Check(WARN, "advisor key", "advisor=claude but no ANTHROPIC_API_KEY / "
                              "~/.config/issuefleet/anthropic.key — will escalate everything"))
+    elif fm.advisor == "openai":
+        if creds.resolve_openai_key(cfg):
+            out.append(Check(OK, "advisor key", "OpenAI API key resolves"))
+        else:
+            out.append(Check(WARN, "advisor key", "advisor=openai but no OpenAI API key "
+                             "resolves — will escalate everything"))
     return out
 
 
@@ -351,6 +463,39 @@ def _check_linear(cfg: Config, tracker) -> list[Check]:
     except Exception as e:
         out.append(Check(FAIL, "Linear API", str(e)))
         return out
+
+    if cfg.worker_profiles:
+        try:
+            labels = tracker.workspace_labels()
+            by_id = {label["id"]: label for label in labels}
+            group = by_id.get(cfg.profile_label_group_id)
+            if group is None or not group.get("isGroup"):
+                out.append(Check(
+                    FAIL, "Linear worker profile group",
+                    f"{cfg.profile_label_group_id!r} is not a workspace label group; "
+                    "run `issuefleet linear-labels`",
+                ))
+            else:
+                out.append(Check(
+                    OK, "Linear worker profile group",
+                    f"{group['name']} ({group['id']})",
+                ))
+            for profile in cfg.worker_profiles:
+                label = by_id.get(profile.label_id)
+                parent_id = (label.get("parent") or {}).get("id") if label else None
+                if label is None or label.get("isGroup") or parent_id != cfg.profile_label_group_id:
+                    out.append(Check(
+                        FAIL, f"worker profile {profile.name!r}",
+                        f"label {profile.label_id!r} is missing or outside the configured group",
+                    ))
+                else:
+                    out.append(Check(
+                        OK, f"worker profile {profile.name!r}",
+                        f"Linear label {label['name']!r} -> {profile.runtime.runtime}/"
+                        f"{profile.runtime.model}",
+                    ))
+        except Exception as e:
+            out.append(Check(FAIL, "Linear worker profiles", str(e)))
 
     for project in cfg.projects:
         try:
@@ -574,6 +719,8 @@ def run_doctor(
     checks += _check_launcher_flags(cfg)
     checks += _check_worker_env(cfg)
     checks += _check_container_settings(cfg)
+    checks += _check_codex_home(cfg)
+    checks += _check_container_runtimes(cfg)
     checks += _check_dirs(cfg)
     checks += _check_webhooks(cfg)
     checks += _check_dashboard(cfg)

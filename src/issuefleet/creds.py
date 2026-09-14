@@ -127,6 +127,17 @@ def resolve_anthropic_key(cfg: Config) -> str | None:
     )
 
 
+def resolve_openai_key(cfg: Config) -> str | None:
+    """Manager API credential. Independent of a worker's Codex login."""
+    return resolve_optional(cfg.openai_api_key_env, cfg.openai_api_key_file)
+
+
+def resolve_manager_key(cfg: Config) -> str | None:
+    if cfg.fleet_manager.provider == "openai":
+        return resolve_openai_key(cfg)
+    return resolve_anthropic_key(cfg)
+
+
 def github_auth_mode(cfg: Config) -> str:
     """'app' or 'token'. auto = app when the App ID is configured and its
     private key file exists, else fall back to a PAT."""

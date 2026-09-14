@@ -13,6 +13,16 @@ def now_iso() -> str:
 
 
 @dataclass
+class IssueLabel:
+    """A tracker label with stable identity and optional group metadata."""
+
+    id: str
+    name: str
+    group_id: str | None = None
+    group_name: str | None = None
+
+
+@dataclass
 class Issue:
     """A tracker issue, tracker-agnostic."""
 
@@ -29,6 +39,7 @@ class Issue:
     delegate_id: str | None = None  # Linear agents: delegation sets this, not assignee
     created_at: str = ""
     project_id: str | None = None  # Linear project UUID (session-claim routing)
+    label_details: list[IssueLabel] = field(default_factory=list)
 
     @property
     def open(self) -> bool:
@@ -171,6 +182,16 @@ class WorkerRecord:
     base_ref: str
     session_uuid: str  # Claude Code session id, pinned at creation
     tmux_session: str
+    # Snapshotted from agent state before release. Old records remain Claude;
+    # changing config never switches an existing conversation to a new runtime.
+    runtime: str = "claude"
+    model: str | None = None
+    reasoning_effort: str | None = None
+    runtime_args: list[str] = field(default_factory=list)
+    runtime_profile: str | None = None
+    runtime_source: str = "legacy-default"
+    runtime_session_id: str | None = None
+    runtime_home: str | None = None
     phase: str = PHASE_ACTIVE
     claim_origin: str = "poll"  # "poll" (label/assignee/state rule) | "session" | "adopt"
     # Set while phase == released: when the branch was handed to the operator,

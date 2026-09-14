@@ -26,12 +26,14 @@ class ApiError(Exception):
         super().__init__(f"HTTP {status} from {url}: {detail[:300]}")
 
 
-def urllib_transport(method: str, url: str, headers: dict, payload: dict | None) -> dict:
+def urllib_transport(
+    method: str, url: str, headers: dict, payload: dict | None, *, timeout_s: float = TIMEOUT_S
+) -> dict:
     data = json.dumps(payload).encode() if payload is not None else None
     headers = {"User-Agent": USER_AGENT, **headers}
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
             body = resp.read().decode()
     except urllib.error.HTTPError as e:
         raise ApiError(e.code, url, e.read().decode(errors="replace"))

@@ -85,7 +85,15 @@ class SnapshotTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_snapshot_reads_state_and_mailbox(self):
-        wt = provision_worktree(self.root / "wt", turns={1: [INIT_LINE], 2: [ASSISTANT_LINE]})
+        wt = provision_worktree(
+            self.root / "wt",
+            turns={1: [INIT_LINE], 2: [ASSISTANT_LINE]},
+            state={
+                "runtime": "codex", "model": "gpt-6-astra",
+                "reasoning_effort": "high", "runtime_profile": "codex-astra",
+                "runtime_source": "linear-label:Codex Astra",
+            },
+        )
         rec = make_record(wt, pr_number=7, pr_url="https://gh/pr/7", restarts=2)
         # A stub runner that never shells out to tmux.
         runner = TmuxRunner(log_dir=self.root / "logs")
@@ -98,6 +106,9 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(snap["pr_number"], 7)
         self.assertEqual(snap["restarts"], 2)
         self.assertIsNotNone(snap["last_activity_s"])
+        self.assertEqual(snap["reasoning_effort"], "high")
+        self.assertEqual(snap["runtime_profile"], "codex-astra")
+        self.assertEqual(snap["runtime_source"], "linear-label:Codex Astra")
 
     def test_snapshot_tolerates_missing_state(self):
         wt = (self.root / "bare")
@@ -113,6 +124,19 @@ class SnapshotTest(unittest.TestCase):
     def test_turn_files_sorted(self):
         wt = provision_worktree(self.root / "wt", turns={2: ["x"], 1: ["y"], 10: ["z"]})
         self.assertEqual(turn_files(wt / ".agent"), [1, 2, 10])
+
+    def test_retry_logs_are_visible_without_duplicate_turn_links(self):
+        wt = provision_worktree(self.root / "wt", turns={1: [INIT_LINE]})
+        retry = wt / ".agent" / "logs" / "turn-0001-retry-01.jsonl"
+        retry.write_text(ASSISTANT_LINE + "\n" + RESULT_LINE)
+        state_dir = self.root / "state"
+        Registry(state_dir).add(make_record(wt))
+        view = FleetView(state_dir)
+        self.assertEqual(view.turns("FUG-1"), [1])
+        events = view.transcript("FUG-1", 1)
+        self.assertEqual(events[-1]["kind"], "result")
+        self.assertTrue(any(e["kind"] == "text" for e in events))
+        self.assertIn(ASSISTANT_LINE, view.raw_turn("FUG-1", 1))
 
 
 class DiagnoseTest(unittest.TestCase):

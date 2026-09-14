@@ -3,6 +3,8 @@ session → adopt-back flow, driven against fakes for the daemon control channel
 git, and the interactive launcher — no container, no network, no real daemon."""
 
 import tempfile
+import base64
+import json
 import unittest
 from pathlib import Path
 
@@ -104,11 +106,12 @@ class TakeoverTest(unittest.TestCase):
         self.registry.add(rec)
         return rec
 
-    def run_takeover(self, key="FUG-5", *, control=None, launch=None):
+    def run_takeover(self, key="FUG-5", *, control=None, launch=None, stop=None):
         control = control or FakeControl(self.cfg.state_dir)
         launch = launch or Launcher()
         rc = takeover.run(
             self.cfg, key, git=self.git, control=control, launch=launch,
+            stop=stop or (lambda rec: None),
             sleep=lambda _s: None, timeout_s=3, interval_s=1,
         )
         return rc, control, launch
@@ -149,6 +152,35 @@ class TakeoverTest(unittest.TestCase):
         self.assertIn("claude", launch.cmd)
         self.assertNotIn("--resume", launch.cmd)
 
+    def test_codex_resumes_exact_persisted_thread_with_original_model(self):
+        rec = self.add_worker()
+        rec.runtime = "codex"
+        rec.model = "gpt-6-astra"
+        rec.reasoning_effort = "high"
+        rec.runtime_session_id = "0199abcd-1234-4321-1234-123456789abc"
+        self.registry.save()
+        _, control, launch = self.run_takeover()
+        payload = json.loads(base64.b64decode(launch.cmd[-1]))
+        self.assertEqual(payload["argv"], [
+            "codex", "resume", rec.runtime_session_id, "--model", "gpt-6-astra",
+            "-c", 'model_reasoning_effort="high"',
+        ])
+        self.assertEqual(payload["env"], {"CODEX_HOME": str(self.cfg.codex_home)})
+        self.assertNotIn(rec.session_uuid, payload["argv"])
+        self.assertNotIn("--last", payload["argv"])
+        self.assertEqual(control.calls, [("release", "FUG-5"), ("adopt", "FUG-5")])
+
+    def test_codex_missing_thread_fails_clearly_and_adopts_back(self):
+        rec = self.add_worker()
+        rec.runtime = "codex"
+        self.registry.save()
+        launch = Launcher()
+        control = FakeControl(self.cfg.state_dir)
+        with self.assertRaisesRegex(takeover.TakeoverError, "no recorded thread ID"):
+            self.run_takeover(control=control, launch=launch)
+        self.assertEqual(launch.calls, 0)
+        self.assertEqual(control.calls, [("release", "FUG-5"), ("adopt", "FUG-5")])
+
     # -- robustness --------------------------------------------------------
 
     def test_adopts_back_even_when_the_session_is_interrupted(self):
@@ -159,6 +191,20 @@ class TakeoverTest(unittest.TestCase):
         # The finally block still handed the branch back.
         self.registry.reload()
         self.assertEqual(self.registry.get("issue-5").phase, PHASE_ACTIVE)
+
+    def test_uncertain_container_stop_preserves_released_worktree(self):
+        from issuefleet.runner import RunnerError
+
+        self.add_worker()
+        control = FakeControl(self.cfg.state_dir)
+        def cannot_stop(rec):
+            raise RunnerError("Docker unavailable")
+        with self.assertRaisesRegex(takeover.TakeoverError, "released worker intact"):
+            self.run_takeover(control=control, stop=cannot_stop)
+        self.assertEqual(control.calls, [("release", "FUG-5")])
+        self.assertEqual(self.git.removed, [])
+        self.registry.reload()
+        self.assertEqual(self.registry.get("issue-5").phase, PHASE_RELEASED)
 
     def test_already_released_skips_the_release_step(self):
         self.add_worker(phase=PHASE_RELEASED, turns=2)

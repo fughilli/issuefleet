@@ -93,6 +93,9 @@ def provision(
     phase: str | None = None,
     siblings: list[dict] | None = None,
     attachments: list[str] | None = None,
+    project_name: str | None = None,
+    previous_state: TurnState | None = None,
+    runtime_selection=None,
 ) -> str:
     """Create/refresh the .agent dir. Idempotent: an existing state.json is
     preserved (re-adoption after an orchestrator restart must not reset the
@@ -105,7 +108,10 @@ def provision(
     (turns_taken > 0 makes the loop use ``--resume`` rather than re-create the
     session). Defaults reproduce the original fresh-claim behaviour.
 
-    Returns the worker's Claude session UUID.
+    ``previous_state`` restores the full runtime selection and conversation
+    identity from an archived worker, including Codex's provider-assigned ID.
+
+    Returns the worker's fleet session UUID (also its Claude conversation ID).
     """
     agent_dir = Path(worktree) / ".agent"
     bin_dir = agent_dir / "bin"
@@ -124,11 +130,20 @@ def provision(
     state_path = agent_dir / "state.json"
     if state_path.exists():
         return TurnState.load(agent_dir).session_uuid
-    state = TurnState(
+    selection = runtime_selection or config.runtime_for_issue(project_name, issue)
+    runtime = selection.runtime
+    state = previous_state or TurnState(
         session_uuid=session_uuid or str(uuid.uuid4()),
         turns_taken=turns_taken,
         max_auto_turns=config.max_auto_turns,
-        claude_args=list(config.claude_args),
+        claude_args=list(config.claude_args) if runtime.runtime == "claude" else [],
+        runtime=runtime.runtime,
+        model=runtime.model,
+        reasoning_effort=runtime.reasoning_effort,
+        runtime_args=list(runtime.args),
+        runtime_profile=selection.profile,
+        runtime_source=selection.source,
+        runtime_home=str(config.codex_home.resolve()) if runtime.runtime == "codex" else None,
     )
     if phase is not None:
         state.phase = phase
